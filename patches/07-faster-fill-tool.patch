@@ -1,0 +1,108 @@
+Krita Nova 07 - faster Fill tool
+
+1. Fast mode for default fills: "Use selection as boundary" is on by default, and
+   KisToolFill required it to be off for the fast (no-compositing) path, even though
+   it only matters with an active selection - which already disables fast mode. So
+   every default fill took the slow path: flood selection + selection copy + a
+   temporary layer + masked composite. Drop the redundant condition.
+2. Slow path (antialias, grow/feather, all-layers reference, opacity, patterns...):
+   KisFillPainter::fillColor()/fillPattern() painted the temporary layer over the
+   whole fill bounds (the entire image) on every click, although only the flood
+   selection's bounding rect is blitted. Fill only that rect.
+
+diff --git a/libs/image/kis_fill_painter.cc b/libs/image/kis_fill_painter.cc
+index a1dd03b..af182c3 100644
+--- a/libs/image/kis_fill_painter.cc
++++ b/libs/image/kis_fill_painter.cc
+@@ -263,12 +263,17 @@ void KisFillPainter::fillColor(int startX, int startY, KisPaintDeviceSP sourceDe
+     } else {
+         genericFillStart(startX, startY, sourceDevice);
+ 
+-        // Now create a layer and fill it
++        // Now create a layer and fill it. Krita Nova: only the area covered by
++        // the flood selection is ever blitted (see genericFillEnd()), so fill
++        // just that instead of the whole image/fill bounds.
+         KisPaintDeviceSP filled = device()->createCompositionSourceDevice();
+         Q_CHECK_PTR(filled);
+-        KisFillPainter painter(filled);
+-        painter.fillRect(0, 0, m_width, m_height, paintColor());
+-        painter.end();
++        const QRect fillArea = filledAreaRect();
++        if (!fillArea.isEmpty()) {
++            KisFillPainter painter(filled);
++            painter.fillRect(fillArea, paintColor());
++            painter.end();
++        }
+ 
+         genericFillEnd(filled);
+     }
+@@ -278,16 +283,31 @@ void KisFillPainter::fillPattern(int startX, int startY, KisPaintDeviceSP source
+ {
+     genericFillStart(startX, startY, sourceDevice);
+ 
+-    // Now create a layer and fill it
++    // Now create a layer and fill it (only where the flood selection is; the
++    // pattern is placed in absolute coordinates, so the pixels are identical)
+     KisPaintDeviceSP filled = device()->createCompositionSourceDevice();
+     Q_CHECK_PTR(filled);
+-    KisFillPainter painter(filled);
+-    painter.fillRectNoCompose(QRect(0, 0, m_width, m_height), pattern(), patternTransform);
+-    painter.end();
++    const QRect fillArea = filledAreaRect();
++    if (!fillArea.isEmpty()) {
++        KisFillPainter painter(filled);
++        painter.fillRectNoCompose(fillArea, pattern(), patternTransform);
++        painter.end();
++    }
+ 
+     genericFillEnd(filled);
+ }
+ 
++QRect KisFillPainter::filledAreaRect() const
++{
++    // The flood selection's bounds, limited to the fill bounds. genericFillEnd()
++    // blits exactly m_fillSelection->selectedExactRect() (or a part of it).
++    QRect rc = m_fillSelection ? m_fillSelection->selectedExactRect() : QRect();
++    if (m_width > 0 && m_height > 0) {
++        rc &= QRect(0, 0, m_width, m_height);
++    }
++    return rc;
++}
++
+ void KisFillPainter::genericFillStart(int startX, int startY, KisPaintDeviceSP sourceDevice)
+ {
+     Q_ASSERT(m_width > 0);
+diff --git a/libs/image/kis_fill_painter.h b/libs/image/kis_fill_painter.h
+index 57d27ef..f7232ac 100644
+--- a/libs/image/kis_fill_painter.h
++++ b/libs/image/kis_fill_painter.h
+@@ -442,6 +442,9 @@ protected:
+     void genericFillEnd(KisPaintDeviceSP filled);
+ 
+ private:
++    /// Bounds of the current flood selection within the fill bounds (Krita Nova)
++    QRect filledAreaRect() const;
++
+     KisSelectionSP m_fillSelection;
+ 
+     int m_feather;
+diff --git a/plugins/tools/basictools/kis_tool_fill.cc b/plugins/tools/basictools/kis_tool_fill.cc
+index 55763f7..a401b27 100644
+--- a/plugins/tools/basictools/kis_tool_fill.cc
++++ b/plugins/tools/basictools/kis_tool_fill.cc
+@@ -362,11 +362,14 @@ void KisToolFill::addFillingOperation(const QVector<QPoint> &seedPoints)
+                                             : (qFuzzyCompare(m_resourcesSnapshot->opacity(), OPACITY_OPAQUE_F) &&
+                                                m_resourcesSnapshot->compositeOpId() == COMPOSITE_OVER);
+ 
++        // Krita Nova: "use selection as boundary" (on by default) only has an
++        // effect when there is an active selection, which already disables the
++        // fast mode. Checking it here sent every default fill down the slow
++        // compositing path.
+         const bool useFastMode = !m_resourcesSnapshot->activeSelection() &&
+                                  blendingOptionsAreNoOp &&
+                                  m_fillType != FillType_FillWithPattern &&
+                                  m_opacitySpread == 100 &&
+-                                 m_useSelectionAsBoundary == false &&
+                                  !m_antiAlias && m_sizemod == 0 && m_feather == 0 &&
+                                  m_closeGap == 0 &&
+                                  m_reference == Reference_CurrentLayer;

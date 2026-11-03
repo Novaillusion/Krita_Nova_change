@@ -13,6 +13,7 @@ prebuilt Android dependencies (Qt5, KF5, …) itself.
 | `04-brush-editor-screen-fit.patch` | Floating brush settings editor is sized relative to the screen and rotation (Android) |
 | `05-layers-hold-to-drag.patch` | Layers docker: press-and-hold drags a layer; a menu button on each row opens the layer menu (Android) |
 | `06-screen-tracker-rotation.patch` | Fixes a SAFE ASSERT dialog when rotating the device with the brush editor open |
+| `07-faster-fill-tool.patch` | Faster Fill tool: default fills use the fast path; other fills no longer paint a whole-canvas temporary layer |
 
 ## Get an APK
 
