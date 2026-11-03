@@ -16,6 +16,7 @@ prebuilt Android dependencies (Qt5, KF5, …) itself.
 | `07-faster-fill-tool.patch` | Faster Fill tool: default fills use the fast path; other fills no longer paint a whole-canvas temporary layer |
 | `08-settings-export-import.patch` | Settings → Export Settings… / Import Settings… (settings, shortcuts, toolbars, input profiles in one .zip) |
 | `09-palm-rejection.patch` | Palm rejection: touch on the canvas is ignored while the pen is down/hovering and shortly after, plus touches larger than a fingertip (Configure Krita → General → Tools) |
+| `10-editor-stroke-previews.patch` | Live stroke previews (patch 02) also in the Brush Editor and the toolbar preset popup; preset lists default to Details view |
 
 ## Get an APK
 

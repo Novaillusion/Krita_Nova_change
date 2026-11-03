@@ -1,0 +1,75 @@
+Krita Nova 10 - live stroke previews in the brush editor and the toolbar popup
+
+Patch 02's live stroke previews are drawn in the preset chooser's Details
+view, but two choosers never got there:
+
+1. Brush editor (KisPaintOpPresetsEditor): its Display menu read the saved
+   view mode only to tick the menu entry and never applied it, so the list
+   always started as a thumbnail grid. Its menu entries also didn't save the
+   choice. Both fixed.
+2. Toolbar preset popup: KisPaintOpPresetsChooserPopup::setResourceManager()
+   was never called, so it had no renderer input and fell back to thumbnails.
+   KisPaintopBox now passes the canvas resource manager.
+3. presetChooserViewMode defaults to Details (1) instead of Thumbnails (0).
+   An explicit choice in kritarc is kept.
+
+diff --git a/libs/ui/kis_config.cc b/libs/ui/kis_config.cc
+index b9bec89..9ed7604 100644
+--- a/libs/ui/kis_config.cc
++++ b/libs/ui/kis_config.cc
+@@ -1787,7 +1787,8 @@ void KisConfig::setVastScrolling(const qreal factor) const
+ 
+ int KisConfig::presetChooserViewMode(bool defaultValue) const
+ {
+-    return (defaultValue ? 0 : m_cfg.readEntry("presetChooserViewMode", 0));
++    // Krita Nova: Details (live stroke previews) by default
++    return (defaultValue ? 1 : m_cfg.readEntry("presetChooserViewMode", 1));
+ }
+ 
+ void KisConfig::setPresetChooserViewMode(const int mode) const
+diff --git a/libs/ui/kis_paintop_box.cc b/libs/ui/kis_paintop_box.cc
+index 5a23d1e..a848db3 100644
+--- a/libs/ui/kis_paintop_box.cc
++++ b/libs/ui/kis_paintop_box.cc
+@@ -349,6 +349,8 @@ KisPaintopBox::KisPaintopBox(KisViewManager *viewManager, QWidget *parent, const
+     m_workspaceWidget->setArrowVisible(false);
+ 
+     m_presetsChooserPopup = new KisPaintOpPresetsChooserPopup();
++    // Krita Nova: lets the toolbar's preset popup render live stroke previews
++    m_presetsChooserPopup->setResourceManager(m_resourceProvider->resourceManager());
+     m_presetsChooserPopup->setMinimumHeight(550);
+     m_presetsChooserPopup->setMinimumWidth(450);
+     m_presetSelectorPopupButton->setPopupWidget(m_presetsChooserPopup);
+diff --git a/libs/ui/widgets/kis_paintop_presets_editor.cpp b/libs/ui/widgets/kis_paintop_presets_editor.cpp
+index 274e2bc..00863a7 100644
+--- a/libs/ui/widgets/kis_paintop_presets_editor.cpp
++++ b/libs/ui/widgets/kis_paintop_presets_editor.cpp
+@@ -162,16 +162,24 @@ KisPaintOpPresetsEditor::KisPaintOpPresetsEditor(KisCanvasResourceProvider * res
+             action->setChecked(mode == KisPresetChooser::THUMBNAIL);
+             action->setActionGroup(actionGroup);
+ 
+-            connect(action, &QAction::triggered,
+-                m_d->uiWdgPaintOpPresetSettings.presetWidget, &KisPresetChooser::setViewModeToThumbnail);
++            connect(action, &QAction::triggered, this, [presetChooser]() {
++                KisConfig(false).setPresetChooserViewMode(KisPresetChooser::THUMBNAIL);
++                presetChooser->setViewModeToThumbnail();
++            });
+ 
+             action = viewModeMenu->addAction(KisIconUtils::loadIcon("view-list-details"), i18n("Details"));
+             action->setCheckable(true);
+             action->setChecked(mode == KisPresetChooser::DETAIL);
+             action->setActionGroup(actionGroup);
+ 
+-            connect(action, &QAction::triggered,
+-                m_d->uiWdgPaintOpPresetSettings.presetWidget, &KisPresetChooser::setViewModeToDetail);
++            connect(action, &QAction::triggered, this, [presetChooser]() {
++                KisConfig(false).setPresetChooserViewMode(KisPresetChooser::DETAIL);
++                presetChooser->setViewModeToDetail();
++            });
++
++            // Krita Nova: the editor used to ignore the saved mode and always start
++            // with thumbnails, so its live stroke previews (Details view) never showed
++            presetChooser->setViewMode(mode);
+ 
+             // Icon Size Slider
+             viewModeMenu->addSection(i18n("Icon Size"));
