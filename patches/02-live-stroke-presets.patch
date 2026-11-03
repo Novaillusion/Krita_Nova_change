@@ -4,6 +4,8 @@ Rebased from krita-6.0.4 onto krita master (5.4/6.1 tree).
 Changes vs the original patch:
   - brush tip icon uses KisBrush::image() instead of brushTipImage(), which
     asserts for auto brushes (crash dialog on startup in the first APK)
+  - brush tips are built outside the delegate's paint() (queued), so a modal assert
+    dialog can never open in the middle of painting the list (that crashed on Ignore)
   - paths: krita-6.0.4/... -> repository root
   - new files marked as new (were diffed against a 1970 placeholder)
   - libs/ui/CMakeLists.txt hunk re-anchored for master
@@ -306,10 +308,10 @@ index 31eae8f..083ca6f 100644
      ViewMode m_mode;
 diff --git a/libs/ui/widgets/kis_preset_stroke_renderer.cpp b/libs/ui/widgets/kis_preset_stroke_renderer.cpp
 new file mode 100644
-index 0000000..69a7522
+index 0000000..8f354b0
 --- /dev/null
 +++ b/libs/ui/widgets/kis_preset_stroke_renderer.cpp
-@@ -0,0 +1,342 @@
+@@ -0,0 +1,358 @@
 +/*
 + *  Stroke drawing logic adapted from kis_preset_live_preview_view.cpp
 + *  (SPDX-FileCopyrightText: 2017 Scott Petrovic <scottpetrovic@gmail.com>)
@@ -447,6 +449,23 @@ index 0000000..69a7522
 +    const auto it = m_tipCache.constFind(id);
 +    if (it != m_tipCache.constEnd()) return *it;
 +
++    // Never build the tip inside the delegate's paint(): brush code can raise a modal
++    // KIS_SAFE_ASSERT dialog, and a nested event loop in the middle of painting the
++    // item view crashes Krita once the dialog is dismissed. Build it right after the
++    // current paint instead; sigPreviewReady() then repaints the row.
++    if (!m_tipPending.contains(id)) {
++        m_tipPending.insert(id);
++        QTimer::singleShot(0, this, [this, preset, id]() {
++            m_tipPending.remove(id);
++            m_tipCache.insert(id, buildTipImage(preset));
++            Q_EMIT sigPreviewReady(id);
++        });
++    }
++    return QImage();
++}
++
++QImage KisPresetStrokeRenderer::buildTipImage(KisPaintOpPresetSP preset)
++{
 +    QImage result;
 +
 +    // Presets store their brush tip as XML in the "brush_definition" property.
@@ -504,7 +523,6 @@ index 0000000..69a7522
 +        }
 +    }
 +
-+    m_tipCache.insert(id, result);
 +    return result;
 +}
 +
@@ -654,10 +672,10 @@ index 0000000..69a7522
 +#include "kis_preset_stroke_renderer.moc"
 diff --git a/libs/ui/widgets/kis_preset_stroke_renderer.h b/libs/ui/widgets/kis_preset_stroke_renderer.h
 new file mode 100644
-index 0000000..d2c8345
+index 0000000..5bbd05b
 --- /dev/null
 +++ b/libs/ui/widgets/kis_preset_stroke_renderer.h
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,96 @@
 +/*
 + *  SPDX-License-Identifier: GPL-2.0-or-later
 + */
@@ -727,11 +745,13 @@ index 0000000..d2c8345
 +    };
 +
 +    void startRender(const Job &job);
++    QImage buildTipImage(KisPaintOpPresetSP preset);
 +    void paintBackground(const QString &engineId);
 +
 +    KoCanvasResourceProvider *m_resourceManager {nullptr};
 +
 +    QHash<int, QImage> m_tipCache;   // null image = no brush tip
++    QSet<int> m_tipPending;          // tips queued for building outside of paint()
 +    QHash<int, QImage> m_cache;      // a null image means "engine has no live preview"
 +    QQueue<Job> m_queue;
 +    QSet<int> m_queued;
