@@ -12,6 +12,7 @@ prebuilt Android dependencies (Qt5, KF5, …) itself.
 | `03-touch-draggable-ui.patch` | Docker separators/splitters are wider and react to finger and stylus drags (Android) |
 | `04-brush-editor-screen-fit.patch` | Floating brush settings editor is sized relative to the screen and rotation (Android) |
 | `05-layers-hold-to-drag.patch` | Layers docker: press-and-hold drags a layer; a menu button on each row opens the layer menu (Android) |
+| `06-screen-tracker-rotation.patch` | Fixes a SAFE ASSERT dialog when rotating the device with the brush editor open |
 
 ## Get an APK
 

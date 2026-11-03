@@ -1,0 +1,38 @@
+Krita Nova 06 - screen tracker: no SAFE ASSERT when rotating with the brush editor open
+
+KisScreenMigrationTracker (used by the brush editor's scratchpad) keeps its screen
+signal connections when the native window it tracks is destroyed (KisPopupButtonFrame
+recreates its window). Rotating on Android then reports a DPI change with no window and
+hit KIS_SAFE_ASSERT(!trackedWidget()->isVisible()) in KisScreenMigrationTracker.cpp.
+Reattach to the widget's current native window instead (or drop the stale connections).
+
+diff --git a/libs/widgetutils/KisScreenMigrationTracker.cpp b/libs/widgetutils/KisScreenMigrationTracker.cpp
+index dfaa123..f5854c8 100644
+--- a/libs/widgetutils/KisScreenMigrationTracker.cpp
++++ b/libs/widgetutils/KisScreenMigrationTracker.cpp
+@@ -92,9 +92,22 @@ void KisScreenMigrationTracker::slotScreenLogicalResolutionChanged(qreal value)
+ void KisScreenMigrationTracker::slotResolutionCompressorTriggered()
+ {
+     if (!m_connectedTopLevelWindow) {
+-        // the tracker is not yet initialized, it should happen only
+-        // when the widget have not yet been shown at least once
+-        KIS_SAFE_ASSERT_RECOVER_NOOP(!trackedWidget()->isVisible());
++        // Either the tracker is not initialized yet (the widget has never been
++        // shown), or the native window we were connected to has been destroyed
++        // in the meantime, e.g. KisPopupButtonFrame recreates its window when
++        // (de)tached, while the screen signals stayed connected. On Android a
++        // rotation then reports a DPI change with no window to attach it to.
++        //
++        // Krita Nova: instead of asserting, reattach to the widget's current
++        // native window if it has one (this emits the screen signals), and
++        // otherwise drop the stale screen connections.
++        QWidget *widget = trackedWidget();
++        QWindow *window = widget && widget->window() ? widget->window()->windowHandle() : nullptr;
++        if (window) {
++            connectToNativeWindow(window);
++        } else {
++            m_screenConnections.clear();
++        }
+         return;
+     }
+     Q_EMIT sigScreenOrResolutionChanged(m_connectedTopLevelWindow->screen());
