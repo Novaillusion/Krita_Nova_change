@@ -182,6 +182,21 @@ python3 -u krita-deps-management/ci-utilities/run-ci-build.py \
     --only-build --skip-publishing 2>&1 | tee "$OUT/build-krita-$ABI.log"
 
 # ---------------------------------------------------------------------------
+# Qt 5's qmlimportscanner can segfault on Krita's QML, which makes androiddeployqt
+# fail with "Invalid json output from qmlimportscanner". Put a wrapper in front of
+# it that falls back to per-file scanning and names the offending files.
+KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+QIS="$CI_WORKDIR/krita/_install/bin/qmlimportscanner"
+if [ -f "$KIT_DIR/qmlimportscanner-wrapper.py" ] && [ -x "$QIS" ]; then
+    if ! grep -q "krita-nova: qmlimportscanner wrapper" "$QIS" 2>/dev/null; then
+        mv -f "$QIS" "$QIS.real"      # fresh deps: keep the real scanner next to the wrapper
+    fi
+    cp "$KIT_DIR/qmlimportscanner-wrapper.py" "$QIS"
+    chmod +x "$QIS"
+    echo "## qmlimportscanner wrapper installed ($QIS)"
+fi
+
+# ---------------------------------------------------------------------------
 log "6/6  Packaging APK"
 python3 -u build-tools/ci-scripts/build-android-package.py 2>&1 | tee "$OUT/build-apk-$ABI.log"
 

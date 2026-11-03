@@ -168,4 +168,5 @@ jobs:
           path: |
             out/*.log
             ${{ env.WORK }}/wd/krita/_build/CMakeFiles/CMakeConfigureLog.yaml
+            ${{ env.WORK }}/wd/krita/_build/krita-deployment.json
           if-no-files-found: ignore
