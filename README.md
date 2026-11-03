@@ -1,0 +1,68 @@
+# Krita Nova: Android APK builds
+
+GitHub Actions builds a Krita Android APK from upstream Krita plus the
+patches in [`patches/`](patches). Nothing heavy lives in this repo: the runner
+fetches Krita at the commit in [`KRITA_REF`](KRITA_REF) and downloads KDE's
+prebuilt Android dependencies (Qt5, KF5, …) itself.
+
+| Patch | Change |
+|---|---|
+| `01-eraser-tool.patch` | Eraser is its own tool instead of a brush mode (**E** toggles it) |
+| `02-live-stroke-presets.patch` | Brush preset chooser (Details view) shows a live stroke and the real brush tip per preset |
+
+## Get an APK
+
+1. **Actions** tab → **Krita Nova Android APK** → **Run workflow**. Pick the
+   ABI (`arm64-v8a` covers almost all current phones and tablets).
+2. Wait. The first run takes about 2–4 h on GitHub's runners; later runs are
+   much faster thanks to the compiler cache.
+3. Open the finished run → **Artifacts** → download
+   `krita-nova-arm64-v8a-<sha>-apk` (a zip containing the `.apk`).
+4. Install it on a device with USB debugging enabled:
+
+   ```
+   adb install -r -d krita-arm64-v8a-5.4.0-prealpha-<sha>-debug.apk
+   ```
+
+   Or copy the APK to the device and open it (allow "install unknown apps").
+
+Pushing a change to `patches/`, `build/`, `KRITA_REF` or the workflow on
+`main` also starts a build.
+
+### If the 6-hour limit is hit
+
+GitHub stops jobs after 6 h. The build step stops a little earlier, and the
+compiler cache is saved even then, so **just run the workflow again**. It picks
+up where it left off.
+
+### Public or private repo?
+
+Use a **public** repo if you can (Krita is GPL anyway). Public repos get
+4-core / 16 GB runners and unlimited minutes. Private repos get 2-core / 7 GB
+runners and a monthly minute quota, which may not be enough for a full Krita
+build within 6 h.
+
+## Updating
+
+* **New patch:** add `patches/03-something.patch` (paths relative to the
+  Krita root, `a/libs/...`). Patches are applied in name order, and a patch
+  that no longer applies fails the build with git's reason.
+* **Newer Krita:** put a new commit SHA in `KRITA_REF`, or pass one when
+  running the workflow. Patches may need rebasing.
+* **Install over the previous build:** every run signs with the same debug
+  key (kept in the Actions cache). If that cache ever expires, a new key is
+  generated, and you'll have to uninstall the old APK once.
+
+## Layout
+
+```
+.github/workflows/android-apk.yml   the CI job
+KRITA_REF                           upstream Krita commit that is built
+patches/                            Krita Nova changes, applied in order
+patches/original/                   patches as originally received (not applied)
+build/                              build kit, also usable locally (see build/README-local-build.md)
+```
+
+The same kit builds locally on Windows with Docker:
+`build/build-android.ps1` (copy `build/` and `patches/` into
+`krita/packaging/android/local-build/` first).

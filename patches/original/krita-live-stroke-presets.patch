@@ -1,0 +1,739 @@
+diff --git a/krita-6.0.4/libs/ui/CMakeLists.txt
+--- a/krita-6.0.4/libs/ui/CMakeLists.txt	2026-09-10 05:20:06.000000000 +0000
++++ b/krita-6.0.4/libs/ui/CMakeLists.txt	2026-11-03 02:20:27.464274573 +0000
+@@ -297,6 +297,7 @@
+     widgets/kis_layer_filter_widget.cpp
+     widgets/kis_elided_label.cpp
+     widgets/kis_preset_live_preview_view.cpp
++    widgets/kis_preset_stroke_renderer.cpp
+     widgets/KisScreenColorSampler.cpp
+     widgets/KoDualColorButton.cpp
+     widgets/KoStrokeConfigWidget.cpp
+diff --git a/krita-6.0.4/libs/ui/widgets/kis_paintop_presets_chooser_popup.cpp
+--- a/krita-6.0.4/libs/ui/widgets/kis_paintop_presets_chooser_popup.cpp	2026-09-10 05:20:06.000000000 +0000
++++ b/krita-6.0.4/libs/ui/widgets/kis_paintop_presets_chooser_popup.cpp	2026-11-03 02:20:27.467051607 +0000
+@@ -152,6 +152,11 @@
+    m_d->uiWdgPaintOpPresets.wdgPresetChooser->updateViewSettings();
+ }
+ 
++void KisPaintOpPresetsChooserPopup::setResourceManager(KoCanvasResourceProvider *resourceManager)
++{
++    m_d->uiWdgPaintOpPresets.wdgPresetChooser->setResourceManager(resourceManager);
++}
++
+ void KisPaintOpPresetsChooserPopup::setResponsiveness(bool value)
+ {
+     m_d->uiWdgPaintOpPresets.wdgPresetChooser->itemChooser()->setResponsiveness(value);
+diff --git a/krita-6.0.4/libs/ui/widgets/kis_paintop_presets_chooser_popup.h
+--- a/krita-6.0.4/libs/ui/widgets/kis_paintop_presets_chooser_popup.h	2026-09-10 05:20:06.000000000 +0000
++++ b/krita-6.0.4/libs/ui/widgets/kis_paintop_presets_chooser_popup.h	2026-11-03 02:20:27.466658779 +0000
+@@ -14,6 +14,7 @@
+ #include <brushengine/kis_paintop_preset.h>
+ 
+ class KoResource;
++class KoCanvasResourceProvider;
+ 
+ class KRITAUI_EXPORT KisPaintOpPresetsChooserPopup : public QWidget
+ {
+@@ -24,6 +25,7 @@
+     
+     void updateViewSettings();
+     void setResponsiveness(bool value);
++    void setResourceManager(KoCanvasResourceProvider *resourceManager);
+ public Q_SLOTS:
+     void canvasResourceChanged(KisPaintOpPresetSP  preset);
+     void slotThemeChanged();
+diff --git a/krita-6.0.4/libs/ui/widgets/kis_paintop_presets_editor.cpp
+--- a/krita-6.0.4/libs/ui/widgets/kis_paintop_presets_editor.cpp	2026-09-10 05:20:06.000000000 +0000
++++ b/krita-6.0.4/libs/ui/widgets/kis_paintop_presets_editor.cpp	2026-11-03 02:20:27.467750251 +0000
+@@ -291,6 +291,7 @@
+ 
+     // setup things like the scene construct images, layers, etc that is a one-time thing
+     m_d->uiWdgPaintOpPresetSettings.liveBrushPreviewView->setup(resourceProvider->resourceManager());
++    m_d->uiWdgPaintOpPresetSettings.presetWidget->setResourceManager(resourceProvider->resourceManager());
+ 
+     // Responsive Layout
+     m_d->horzSplitter = new QSplitter(this);  // you can't add QSplitter to a UI file
+diff --git a/krita-6.0.4/libs/ui/widgets/kis_preset_chooser.cpp
+--- a/krita-6.0.4/libs/ui/widgets/kis_preset_chooser.cpp	2026-09-10 05:20:06.000000000 +0000
++++ b/krita-6.0.4/libs/ui/widgets/kis_preset_chooser.cpp	2026-11-03 02:24:51.943639751 +0000
+@@ -28,6 +28,9 @@
+ #include <KisResourceItemListView.h>
+ #include <KisResourceLocator.h>
+ #include <KisResourceTypes.h>
++#include <KisTagFilterResourceProxyModel.h>
++#include <QEvent>
++#include "kis_preset_stroke_renderer.h"
+ 
+ #include <brushengine/kis_paintop_settings.h>
+ #include <brushengine/kis_paintop_preset.h>
+@@ -66,9 +69,14 @@
+         m_useDirtyPresets = value;
+     }
+ 
++    void setRenderer(KisPresetStrokeRenderer *renderer) { m_renderer = renderer; }
++    void setResourceModel(KisTagFilterResourceProxyModel *model) { m_model = model; }
++
+ private:
+     bool m_showText;
+     bool m_useDirtyPresets;
++    KisPresetStrokeRenderer *m_renderer {nullptr};
++    KisTagFilterResourceProxyModel *m_model {nullptr};
+ };
+ 
+ void KisPresetDelegate::paint(QPainter * painter, const QStyleOptionViewItem & option, const QModelIndex & index) const
+@@ -106,37 +114,72 @@
+         painter->drawImage(paintRect.x(), paintRect.y(), previewHighDpi);
+     }
+     else {
+-        QSize pixSize(paintRect.height(), paintRect.height());
+-        QImage previewHighDpi = KisResourceThumbnailCache::instance()->getImage(index,
+-                                                                                 pixSize * devicePixelRatioF,
+-                                                                                 Qt::KeepAspectRatio,
+-                                                                                 Qt::SmoothTransformation);
+-        previewHighDpi.setDevicePixelRatio(devicePixelRatioF);
+-        painter->drawImage(paintRect.x(), paintRect.y(), previewHighDpi);
++        // Details view: [brush icon][wide stroke ...............], name drawn over the stroke's top-left corner.
+ 
+-        // Put an asterisk after the preset if it is dirty. This will help in case the pixmap icon is too small
++        KisPaintOpPresetSP preset;
++        if (m_renderer && m_model) {
++            preset = m_model->resourceForIndex(index).dynamicCast<KisPaintOpPreset>();
++        }
+ 
+-        QString dirtyPresetIndicator = QString("");
+-        if (m_useDirtyPresets && dirty) {
+-            dirtyPresetIndicator = QString("*");
++        // Small square icon on the left: the preset's real brush tip, drawn in the theme's text color.
++        // Presets without a brush tip (e.g. MyPaint) fall back to their stored thumbnail.
++        const QRect iconRect(paintRect.x(), paintRect.y(), paintRect.height(), paintRect.height());
++        const QRect strokeRect = paintRect.adjusted(iconRect.width() + 2, 0, 0, 0);
++
++        painter->fillRect(iconRect, option.palette.window());
++        const QImage tip = preset ? m_renderer->tipImage(preset) : QImage();
++        if (!tip.isNull()) {
++            painter->drawImage(iconRect.adjusted(4, 4, -4, -4), tip);
++        } else {
++            QImage icon = KisResourceThumbnailCache::instance()->getImage(
++                index, iconRect.size() * devicePixelRatioF, Qt::KeepAspectRatio, Qt::SmoothTransformation);
++            icon.setDevicePixelRatio(devicePixelRatioF);
++            const QSizeF iconSize = icon.size() / devicePixelRatioF;
++            painter->drawImage(QPointF(iconRect.x() + (iconRect.width() - iconSize.width()) / 2.0,
++                                       iconRect.y() + (iconRect.height() - iconSize.height()) / 2.0),
++                               icon);
+         }
+ 
+-//        qreal brushSize = metaData["paintopSize"].toReal();
+-//        qDebug() << "brushsize" << brushSize;
+-//        QString brushSizeText;
+-//        // Disable displayed decimal precision beyond a certain brush size
+-//        if (brushSize < 100) {
+-//            brushSizeText = QString::number(brushSize, 'g', 3);
+-//        }
+-//        else {
+-//            brushSizeText = QString::number(brushSize, 'f', 0);
+-//        }
++        // 1) Preferred: a stroke rendered live from the preset's current settings.
++        //    Regenerated when the preset changes or the preview size changes (see KisPresetStrokeRenderer).
++        QImage stroke;
++        if (preset) {
++            stroke = m_renderer->image(preset, strokeRect.size());
++        }
+ 
+-//        painter->drawText(pixSize.width() + 10, option.rect.y() + option.rect.height() - 10, brushSizeText); // brush size
++        if (!stroke.isNull()) {
++            painter->drawImage(strokeRect.topLeft(), stroke);
++        } else {
++            // 2) Fallback while the stroke is rendering, or for engines without a live preview:
++            //    cut a full-width strip out of the stored square thumbnail.
++            const qreal strokeCenterY = 0.72; // 0 = top of thumbnail, 1 = bottom
++            const qreal rowAspect = qreal(strokeRect.height()) / qreal(qMax(1, strokeRect.width()));
++            const qreal srcW = preview.width();
++            const qreal srcH = qMin(qreal(preview.height()), srcW * rowAspect);
++            const qreal srcY = qBound(0.0, preview.height() * strokeCenterY - srcH / 2.0,
++                                      preview.height() - srcH);
++            painter->drawImage(QRectF(strokeRect), preview, QRectF(0.0, srcY, srcW, srcH));
++        }
+ 
+-        QString presetDisplayName = index.data(Qt::UserRole + KisAbstractResourceModel::Name).toString().replace("_", " "); // don't need underscores that might be part of the file name
+-        painter->drawText(pixSize.width() + 10, option.rect.y() + option.rect.height() - 10, presetDisplayName.append(dirtyPresetIndicator));
++        QString dirtyPresetIndicator;
++        if (m_useDirtyPresets && dirty) {
++            dirtyPresetIndicator = QStringLiteral("*");
++        }
+ 
++        // don't need underscores that might be part of the file name
++        QString presetDisplayName =
++            index.data(Qt::UserRole + KisAbstractResourceModel::Name).toString().replace("_", " ");
++        presetDisplayName.append(dirtyPresetIndicator);
++
++        // semi-transparent plate behind the name so it stays readable on any stroke
++        const QFontMetrics fm(painter->font());
++        const QRect textRect(strokeRect.x() + 4, strokeRect.y() + 3,
++                             fm.horizontalAdvance(presetDisplayName) + 10, fm.height() + 2);
++        QColor plate = option.palette.window().color();
++        plate.setAlpha(190);
++        painter->fillRect(textRect, plate);
++        painter->setPen(option.palette.windowText().color());
++        painter->drawText(textRect.adjusted(5, 0, 0, 0), Qt::AlignVCenter | Qt::AlignLeft, presetDisplayName);
+     }
+ 
+     if (m_useDirtyPresets && dirty) {
+@@ -177,6 +220,9 @@
+     m_chooser = new KisResourceItemChooser(ResourceType::PaintOpPresets, false, this);
+     m_chooser->setRowHeight(50);
+     m_delegate = new KisPresetDelegate(this);
++    m_renderer = new KisPresetStrokeRenderer(this);
++    m_delegate->setRenderer(m_renderer);
++    m_delegate->setResourceModel(m_chooser->tagFilterModel());
+     m_chooser->setItemDelegate(m_delegate);
+     m_chooser->setSynced(true);
+     m_chooser->showImportExportBtns(false);
+@@ -192,6 +238,12 @@
+ 
+     connect(m_chooser, &KisResourceItemChooser::listViewModeChanged, this, &KisPresetChooser::showHideBrushNames);
+ 
++    // Any preset whose thumbnail/settings changed gets its stroke regenerated.
++    connect(m_chooser->tagFilterModel(), &QAbstractItemModel::dataChanged,
++            this, &KisPresetChooser::slotModelDataChanged);
++    connect(m_renderer, &KisPresetStrokeRenderer::sigPreviewReady,
++            this, &KisPresetChooser::slotStrokePreviewReady);
++
+     m_mode = ViewMode::THUMBNAIL;
+ 
+     connect(KisConfigNotifier::instance(), SIGNAL(configChanged()),
+@@ -252,6 +304,44 @@
+                                                {Qt::UserRole + KisAbstractResourceModel::Thumbnail});
+ }
+ 
++void KisPresetChooser::setResourceManager(KoCanvasResourceProvider *resourceManager)
++{
++    m_renderer->setResourceManager(resourceManager);
++}
++
++void KisPresetChooser::slotModelDataChanged(const QModelIndex &topLeft, const QModelIndex &bottomRight, const QList<int> &roles)
++{
++    if (m_updatingFromRenderer) return;
++
++    // slotCurrentPresetChanged() and resource saves report Thumbnail; an empty list means "everything".
++    if (!roles.isEmpty() && !roles.contains(Qt::UserRole + KisAbstractResourceModel::Thumbnail)) return;
++
++    QAbstractItemModel *model = m_chooser->tagFilterModel();
++    for (int row = topLeft.row(); row <= bottomRight.row(); row++) {
++        const int id = model->index(row, 0).data(Qt::UserRole + KisAbstractResourceModel::Id).toInt();
++        m_renderer->invalidate(id);
++    }
++}
++
++void KisPresetChooser::slotStrokePreviewReady(int resourceId)
++{
++    // Repaint just that row. The flag stops slotModelDataChanged() from invalidating the new stroke.
++    const QModelIndex index = m_chooser->tagFilterModel()->indexForResourceId(resourceId);
++    if (!index.isValid()) return;
++
++    m_updatingFromRenderer = true;
++    Q_EMIT m_chooser->tagFilterModel()->dataChanged(index, index, {Qt::DisplayRole});
++    m_updatingFromRenderer = false;
++}
++
++void KisPresetChooser::changeEvent(QEvent *event)
++{
++    QWidget::changeEvent(event);
++    if (event->type() == QEvent::PaletteChange) {
++        m_renderer->invalidateAll(); // strokes are drawn in theme colors
++    }
++}
++
+ void KisPresetChooser::updateViewSettings()
+ {
+     switch (m_mode) {
+diff --git a/krita-6.0.4/libs/ui/widgets/kis_preset_chooser.h
+--- a/krita-6.0.4/libs/ui/widgets/kis_preset_chooser.h	2026-09-10 05:20:06.000000000 +0000
++++ b/krita-6.0.4/libs/ui/widgets/kis_preset_chooser.h	2026-11-03 02:20:27.464980118 +0000
+@@ -19,6 +19,8 @@
+ class KoAbstractResourceServerAdapter;
+ class KisPresetDelegate;
+ class KisResourceItemChooser;
++class KisPresetStrokeRenderer;
++class KoCanvasResourceProvider;
+ 
+ 
+ #include <kritaui_export.h>
+@@ -61,6 +63,9 @@
+     /// get the base size for the icons. Used by the slider in the view options
+     int iconSize();
+ 
++    /// Needed to render live strokes in Details view. Without it the stored thumbnails are used.
++    void setResourceManager(KoCanvasResourceProvider *resourceManager);
++
+ Q_SIGNALS:
+     void resourceSelected(KoResourceSP resource);
+     void resourceClicked(KoResourceSP resource);
+@@ -84,8 +89,15 @@
+     void notifyConfigChanged();
+     void slotResourceWasSelected(KoResourceSP resource);
+     void slotCurrentPresetChanged();
++    void slotModelDataChanged(const QModelIndex &topLeft, const QModelIndex &bottomRight, const QList<int> &roles);
++    void slotStrokePreviewReady(int resourceId);
++
++protected:
++    void changeEvent(QEvent *event) override;
+ 
+ private:
++    KisPresetStrokeRenderer *m_renderer {nullptr};
++    bool m_updatingFromRenderer {false};
+     KisResourceItemChooser *m_chooser {0};
+     KisPresetDelegate* m_delegate {0};
+     ViewMode m_mode;
+diff --git a/krita-6.0.4/libs/ui/widgets/kis_preset_stroke_renderer.cpp
+--- a/krita-6.0.4/libs/ui/widgets/kis_preset_stroke_renderer.cpp	1970-01-01 00:00:00.000000000 +0000
++++ b/krita-6.0.4/libs/ui/widgets/kis_preset_stroke_renderer.cpp	2026-11-03 02:24:51.943080493 +0000
+@@ -0,0 +1,338 @@
++/*
++ *  Stroke drawing logic adapted from kis_preset_live_preview_view.cpp
++ *  (SPDX-FileCopyrightText: 2017 Scott Petrovic <scottpetrovic@gmail.com>)
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "kis_preset_stroke_renderer.h"
++
++#include <QGuiApplication>
++#include <QPalette>
++#include <QSet>
++#include <QPainter>
++#include <QDomDocument>
++#include <QDomElement>
++
++#include <KoColor.h>
++#include <KoColorSpaceRegistry.h>
++#include <KoCanvasResourceProvider.h>
++
++#include <kis_image.h>
++#include <kis_paint_layer.h>
++#include <kis_paint_device.h>
++#include <kis_transaction.h>
++#include <kis_painting_information_builder.h>
++#include <kis_paint_information.h>
++#include <brushengine/kis_paintop_settings.h>
++#include <kis_simple_stroke_strategy.h>
++#include <strokes/freehand_stroke.h>
++#include <strokes/KisFreehandStrokeInfo.h>
++#include <kis_resources_snapshot.h>
++#include <kis_brush.h>
++#include <KisGlobalResourcesInterface.h>
++#include <KisAsynchronousStrokeUpdateHelper.h>
++
++namespace {
++
++// Named differently from NotificationStroke in kis_preset_live_preview_view.cpp
++// to avoid a clash between two class definitions with the same name.
++class PresetStrokeRenderNotification : public QObject, public KisSimpleStrokeStrategy
++{
++    Q_OBJECT
++public:
++    PresetStrokeRenderNotification()
++        : KisSimpleStrokeStrategy(QLatin1String("PresetStrokeRenderNotification"))
++    {
++        setClearsRedoOnStart(false);
++        enableJob(JOB_INIT, true, KisStrokeJobData::BARRIER);
++    }
++    void initStrokeCallback() override { Q_EMIT timeout(); }
++Q_SIGNALS:
++    void timeout();
++};
++
++bool engineHasNoPreview(const QString &id)
++{
++    return id == "roundmarker" || id == "experimentbrush" || id == "duplicate";
++}
++
++} // namespace
++
++KisPresetStrokeRenderer::KisPresetStrokeRenderer(QObject *parent)
++    : QObject(parent)
++{
++    m_colorSpace = KoColorSpaceRegistry::instance()->rgb8();
++    m_kickTimer.setSingleShot(true);
++    m_kickTimer.setInterval(150);
++    connect(&m_kickTimer, &QTimer::timeout, this, &KisPresetStrokeRenderer::renderNext);
++}
++
++KisPresetStrokeRenderer::~KisPresetStrokeRenderer()
++{
++}
++
++void KisPresetStrokeRenderer::setResourceManager(KoCanvasResourceProvider *resourceManager)
++{
++    m_resourceManager = resourceManager;
++}
++
++QImage KisPresetStrokeRenderer::image(KisPaintOpPresetSP preset, const QSize &requestedSize)
++{
++    if (!preset || !m_resourceManager || requestedSize.isEmpty()) return QImage();
++
++    // Quantize the width so dragging the docker edge doesn't invalidate on every pixel.
++    const QSize size(qMax(32, (requestedSize.width() / 32) * 32), requestedSize.height());
++
++    // Preview size changed: throw everything away and start over.
++    if (size != m_size) {
++        m_size = size;
++        invalidateAll();
++    }
++
++    const int id = preset->resourceId();
++    const auto it = m_cache.constFind(id);
++    if (it != m_cache.constEnd()) {
++        return *it;
++    }
++
++    if (!m_queued.contains(id) && !(m_inProgress && m_currentJob.id == id)) {
++        m_queue.enqueue({id, preset});
++        m_queued.insert(id);
++        if (!m_kickTimer.isActive()) m_kickTimer.start();
++    }
++    return QImage();
++}
++
++void KisPresetStrokeRenderer::invalidate(int resourceId)
++{
++    m_cache.remove(resourceId);
++    m_tipCache.remove(resourceId);
++    if (m_inProgress && m_currentJob.id == resourceId) {
++        m_generation++; // result of the render in flight is stale
++    }
++}
++
++void KisPresetStrokeRenderer::invalidateAll()
++{
++    m_cache.clear();
++    m_tipCache.clear();
++    m_queue.clear();
++    m_queued.clear();
++    m_generation++;
++    if (!m_inProgress) {
++        // the image is recreated at the new size by startRender()
++        m_image.clear();
++        m_layer.clear();
++    }
++}
++
++QImage KisPresetStrokeRenderer::tipImage(KisPaintOpPresetSP preset)
++{
++    if (!preset) return QImage();
++
++    const int id = preset->resourceId();
++    const auto it = m_tipCache.constFind(id);
++    if (it != m_tipCache.constEnd()) return *it;
++
++    QImage result;
++
++    // Presets store their brush tip as XML in the "brush_definition" property.
++    // Engines without that property (e.g. MyPaint) simply have no tip here.
++    const QString definition = preset->settings()->getString("brush_definition");
++    if (!definition.isEmpty()) {
++        QDomDocument doc;
++        doc.setContent(definition);
++        const QDomElement element = doc.firstChildElement("Brush");
++        KisBrushSP brush;
++        if (!element.isNull()) {
++            brush = KisBrush::fromXML(element, KisGlobalResourcesInterface::instance());
++        }
++
++        QImage tip = brush ? brush->brushTipImage() : QImage();
++        if (!tip.isNull()) {
++            const int S = 128;
++            tip = tip.scaled(S, S, Qt::KeepAspectRatio, Qt::SmoothTransformation)
++                      .convertToFormat(QImage::Format_ARGB32);
++
++            // Tips come either as an alpha mask or as dark-on-light gray / color. Turn both into
++            // an alpha mask so the tip can be drawn in the theme's text color.
++            int minA = 255, maxA = 0;
++            for (int y = 0; y < tip.height(); y++) {
++                const QRgb *line = reinterpret_cast<const QRgb *>(tip.constScanLine(y));
++                for (int x = 0; x < tip.width(); x++) {
++                    minA = qMin(minA, qAlpha(line[x]));
++                    maxA = qMax(maxA, qAlpha(line[x]));
++                }
++            }
++            const bool useAlpha = (maxA - minA) > 8;
++
++            QImage mask(tip.size(), QImage::Format_Alpha8);
++            for (int y = 0; y < tip.height(); y++) {
++                const QRgb *src = reinterpret_cast<const QRgb *>(tip.constScanLine(y));
++                uchar *dst = mask.scanLine(y);
++                for (int x = 0; x < tip.width(); x++) {
++                    dst[x] = useAlpha ? qAlpha(src[x])
++                                      : (255 - qGray(src[x])) * qAlpha(src[x]) / 255;
++                }
++            }
++
++            const QColor ink = QGuiApplication::palette().color(QPalette::Text);
++            result = QImage(S, S, QImage::Format_ARGB32_Premultiplied);
++            result.fill(Qt::transparent);
++            QPainter p(&result);
++            QImage colored(tip.size(), QImage::Format_ARGB32_Premultiplied);
++            colored.fill(ink);
++            colored.setAlphaChannel(mask);
++            p.drawImage((S - colored.width()) / 2, (S - colored.height()) / 2, colored);
++        }
++    }
++
++    m_tipCache.insert(id, result);
++    return result;
++}
++
++void KisPresetStrokeRenderer::renderNext()
++{
++    if (m_inProgress || m_queue.isEmpty()) return;
++
++    const Job job = m_queue.dequeue();
++    m_queued.remove(job.id);
++
++    if (!job.preset || engineHasNoPreview(job.preset->paintOp().id())) {
++        m_cache.insert(job.id, QImage());
++        Q_EMIT sigPreviewReady(job.id);
++        QMetaObject::invokeMethod(this, "renderNext", Qt::QueuedConnection);
++        return;
++    }
++
++    startRender(job);
++}
++
++void KisPresetStrokeRenderer::paintBackground(const QString &engineId)
++{
++    const QPalette pal = QGuiApplication::palette();
++
++    if (engineId == "colorsmudge" || engineId == "deformbrush" || engineId == "filter") {
++        // smudging brushes need something to smudge: alternating gray strips
++        const int strips = 20;
++        const int w = m_image->width();
++        const int stripW = qMax(1, w / strips);
++        for (int i = 0; i < strips; i++) {
++            KoColor c(m_colorSpace);
++            c.fromQColor(i % 2 ? QColor(80, 80, 80) : QColor(140, 140, 140));
++            KisTransaction t(m_layer->paintDevice());
++            m_layer->paintDevice()->fill(QRect(i * stripW, 0, stripW, m_image->height()), c);
++            t.end();
++        }
++        m_paintColor = KoColor(Qt::white, m_colorSpace);
++    } else {
++        KisTransaction t(m_layer->paintDevice());
++        m_layer->paintDevice()->fill(m_image->bounds(), KoColor(pal.color(QPalette::Window), m_colorSpace));
++        t.end();
++        m_paintColor = KoColor(pal.color(QPalette::Text), m_colorSpace);
++    }
++}
++
++void KisPresetStrokeRenderer::startRender(const Job &job)
++{
++    const int w = m_size.width();
++    const int h = m_size.height();
++
++    if (!m_image || m_image->width() != w || m_image->height() != h) {
++        m_image = new KisImage(nullptr, w, h, m_colorSpace, "preset stroke preview");
++        m_layer = new KisPaintLayer(m_image, "presetStrokePreview", OPACITY_OPAQUE_U8, m_colorSpace);
++    }
++
++    const QString engineId = job.preset->paintOp().id();
++    paintBackground(engineId);
++
++    // Keep the brush inside the row: at most about half the row height.
++    qreal brushSize = qBound(3.0, job.preset->settings()->paintOpSize(), qMax(3.0, h * 0.5));
++    if (engineId == "sketchbrush" || engineId == "spraybrush") {
++        brushSize = qMax(3.0, job.preset->settings()->paintOpSize());
++    }
++
++    KisPaintOpPresetSP proxyPreset = job.preset->clone().dynamicCast<KisPaintOpPreset>();
++    KisPaintOpSettingsSP settings = proxyPreset->settings();
++    settings->setPaintOpSize(brushSize);
++    proxyPreset->setSettings(settings);
++
++    KisResourcesSnapshotSP resources =
++        new KisResourcesSnapshot(m_image, m_layer, m_resourceManager, nullptr, {}, proxyPreset);
++    resources->setOpacity(settings->paintOpOpacity());
++    resources->setMirroring(false, false);
++    resources->setFGColorOverride(m_paintColor);
++
++    KisFreehandStrokeInfo *strokeInfo = new KisFreehandStrokeInfo();
++    KisStrokeStrategy *stroke =
++        new FreehandStrokeStrategy(resources, strokeInfo, kundo2_noi18n("temp_stroke"));
++    KisStrokeId strokeId = m_image->startStroke(stroke);
++
++    const QPointF center(w * 0.5, h * 0.5);
++
++    if (engineId == "sketchbrush" || engineId == "curvebrush" || engineId == "particlebrush") {
++        const qreal startX = center.x() - w * 0.4;
++        const qreal endX = center.x() + w * 0.4;
++        KisPaintInformation p1, p2;
++        p1.setPressure(0.0); p1.setPos(QPointF(startX, center.y()));
++        p2.setPressure(0.0); p2.setPos(QPointF(startX, center.y()));
++        const int repeats = 8;
++        for (int i = 0; i < repeats; i++) {
++            p1.setPos(p2.pos());
++            p1.setPressure(p2.pressure());
++            p2.setPressure((1.0 / repeats) * (i + 1));
++            p2.setPos(QPointF(((1.0 / repeats) * (i + 1) * (endX - startX)) + startX, center.y()));
++            const qreal offset = (h / (repeats * 1.5)) * (i + 1);
++            const qreal handleY = (i % 2 == 0) ? center.y() - offset : center.y() + offset;
++            m_image->addJob(strokeId, new FreehandStrokeStrategy::Data(
++                0, p1, QPointF(p1.pos().x(), handleY), QPointF(p2.pos().x(), handleY), p2));
++            m_image->addJob(strokeId, new KisAsynchronousStrokeUpdateHelper::UpdateData(true));
++        }
++    } else {
++        // gentle S-curve with pressure ramping 0 -> 1
++        KisPaintInformation p1, p2;
++        if (engineId == "mypaintbrush") {
++            p1.setCurrentTime(123);
++            p2.setCurrentTime(1230);
++        }
++        p1.setPos(QPointF(center.x() - w * 0.45, center.y() + h * 0.2));
++        p1.setPressure(0.0);
++        p2.setPos(QPointF(center.x() + w * 0.4, center.y() - h * 0.2));
++        p2.setPressure(1.0);
++        m_image->addJob(strokeId, new FreehandStrokeStrategy::Data(
++            0, p1, QPointF(center.x(), center.y() - h), QPointF(center.x(), center.y() + h), p2));
++        m_image->addJob(strokeId, new KisAsynchronousStrokeUpdateHelper::UpdateData(true));
++    }
++    m_image->endStroke(strokeId);
++
++    m_inProgress = true;
++    m_currentJob = job;
++    m_currentGeneration = m_generation;
++
++    PresetStrokeRenderNotification *notification = new PresetStrokeRenderNotification();
++    connect(notification, SIGNAL(timeout()), this, SLOT(slotRenderFinished()));
++    KisStrokeId notificationId = m_image->startStroke(notification);
++    m_image->endStroke(notificationId);
++}
++
++void KisPresetStrokeRenderer::slotRenderFinished()
++{
++    m_inProgress = false;
++    const int id = m_currentJob.id;
++
++    if (m_currentGeneration == m_generation && m_image) {
++        m_cache.insert(id, m_layer->paintDevice()->convertToQImage(nullptr, m_image->bounds()));
++        Q_EMIT sigPreviewReady(id);
++    }
++    m_currentJob = Job();
++
++    if (!m_image || m_image->width() != m_size.width() || m_image->height() != m_size.height()) {
++        m_image.clear();
++        m_layer.clear();
++    }
++
++    QMetaObject::invokeMethod(this, "renderNext", Qt::QueuedConnection);
++}
++
++#include "kis_preset_stroke_renderer.moc"
+diff --git a/krita-6.0.4/libs/ui/widgets/kis_preset_stroke_renderer.h
+--- a/krita-6.0.4/libs/ui/widgets/kis_preset_stroke_renderer.h	1970-01-01 00:00:00.000000000 +0000
++++ b/krita-6.0.4/libs/ui/widgets/kis_preset_stroke_renderer.h	2026-11-03 02:24:51.942631147 +0000
+@@ -0,0 +1,94 @@
++/*
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef KIS_PRESET_STROKE_RENDERER_H
++#define KIS_PRESET_STROKE_RENDERER_H
++
++#include <QObject>
++#include <QImage>
++#include <QSize>
++#include <QHash>
++#include <QQueue>
++#include <QTimer>
++#include <QSet>
++#include <KoColor.h>
++
++#include <kritaui_export.h>
++#include <kis_types.h>
++#include <brushengine/kis_paintop_preset.h>
++
++class KoCanvasResourceProvider;
++
++/**
++ * Renders a wide sample stroke for brush presets, one at a time, and caches the result.
++ *
++ * Strokes are regenerated whenever
++ *  - invalidate(id) is called (the preset's settings changed or it was saved),
++ *  - invalidateAll() is called (theme changed), or
++ *  - image() is asked for a different size than before (preview size changed).
++ *
++ * image() never blocks: it returns the cached image or a null image, and
++ * queues a render. sigPreviewReady(id) is emitted when a render completes.
++ */
++class KRITAUI_EXPORT KisPresetStrokeRenderer : public QObject
++{
++    Q_OBJECT
++public:
++    explicit KisPresetStrokeRenderer(QObject *parent = nullptr);
++    ~KisPresetStrokeRenderer() override;
++
++    void setResourceManager(KoCanvasResourceProvider *resourceManager);
++
++    /// Cached stroke for the preset, or a null image if not ready (or unsupported engine).
++    QImage image(KisPaintOpPresetSP preset, const QSize &size);
++
++    /**
++     * The brush tip of the preset (the "brush_definition" stored in its settings), drawn in the
++     * theme's text color on a transparent 128x128 square. Null if the preset has no brush tip.
++     * Cached; cleared together with the stroke by invalidate()/invalidateAll().
++     */
++    QImage tipImage(KisPaintOpPresetSP preset);
++
++    void invalidate(int resourceId);
++    void invalidateAll();
++
++Q_SIGNALS:
++    void sigPreviewReady(int resourceId);
++
++private Q_SLOTS:
++    void renderNext();
++    void slotRenderFinished();
++
++private:
++    struct Job {
++        int id {-1};
++        KisPaintOpPresetSP preset;
++    };
++
++    void startRender(const Job &job);
++    void paintBackground(const QString &engineId);
++
++    KoCanvasResourceProvider *m_resourceManager {nullptr};
++
++    QHash<int, QImage> m_tipCache;   // null image = no brush tip
++    QHash<int, QImage> m_cache;      // a null image means "engine has no live preview"
++    QQueue<Job> m_queue;
++    QSet<int> m_queued;
++
++    QSize m_size;                    // size the cache is valid for
++    int m_generation {0};            // bumped on every invalidation so stale results are dropped
++
++    bool m_inProgress {false};
++    Job m_currentJob;
++    int m_currentGeneration {0};
++
++    KisImageSP m_image;
++    KisPaintLayerSP m_layer;
++    const KoColorSpace *m_colorSpace {nullptr};
++    KoColor m_paintColor;
++
++    QTimer m_kickTimer;              // debounces resizes
++};
++
++#endif
+diff --git a/krita-6.0.4/plugins/dockers/presetdocker/presetdocker_dock.cpp
+--- a/krita-6.0.4/plugins/dockers/presetdocker/presetdocker_dock.cpp	2026-09-10 05:20:06.000000000 +0000
++++ b/krita-6.0.4/plugins/dockers/presetdocker/presetdocker_dock.cpp	2026-11-03 02:20:27.468246480 +0000
+@@ -44,6 +44,8 @@
+ 
+     if (!m_canvas || !m_canvas->viewManager() || !m_canvas->resourceManager()) return;
+ 
++    m_presetChooser->setResourceManager(m_canvas->resourceManager());
++
+     connect(m_presetChooser, SIGNAL(resourceSelected(KoResourceSP )),
+             m_canvas->viewManager()->paintOpBox(), SLOT(resourceSelected(KoResourceSP )));
+     connect(m_presetChooser, SIGNAL(resourceClicked(KoResourceSP )),

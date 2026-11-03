@@ -1,0 +1,539 @@
+--- a/libs/ui/kis_paintop_box.h
++++ b/libs/ui/kis_paintop_box.h
+@@ -136,11 +136,20 @@
+     void sliderChanged(int n);
+     void findDefaultPresets();
+ 
++    /// Called whenever the active tool changes to or from the Eraser tool
++    void setEraserToolActive(bool active);
++    /// Make the current preset erase while it is used by the Eraser tool
++    void adoptPresetForEraserTool();
++    /// Give the current preset back its own eraser-mode flag
++    void releasePresetFromEraserTool();
++    /// Swap between the preset's remembered "painting" and "erasing" size/opacity
++    void applyEraserSizeAndOpacityMemory(bool toEraser);
++
+ private Q_SLOTS:
+ 
+     void slotSetupDefaultPreset();
+     void slotNodeChanged(const KisNodeSP node);
+-    void slotToggleEraseMode(bool checked);
++    void slotEraseActionTriggered();
+     void slotSetCompositeMode(int index);
+     void slotSetPaintop(const QString& paintOpId);
+     void slotHorizontalMirrorChanged(bool value);
+@@ -273,6 +282,14 @@
+ 
+     QString m_eraserName;
+     QString m_defaultPresetName;
++
++    // --- Eraser tool state (the eraser is a tool, not a brush mode) ---
++    bool               m_eraserToolActive {false};
++    bool               m_eraserToolPresetOriginalEraserMode {false};
++    KisPaintOpPresetSP m_eraserToolPreset;       ///< preset the Eraser tool uses / last used
++    KisPaintOpPresetSP m_presetBeforeEraserTool; ///< preset to restore when leaving the Eraser tool
++    QString            m_toolBeforeEraserId;     ///< tool to return to when "E" is pressed again
++    KoInputDevice::Pointer m_eraserEnterPointer {KoInputDevice::Pointer::Pen}; ///< stylus end used when entering
+ };
+ 
+ #endif //KIS_PAINTOP_BOX_H_
+--- a/libs/ui/kis_paintop_box.cc
++++ b/libs/ui/kis_paintop_box.cc
+@@ -27,6 +27,7 @@
+ #include <kactioncollection.h>
+ #include <kacceleratormanager.h>
+ #include <QKeySequence>
++#include <QTimer>
+ 
+ #include <kis_icon.h>
+ #include <KoColorSpace.h>
+@@ -81,6 +82,12 @@
+ #include "KisMainWindow.h"
+ 
+ 
++namespace {
++// Tool ids (defined in plugins/tools/basictools)
++const QString ERASER_TOOL_ID = QStringLiteral("KritaShape/KisToolEraser");
++const QString BRUSH_TOOL_ID  = QStringLiteral("KritaShape/KisToolBrush");
++}
++
+ KisPaintopBox::KisPaintopBox(KisViewManager *viewManager, QWidget *parent, const char *name)
+     : QWidget(parent)
+     , m_resourceProvider(viewManager->canvasResourceProvider())
+@@ -364,7 +371,8 @@
+     QWidget* compositeActions = new QWidget(this);
+     QHBoxLayout* compositeLayout = new QHBoxLayout(compositeActions);
+     compositeLayout->addWidget(m_cmbCompositeOp);
+-    compositeLayout->addWidget(m_eraseModeButton);
++    // The eraser is a tool now (KisToolEraser), not a toggle next to the blending mode
++    m_eraseModeButton->setVisible(false);
+     compositeLayout->addWidget(m_alphaLockButton);
+ 
+     compositeLayout->setSpacing(4);
+@@ -514,7 +522,7 @@
+ 
+     connect(m_resourceProvider   , SIGNAL(sigNodeChanged(KisNodeSP))    , SLOT(slotNodeChanged(KisNodeSP)));
+     connect(m_cmbCompositeOp     , SIGNAL(currentIndexChanged(int))           , SLOT(slotSetCompositeMode(int)));
+-    connect(m_eraseAction          , SIGNAL(toggled(bool))                    , SLOT(slotToggleEraseMode(bool)));
++    connect(m_eraseAction          , SIGNAL(triggered())                      , SLOT(slotEraseActionTriggered()));
+     connect(m_eraserTogglePresetAction , SIGNAL(triggered(bool))                    , SLOT(slotToggleEraserPreset(bool)));
+ 
+     connect(m_eraserSelectPresetAction , SIGNAL(triggered())                    , SLOT(slotSelectEraserPreset()));
+@@ -664,6 +672,11 @@
+         }
+     }
+     Q_ASSERT(preset);
++
++    if (m_eraserToolActive) {
++        releasePresetFromEraserTool();
++    }
++
+     const KoID& paintop = preset->paintOp();
+     m_presetConnections.clear();
+ 
+@@ -698,7 +711,9 @@
+ 
+     m_resourceProvider->setPaintOpPreset(preset);
+ 
+-
++    if (m_eraserToolActive) {
++        adoptPresetForEraserTool();
++    }
+ 
+     /// We must connect to the **uncompressed** version of the preset
+     /// update signal. That is the only way we can guarantee that
+@@ -921,6 +936,17 @@
+ 
+     m_currTabletToolID = TabletToolID(inputDevice);
+ 
++    if (toolData == m_tabletToolMap.end()
++        && inputDevice.pointer() == KoInputDevice::Pointer::Eraser
++        && inputDevice.device() != KoInputDevice::InputDevice::Unknown
++        && !m_eraserToolActive) {
++        // First time this stylus is flipped to its eraser end: use the
++        // Eraser tool. KoToolManager then remembers the tool per stylus end.
++        QTimer::singleShot(0, this, [this]() {
++            m_viewManager->toolManager()->switchToolRequested(ERASER_TOOL_ID);
++        });
++    }
++
+     if (toolData == m_tabletToolMap.end()) {
+         KisConfig cfg(true);
+         KisPaintOpPresetResourceServer *rserver = KisResourceServerProvider::instance()->paintOpPresetServer();
+@@ -969,14 +995,9 @@
+ 
+ void KisPaintopBox::slotSelectEraserPreset()
+ {
+-    // automatically select freehand brush tool for these select actions
+-    m_viewManager->toolManager()->switchToolRequested("KritaShape/KisToolBrush");
+-
+-    KoInputDevice::InputDevice dev = KoInputDevice::InputDevice::Unknown;
+-    KoInputDevice::Pointer ptr = KoInputDevice::Pointer::Eraser;
+-    qint64 id = -1;
+-    const KoInputDevice inputDevice(dev, ptr, id);
+-    slotInputDeviceChanged(inputDevice);
++    // The eraser is a tool with its own remembered preset
++    m_viewManager->toolManager()->switchToolRequested(ERASER_TOOL_ID);
++    m_eraserSelectPresetAction->setChecked(m_eraserToolActive);
+ }
+ 
+ 
+@@ -1067,7 +1088,8 @@
+         }
+ 
+         if (key == KoCanvasResource::EraserMode) {
+-            m_eraseAction->setChecked(value.toBool());
++            // erase_action reflects whether the Eraser tool is active
++            m_eraseAction->setChecked(m_eraserToolActive);
+         }
+ 
+         if (key == KoCanvasResource::DisablePressure) {
+@@ -1130,18 +1152,123 @@
+     m_cmbCompositeOp->validate(compositionSpace);
+ }
+ 
+-void KisPaintopBox::slotToggleEraseMode(bool checked)
++void KisPaintopBox::slotEraseActionTriggered()
+ {
+-    const bool oldEraserMode = m_resourceProvider->eraserMode();
+-    m_resourceProvider->setEraserMode(checked);
++    KoToolManager *toolManager = m_viewManager->toolManager();
+ 
+-    if (oldEraserMode != checked && m_eraserBrushSizeEnabled) {
+-        const qreal currentSize = m_resourceProvider->size();
++    if (!m_eraserToolActive) {
++        toolManager->switchToolRequested(ERASER_TOOL_ID);
++    } else {
++        const QString backTo = (m_toolBeforeEraserId.isEmpty() || m_toolBeforeEraserId == ERASER_TOOL_ID)
++                ? BRUSH_TOOL_ID : m_toolBeforeEraserId;
++        toolManager->switchToolRequested(backTo);
++    }
++
++    // QAction has already flipped its checked state; make sure it matches
++    // reality even if the tool switch could not happen (e.g. no canvas)
++    m_eraseAction->setChecked(m_eraserToolActive);
++}
++
++void KisPaintopBox::setEraserToolActive(bool active)
++{
++    if (m_eraserToolActive == active) return;
++    if (!m_resourceProvider->currentPreset()) return;
++
++    if (active) {
++        m_presetBeforeEraserTool = m_resourceProvider->currentPreset();
++        m_eraserEnterPointer = m_currTabletToolID.pointer;
++
++        KisPaintOpPresetSP preset = m_eraserToolPreset;
++        if (!preset) {
++            KisConfig cfg(true);
++            KisPaintOpPresetResourceServer *rserver = KisResourceServerProvider::instance()->paintOpPresetServer();
++            findDefaultPresets();
++            preset = rserver->resource("", "", cfg.readEntry<QString>("EraserToolPreset", m_eraserName));
++            if (!preset) {
++                preset = rserver->resource("", "", m_eraserName);
++            }
++            if (!preset) {
++                // no eraser preset installed: erase with whatever brush is current
++                preset = m_resourceProvider->currentPreset();
++            }
++        }
++
++        if (preset != m_resourceProvider->currentPreset()) {
++            setCurrentPaintop(preset);
++        }
++
++        m_eraserToolActive = true;
++        adoptPresetForEraserTool();
++    } else {
++        releasePresetFromEraserTool();
++        m_eraserToolActive = false;
++
++        if (m_eraserToolPreset) {
++            KisConfig cfg(false);
++            cfg.writeEntry("EraserToolPreset", m_eraserToolPreset->name());
++        }
+ 
+-        KisPaintOpSettingsSP settings = m_resourceProvider->currentPreset()->settings();
++        // If the user left the Eraser tool by flipping the stylus to its
++        // other end, slotInputDeviceChanged() loads that end's own preset,
++        // so don't overwrite it with the one from before.
++        const bool sameStylusEnd = (m_currTabletToolID.pointer == m_eraserEnterPointer);
+ 
+-        // remember brush size. set the eraser size to the normal brush size if not set
+-        if (checked) {
++        if (sameStylusEnd && m_presetBeforeEraserTool
++            && m_presetBeforeEraserTool != m_resourceProvider->currentPreset()) {
++            setCurrentPaintop(m_presetBeforeEraserTool);
++        }
++        m_presetBeforeEraserTool.clear();
++    }
++
++    m_eraseAction->setChecked(m_eraserToolActive);
++    m_eraserSelectPresetAction->setChecked(m_eraserToolActive);
++}
++
++void KisPaintopBox::adoptPresetForEraserTool()
++{
++    KisPaintOpPresetSP preset = m_resourceProvider->currentPreset();
++    if (!preset) return;
++
++    m_eraserToolPreset = preset;
++    m_eraserToolPresetOriginalEraserMode = preset->settings()->eraserMode();
++
++    // Every preset erases while it is used by the Eraser tool
++    if (!m_resourceProvider->eraserMode()) {
++        m_resourceProvider->setEraserMode(true);
++    }
++    applyEraserSizeAndOpacityMemory(true);
++}
++
++void KisPaintopBox::releasePresetFromEraserTool()
++{
++    KisPaintOpPresetSP preset = m_eraserToolPreset;
++    if (!preset) return;
++
++    // Give the preset its own eraser-mode flag back, so it paints
++    // normally again when used by the Brush tool
++    if (preset == m_resourceProvider->currentPreset()) {
++        applyEraserSizeAndOpacityMemory(false);
++        if (m_resourceProvider->eraserMode() != m_eraserToolPresetOriginalEraserMode) {
++            m_resourceProvider->setEraserMode(m_eraserToolPresetOriginalEraserMode);
++        }
++    } else {
++        preset->settings()->setEraserMode(m_eraserToolPresetOriginalEraserMode);
++    }
++}
++
++void KisPaintopBox::applyEraserSizeAndOpacityMemory(bool toEraser)
++{
++    // Same behaviour as the former eraser *mode*: when the "eraser size/opacity"
++    // options of the brush editor are on, a preset keeps a separate size and
++    // opacity for erasing and for painting.
++    KisPaintOpPresetSP preset = m_resourceProvider->currentPreset();
++    if (!preset) return;
++    KisPaintOpSettingsSP settings = preset->settings();
++
++    if (m_eraserBrushSizeEnabled) {
++        const qreal currentSize = m_resourceProvider->size();
++
++        if (toEraser) {
+             settings->setSavedBrushSize(currentSize);
+             if (qFuzzyIsNull(settings->savedEraserSize())) {
+                 settings->setSavedEraserSize(currentSize);
+@@ -1153,17 +1280,14 @@
+             }
+         }
+ 
+-        //update value in UI (this is the main place the value is 'stored' in memory)
+-        qreal newSize = checked ? settings->savedEraserSize() : settings->savedBrushSize();
++        const qreal newSize = toEraser ? settings->savedEraserSize() : settings->savedBrushSize();
+         m_resourceProvider->setSize(newSize);
+     }
+-    if (oldEraserMode != checked && m_eraserBrushOpacityEnabled) {
+-        const qreal currentOpacity = m_resourceProvider->opacity();
+ 
+-        KisPaintOpSettingsSP settings = m_resourceProvider->currentPreset()->settings();
++    if (m_eraserBrushOpacityEnabled) {
++        const qreal currentOpacity = m_resourceProvider->opacity();
+ 
+-        // remember brush opacity. set the eraser opacity to the normal brush opacity if not set
+-        if (checked) {
++        if (toEraser) {
+             settings->setSavedBrushOpacity(currentOpacity);
+             if (qFuzzyIsNull(settings->savedEraserOpacity())) {
+                 settings->setSavedEraserOpacity(currentOpacity);
+@@ -1175,8 +1299,7 @@
+             }
+         }
+ 
+-        //update value in UI (this is the main place the value is 'stored' in memory)
+-        qreal newOpacity = checked ? settings->savedEraserOpacity() : settings->savedBrushOpacity();
++        const qreal newOpacity = toEraser ? settings->savedEraserOpacity() : settings->savedBrushOpacity();
+         m_resourceProvider->setOpacity(newOpacity);
+     }
+ }
+@@ -1276,6 +1399,15 @@
+     if (!m_viewManager->canvasBase()) return;
+ 
+     QString  id   = m_viewManager->toolManager()->activeToolId();
++
++    const bool isEraserTool = (id == ERASER_TOOL_ID);
++    if (isEraserTool != m_eraserToolActive) {
++        setEraserToolActive(isEraserTool);
++    }
++    if (!isEraserTool && !id.isEmpty()) {
++        m_toolBeforeEraserId = id;
++    }
++
+     KisTool* tool = dynamic_cast<KisTool*>(m_viewManager->toolManager()->toolById(m_viewManager->canvasBase(), id));
+ 
+     setSliderValue("opacity", m_resourceProvider->opacity());
+@@ -1379,7 +1511,14 @@
+ 
+ void KisPaintopBox::slotUnsetEraseMode()
+ {
+-    m_eraseAction->setChecked(false);
++    // In the Eraser tool, picking a colour keeps you erasing.
++    if (m_eraserToolActive) return;
++
++    // Outside of it, a preset that has eraser mode baked in stops erasing
++    // when a colour is picked (the old behaviour).
++    if (m_resourceProvider->eraserMode()) {
++        m_resourceProvider->setEraserMode(false);
++    }
+ }
+ 
+ void KisPaintopBox::slotToggleAlphaLockMode(bool checked)
+--- a/plugins/tools/basictools/kis_tool_brush.h
++++ b/plugins/tools/basictools/kis_tool_brush.h
+@@ -24,6 +24,8 @@
+ #include <KoIcon.h>
+ 
+ class QCheckBox;
++class QCursor;
++class KUndo2MagicString;
+ class QComboBox;
+ class QLabel;
+ 
+@@ -70,6 +72,10 @@
+     bool stabilizeSensors() const;
+ 
+ protected:
++    /// For tools built on top of the brush tool (e.g. KisToolEraser)
++    /// that need their own cursor and undo command name.
++    KisToolBrush(KoCanvasBase *canvas, const QCursor &cursor, const KUndo2MagicString &transactionText);
++
+     KConfigGroup m_configGroup; // only used in the multihand tool for now
+ 
+ protected Q_SLOTS:
+--- a/plugins/tools/basictools/kis_tool_brush.cc
++++ b/plugins/tools/basictools/kis_tool_brush.cc
+@@ -53,9 +53,14 @@
+ }
+ 
+ KisToolBrush::KisToolBrush(KoCanvasBase * canvas)
+-    : KisToolFreehand(canvas,
+-                      KisCursor::loadWithSize("tool_freehand_cursor.svg", 32, 32, 2, 2),
+-                      kundo2_i18n("Freehand Brush Stroke"))
++    : KisToolBrush(canvas,
++                   KisCursor::loadWithSize("tool_freehand_cursor.svg", 32, 32, 2, 2),
++                   kundo2_i18n("Freehand Brush Stroke"))
++{
++}
++
++KisToolBrush::KisToolBrush(KoCanvasBase *canvas, const QCursor &cursor, const KUndo2MagicString &transactionText)
++    : KisToolFreehand(canvas, cursor, transactionText)
+ {
+     setObjectName("tool_brush");
+     setIsOpacityPresetMode(true);
+--- a/plugins/tools/basictools/default_tools.cc
++++ b/plugins/tools/basictools/default_tools.cc
+@@ -17,6 +17,7 @@
+ #include "kis_paint_device.h"
+ #include "kis_tool_fill.h"
+ #include "kis_tool_brush.h"
++#include "kis_tool_eraser.h"
+ #include "kis_tool_multihand.h"
+ #include "kis_tool_freehand.h"
+ #include "kis_tool_gradient.h"
+@@ -39,6 +40,7 @@
+     KoToolRegistry::instance()->add(new KisToolFillFactory());
+     KoToolRegistry::instance()->add(new KisToolGradientFactory());
+     KoToolRegistry::instance()->add(new KisToolBrushFactory());
++    KoToolRegistry::instance()->add(new KisToolEraserFactory());
+     KoToolRegistry::instance()->add(new KisToolColorSamplerFactory());
+     KoToolRegistry::instance()->add(new KisToolLineFactory());
+     KoToolRegistry::instance()->add(new KisToolEllipseFactory());
+--- a/plugins/tools/basictools/CMakeLists.txt
++++ b/plugins/tools/basictools/CMakeLists.txt
+@@ -3,6 +3,7 @@
+ set(kritadefaulttools_static_SRCS
+     kis_tool_colorsampler.cc
+     kis_tool_brush.cc
++    kis_tool_eraser.cc
+     kis_tool_line.cc
+     kis_tool_line_helper.cpp
+     kis_tool_fill.cc
+--- a/krita/krita.action
++++ b/krita/krita.action
+@@ -543,10 +543,10 @@
+     </Action>
+     <Action name="erase_action">
+       <icon>draw-eraser</icon>
+-      <text>Set eraser mode</text>
++      <text>Toggle Eraser tool</text>
+       <whatsThis/>
+-      <toolTip>Set eraser mode</toolTip>
+-      <iconText>Set eraser mode</iconText>
++      <toolTip>Switch to the Eraser tool, or back to the previous tool</toolTip>
++      <iconText>Eraser tool</iconText>
+       <activationFlags>0</activationFlags>
+       <activationConditions>0</activationConditions>
+       <shortcut>E</shortcut>
+@@ -567,10 +567,10 @@
+     </Action>
+     <Action name="eraser_select_preset_action">
+       <icon>draw-eraser</icon>
+-      <text>Select eraser preset</text>
++      <text>Select Eraser tool</text>
+       <whatsThis/>
+-      <toolTip>Select eraser preset, along with the freehand brush tool</toolTip>
+-      <iconText>Select eraser preset</iconText>
++      <toolTip>Select the Eraser tool with its last used preset</toolTip>
++      <iconText>Select Eraser tool</iconText>
+       <activationFlags>0</activationFlags>
+       <activationConditions>0</activationConditions>
+       <shortcut></shortcut>
+--- /dev/null
++++ b/plugins/tools/basictools/kis_tool_eraser.h
+@@ -0,0 +1,63 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova contributors
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef KIS_TOOL_ERASER_H_
++#define KIS_TOOL_ERASER_H_
++
++#include "kis_tool_brush.h"
++
++/**
++ * A dedicated freehand Eraser tool.
++ *
++ * It behaves exactly like the Freehand Brush tool (same smoothing,
++ * stabilizer and assistant options), but it is a tool of its own instead
++ * of a brush mode:
++ *
++ *  - it keeps its own brush preset, separate from the Brush tool's
++ *    (defaults to "a) Eraser Circle");
++ *  - every preset used with it erases, whatever its blending mode;
++ *  - switching back to another tool restores that tool's preset.
++ *
++ * The preset/eraser-mode bookkeeping lives in KisPaintopBox, which
++ * watches tool changes (see KisPaintopBox::setEraserToolActive()), so
++ * the tool itself only needs to exist and identify itself.
++ */
++class KisToolEraser : public KisToolBrush
++{
++    Q_OBJECT
++public:
++    KisToolEraser(KoCanvasBase *canvas);
++    ~KisToolEraser() override;
++
++    static const QString toolId;
++};
++
++
++class KisToolEraserFactory : public KisToolBrushFactory
++{
++public:
++    KisToolEraserFactory()
++        : KisToolBrushFactory(KisToolEraser::toolId)
++    {
++        setToolTip(i18n("Eraser Tool"));
++
++        setSection(ToolBoxSection::Shape);
++        setIconName(koIconNameCStr("draw-eraser"));
++        // No default shortcut here: "E" stays bound to "erase_action",
++        // which now toggles between this tool and the previous one.
++        setPriority(1);
++        setActivationShapeId(KRITA_TOOL_ACTIVATION_ID);
++    }
++
++    ~KisToolEraserFactory() override {}
++
++    KoToolBase *createTool(KoCanvasBase *canvas) override
++    {
++        return new KisToolEraser(canvas);
++    }
++};
++
++#endif // KIS_TOOL_ERASER_H_
+--- /dev/null
++++ b/plugins/tools/basictools/kis_tool_eraser.cc
+@@ -0,0 +1,24 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova contributors
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "kis_tool_eraser.h"
++
++#include "kis_cursor.h"
++#include "kundo2magicstring.h"
++
++const QString KisToolEraser::toolId = QStringLiteral("KritaShape/KisToolEraser");
++
++KisToolEraser::KisToolEraser(KoCanvasBase *canvas)
++    : KisToolBrush(canvas,
++                   KisCursor::loadWithSize("tool_freehand_cursor.svg", 32, 32, 2, 2),
++                   kundo2_i18n("Eraser Stroke"))
++{
++    setObjectName("tool_eraser");
++}
++
++KisToolEraser::~KisToolEraser()
++{
++}
