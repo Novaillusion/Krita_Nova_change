@@ -1,0 +1,236 @@
+Krita Nova 03 - touch/pen-draggable UI on Android
+
+- KisTouchFriendlyStyle: proxy style widening docker separators and splitter
+  handles to 14 dp so they can be grabbed with a finger or stylus (Android).
+- KisLongPressEventFilter: never hold back presses on UI drag surfaces
+  (main window separators, splitter handles, docker title bars, tab bars,
+  toolbars). The filter delayed the press until the pointer moved and turned
+  a slow drag into a right click, so dragging the UI did nothing.
+
+diff --git a/libs/ui/CMakeLists.txt b/libs/ui/CMakeLists.txt
+index a37600f..43c8ea4 100644
+--- a/libs/ui/CMakeLists.txt
++++ b/libs/ui/CMakeLists.txt
+@@ -175,6 +175,7 @@ set(kritaui_LIB_SRCS
+     KisImageThumbnailStrokeStrategy.cpp
+     KisTextPropertiesManager.cpp
+     KisLongPressEventFilter.cpp
++    KisTouchFriendlyStyle.cpp
+ 
+     opengl/kis_opengl.cpp
+     opengl/kis_opengl_canvas2.cpp
+diff --git a/libs/ui/KisApplication.cpp b/libs/ui/KisApplication.cpp
+index a3bcdb2..67884cf 100644
+--- a/libs/ui/KisApplication.cpp
++++ b/libs/ui/KisApplication.cpp
+@@ -140,6 +140,7 @@
+ 
+ #if defined(Q_OS_ANDROID) && KRITA_QT_HAS_ANDROID_QPLATFORMSCREEN_DENSITY_ADJUSTMENT
+ #include <KisAndroidScaling.h>
++#include "KisTouchFriendlyStyle.h"
+ #endif
+ 
+ namespace {
+@@ -248,12 +249,18 @@ KisApplication::KisApplication(const QString &key, int &argc, char **argv)
+     QString widgetStyleFromConfig = cfg.widgetStyle();
+     QString defaultStyle = style()->objectName().toLower();
+     if (!widgetStyleFromConfig.isEmpty()) {
+-        qApp->setStyle(widgetStyleFromConfig);
++        KisTouchFriendlyStyle::applyStyle(widgetStyleFromConfig);
+     }
+ #if defined Q_OS_WIN || defined Q_OS_MACOS || defined Q_OS_ANDROID
+     else {
+         // default to Fusion instead of styles that use native theming
+-        qApp->setStyle("fusion");
++        KisTouchFriendlyStyle::applyStyle("fusion");
++    }
++#endif
++#ifdef Q_OS_ANDROID
++    // The platform default style (e.g. "android") must get touch-sized handles too
++    if (!qobject_cast<KisTouchFriendlyStyle *>(qApp->style())) {
++        KisTouchFriendlyStyle::applyStyle(style()->objectName());
+     }
+ #endif
+ 
+diff --git a/libs/ui/KisLongPressEventFilter.cpp b/libs/ui/KisLongPressEventFilter.cpp
+index 5e8d0fc..45bcdd5 100644
+--- a/libs/ui/KisLongPressEventFilter.cpp
++++ b/libs/ui/KisLongPressEventFilter.cpp
+@@ -7,14 +7,19 @@
+ #include <QAbstractSpinBox>
+ #include <QApplication>
+ #include <QComboBox>
++#include <QDockWidget>
+ #include <QContextMenuEvent>
+ #include <QCursor>
+ #include <QLineEdit>
++#include <QMainWindow>
+ #include <QMenu>
+ #include <QMenuBar>
+ #include <QMouseEvent>
+ #include <QScopedValueRollback>
+ #include <QScroller>
++#include <QSplitter>
++#include <QTabBar>
++#include <QToolBar>
+ #include <QStyleHints>
+ #include <QTimer>
+ #ifdef Q_OS_ANDROID
+@@ -282,5 +287,21 @@ bool KisLongPressEventFilter::isLongPressableWidget(QWidget *target)
+         return false;
+     }
+ 
++    // Krita Nova: surfaces that are *dragged* to rearrange or resize the UI.
++    // Holding the press back until the pointer moves (and turning a slow drag
++    // into a right click) made them unusable with a finger or a stylus:
++    //  - the main window owns the separators between dockers,
++    //  - splitter handles resize panels,
++    //  - docker title bars move/float dockers, tab bars rearrange tabs,
++    //  - toolbars are dragged by their handle.
++    if (qobject_cast<QMainWindow *>(target)
++        || qobject_cast<QSplitterHandle *>(target)
++        || qobject_cast<QDockWidget *>(target)
++        || qobject_cast<QTabBar *>(target)
++        || qobject_cast<QToolBar *>(target)
++        || target->inherits("KoDockWidgetTitleBar")) {
++        return false;
++    }
++
+     return true;
+ }
+diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
+index ee717b1..4f17be8 100644
+--- a/libs/ui/KisMainWindow.cpp
++++ b/libs/ui/KisMainWindow.cpp
+@@ -166,6 +166,7 @@
+ 
+ #if defined(Q_OS_ANDROID) && KRITA_QT_HAS_ANDROID_QPLATFORMSCREEN_DENSITY_ADJUSTMENT
+ #include <KisAndroidScaling.h>
++#include "KisTouchFriendlyStyle.h"
+ #endif
+ 
+ class ToolDockerFactory : public KoDockFactoryBase
+@@ -2573,7 +2574,7 @@ void KisMainWindow::slotUpdateWidgetStyle()
+          if(d->actionMap.value(key)->isChecked()) {
+             cfg.setWidgetStyle(key);
+             qApp->setProperty(currentUnderlyingStyleNameProperty, key);
+-            qApp->setStyle(key);
++            KisTouchFriendlyStyle::applyStyle(key);
+ 
+             // When switching to a style that uses system colors, reset the theme
+ #ifndef Q_OS_HAIKU
+diff --git a/libs/ui/KisTouchFriendlyStyle.cpp b/libs/ui/KisTouchFriendlyStyle.cpp
+new file mode 100644
+index 0000000..11986c7
+--- /dev/null
++++ b/libs/ui/KisTouchFriendlyStyle.cpp
+@@ -0,0 +1,58 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova contributors
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "KisTouchFriendlyStyle.h"
++
++#include <QApplication>
++#include <QStyleFactory>
++
++KisTouchFriendlyStyle::KisTouchFriendlyStyle(const QString &baseStyleName)
++    : QProxyStyle(baseStyleName)
++{
++    // Report the wrapped style's name ("fusion", "breeze"...): several places
++    // recreate the current style with QStyleFactory::create(style()->objectName()).
++    if (baseStyle()) {
++        setObjectName(baseStyle()->objectName());
++    }
++}
++
++int KisTouchFriendlyStyle::pixelMetric(PixelMetric metric, const QStyleOption *option, const QWidget *widget) const
++{
++    const int value = QProxyStyle::pixelMetric(metric, option, widget);
++
++    switch (metric) {
++    case PM_DockWidgetSeparatorExtent:
++    case PM_SplitterWidth:
++        return qMax(value, TOUCH_HANDLE_EXTENT);
++    default:
++        return value;
++    }
++}
++
++bool KisTouchFriendlyStyle::isEnabled()
++{
++#ifdef Q_OS_ANDROID
++    return true;
++#else
++    return false;
++#endif
++}
++
++void KisTouchFriendlyStyle::applyStyle(const QString &styleName)
++{
++    if (!isEnabled()) {
++        qApp->setStyle(styleName);
++        return;
++    }
++
++    if (!QStyleFactory::keys().contains(styleName, Qt::CaseInsensitive)) {
++        // Unknown style: let Qt handle it exactly as before (it keeps the current one).
++        qApp->setStyle(styleName);
++        return;
++    }
++
++    qApp->setStyle(new KisTouchFriendlyStyle(styleName));
++}
+diff --git a/libs/ui/KisTouchFriendlyStyle.h b/libs/ui/KisTouchFriendlyStyle.h
+new file mode 100644
+index 0000000..180e99b
+--- /dev/null
++++ b/libs/ui/KisTouchFriendlyStyle.h
+@@ -0,0 +1,45 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova contributors
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef KIS_TOUCH_FRIENDLY_STYLE_H
++#define KIS_TOUCH_FRIENDLY_STYLE_H
++
++#include <QProxyStyle>
++
++#include "kritaui_export.h"
++
++/**
++ * Proxy style used on touch devices (Android).
++ *
++ * The separators between dockers (QMainWindow) and splitter handles are only a
++ * few pixels wide in Fusion, far too thin to grab with a finger or a stylus.
++ * This style widens their hit area; everything else is forwarded unchanged to
++ * the real style, whose objectName() it also reports so that code doing
++ * QStyleFactory::create(style()->objectName()) keeps working.
++ */
++class KRITAUI_EXPORT KisTouchFriendlyStyle : public QProxyStyle
++{
++    Q_OBJECT
++public:
++    explicit KisTouchFriendlyStyle(const QString &baseStyleName);
++
++    int pixelMetric(PixelMetric metric, const QStyleOption *option = nullptr,
++                    const QWidget *widget = nullptr) const override;
++
++    /// Whether the touch-friendly style should wrap the application style.
++    static bool isEnabled();
++
++    /**
++     * Sets \p styleName as the application style, wrapped in
++     * KisTouchFriendlyStyle when isEnabled(). Use instead of qApp->setStyle(name).
++     */
++    static void applyStyle(const QString &styleName);
++
++    /// Width (in device-independent pixels) of docker separators and splitter handles.
++    static constexpr int TOUCH_HANDLE_EXTENT = 14;
++};
++
++#endif // KIS_TOUCH_FRIENDLY_STYLE_H

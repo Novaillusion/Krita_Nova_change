@@ -1,0 +1,114 @@
+Krita Nova 04 - brush editor sized relative to the screen (Android)
+
+The floating brush settings editor restored a geometry saved for another
+orientation/screen, and KisPopupButton then re-applied its previous size.
+After showing (and on rotation) it is now fitted to the screen: rescaled from
+the screen size it was saved for, then kept between 45-85% (landscape) /
+80-96% x 35-70% (portrait) of the available screen.
+
+diff --git a/libs/ui/widgets/kis_paintop_presets_editor.cpp b/libs/ui/widgets/kis_paintop_presets_editor.cpp
+index 6a580a3..274e2bc 100644
+--- a/libs/ui/widgets/kis_paintop_presets_editor.cpp
++++ b/libs/ui/widgets/kis_paintop_presets_editor.cpp
+@@ -19,6 +19,7 @@
+ #include <QFontDatabase>
+ #include <QWidgetAction>
+ #include <QScreen>
++#include <QTimer>
+ #include <QSplitter>
+ #include <QActionGroup>
+ 
+@@ -71,6 +72,9 @@ struct KisPaintOpPresetsEditor::Private
+     bool ignoreHideEvents;
+     bool isCreatingBrushFromScratch = false;
+ 
++    /// Screen size the editor's current size was chosen for (see slotFitToScreen())
++    QSize fitReferenceScreenSize;
++
+     KisSignalAutoConnectionsStore widgetConnections;
+ 
+     lager::state<KisLodAvailabilityData, lager::automatic_tag> lodAvailabilityData;
+@@ -642,6 +646,9 @@ void KisPaintOpPresetsEditor::hideEvent(QHideEvent *event)
+ 
+     QWidget *frame = this->parentWidget();
+     cfg.writeEntry("brushEditorWindowGeometry", frame->saveGeometry());
++    if (frame->screen()) {
++        cfg.writeEntry("brushEditorScreenSize", frame->screen()->availableGeometry().size());
++    }
+ 
+     QWidget::hideEvent(event);
+ }
+@@ -681,9 +688,59 @@ void KisPaintOpPresetsEditor::showEvent(QShowEvent *)
+     }
+     m_d->horzSplitter->setSizes(splitterSizes);
+ 
++#ifdef Q_OS_ANDROID
++    // The restored geometry may come from another orientation or screen, and
++    // KisPopupButton re-applies the editor's previous size right after showing
++    // it. Fit the editor to the current screen once all of that has happened,
++    // and again whenever the screen rotates while it is open.
++    m_d->fitReferenceScreenSize = cfg.readEntry("brushEditorScreenSize", QSize());
++    if (QScreen *scr = frame->screen()) {
++        connect(scr, &QScreen::availableGeometryChanged,
++                this, &KisPaintOpPresetsEditor::slotFitToScreen, Qt::UniqueConnection);
++    }
++    QTimer::singleShot(0, this, &KisPaintOpPresetsEditor::slotFitToScreen);
++#endif
++
+     Q_EMIT brushEditorShown();
+ }
+ 
++void KisPaintOpPresetsEditor::slotFitToScreen()
++{
++    QWidget *frame = parentWidget();
++    if (!frame || !isVisible() || !frame->screen()) return;
++
++    const QRect avail = frame->screen()->availableGeometry();
++    if (avail.isEmpty()) return;
++
++    QSize size = frame->size();
++
++    // The size was chosen for another screen size (other orientation, or saved on
++    // another device): keep the same proportion of the screen.
++    const QSize ref = m_d->fitReferenceScreenSize;
++    if (ref.isValid() && !ref.isEmpty() && ref != avail.size()) {
++        size = QSize(qRound(size.width() * qreal(avail.width()) / ref.width()),
++                     qRound(size.height() * qreal(avail.height()) / ref.height()));
++    }
++    m_d->fitReferenceScreenSize = avail.size();
++
++    // Keep it a usable fraction of the screen: never a sliver, never covering
++    // everything. Portrait screens get a wide, shorter editor.
++    const bool landscape = avail.width() >= avail.height();
++    const QSize maxSize(qRound(avail.width() * (landscape ? 0.85 : 0.96)),
++                        qRound(avail.height() * (landscape ? 0.90 : 0.70)));
++    const QSize minSize(qRound(avail.width() * (landscape ? 0.45 : 0.80)),
++                        qRound(avail.height() * (landscape ? 0.45 : 0.35)));
++    size = size.expandedTo(minSize).boundedTo(maxSize);
++
++    if (size == frame->size() && avail.contains(frame->geometry())) return;
++
++    QRect rect(frame->pos(), size);
++    if (!avail.contains(rect)) {
++        rect = kisEnsureInRect(rect, avail);
++    }
++    frame->setGeometry(rect);
++}
++
+ void KisPaintOpPresetsEditor::resizeEvent(QResizeEvent* event)
+ {
+     QWidget::resizeEvent(event);
+diff --git a/libs/ui/widgets/kis_paintop_presets_editor.h b/libs/ui/widgets/kis_paintop_presets_editor.h
+index 01dc93f..01d3298 100644
+--- a/libs/ui/widgets/kis_paintop_presets_editor.h
++++ b/libs/ui/widgets/kis_paintop_presets_editor.h
+@@ -108,6 +108,9 @@ private Q_SLOTS:
+     void slotToggleDetach(bool detach);
+     void slotUpdateEffectiveLodAvailable(bool value);
+ 
++    /// Krita Nova: size the floating editor relative to the screen (touch devices)
++    void slotFitToScreen();
++
+     /// we do not delete brush presets, but blacklist them so they disappear from the interface
+     void slotBlackListCurrentPreset();
+ 

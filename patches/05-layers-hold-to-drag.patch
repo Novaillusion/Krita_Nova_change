@@ -1,0 +1,345 @@
+Krita Nova 05 - layers docker: hold to drag, menu button for the layer menu (Android)
+
+- Press-and-hold on a layer starts dragging it (reorder) instead of opening the
+  context menu; moving before the hold delay still scrolls the list.
+- Each layer row gets a small menu button at its leading edge that opens the
+  layer context menu (selecting the layer first if needed).
+
+diff --git a/plugins/dockers/layerdocker/NodeDelegate.cpp b/plugins/dockers/layerdocker/NodeDelegate.cpp
+index 99b0251..9676600 100644
+--- a/plugins/dockers/layerdocker/NodeDelegate.cpp
++++ b/plugins/dockers/layerdocker/NodeDelegate.cpp
+@@ -25,6 +25,7 @@
+ #include <QStyleOptionViewItem>
+ #include <QBitmap>
+ #include <QToolTip>
++#include <QTimer>
+ 
+ #include <klocalizedstring.h>
+ #include "kis_node_view_color_scheme.h"
+@@ -133,14 +134,17 @@ void NodeDelegate::paint(QPainter *p, const QStyleOptionViewItem &o, const QMode
+         } else {
+             p->setFont(option.font);
+             drawColorLabel(p, option, index);
+-            drawThumbnail(p, option, index);
+-            drawText(p, option, index); // BUG: Creating group moves things around (RTL-layout alignment)
+-            drawIcons(p, option, index);
+-            drawDecoration(p, option, index);
+-            drawExpandButton(p, option, index);
+-            drawAnimatedDecoration(p, option, index);
+-
+-            drawProgressBar(p, option, index);
++            drawMenuButton(p, option, index);
++
++            const QStyleOptionViewItem content = contentOption(option, index);
++            drawThumbnail(p, content, index);
++            drawText(p, content, index); // BUG: Creating group moves things around (RTL-layout alignment)
++            drawIcons(p, content, index);
++            drawDecoration(p, content, index);
++            drawExpandButton(p, content, index);
++            drawAnimatedDecoration(p, content, index);
++
++            drawProgressBar(p, content, index);
+         }
+     }
+     p->restore();
+@@ -1033,8 +1037,49 @@ NodeDelegate::Private::propForMousePos(const QModelIndex &index, const QPoint &m
+     return boost::none;
+ }
+ 
+-bool NodeDelegate::editorEvent(QEvent *event, QAbstractItemModel *model, const QStyleOptionViewItem &option, const QModelIndex &index)
++bool NodeDelegate::editorEvent(QEvent *event, QAbstractItemModel *model, const QStyleOptionViewItem &fullOption, const QModelIndex &index)
+ {
++    // Krita Nova: the layer menu button
++    if (menuButtonEnabled()
++        && index.column() != NodeView::VISIBILITY_COL && index.column() != NodeView::SELECTED_COL
++        && (event->type() == QEvent::MouseButtonPress
++            || event->type() == QEvent::MouseButtonDblClick
++            || event->type() == QEvent::MouseButtonRelease)) {
++
++        QMouseEvent *mouseEvent = static_cast<QMouseEvent*>(event);
++        const QRect buttonRect = menuButtonRect(fullOption, index);
++
++        if (buttonRect.contains(mouseEvent->pos())) {
++            if (event->type() == QEvent::MouseButtonPress && (index.flags() & Qt::ItemIsEnabled)) {
++                // The menu acts on the selected layers: make this one the (only) selected one
++                // unless it is already part of the selection.
++                QItemSelectionModel *selectionModel = d->view->selectionModel();
++                if (!selectionModel->isRowSelected(index.row(), index.parent())) {
++                    selectionModel->setCurrentIndex(index, QItemSelectionModel::ClearAndSelect
++                                                               | QItemSelectionModel::Rows);
++                } else {
++                    selectionModel->setCurrentIndex(index, QItemSelectionModel::NoUpdate);
++                }
++
++                // Open the menu under the button once this press has been handled,
++                // not from inside the event (the menu runs its own event loop).
++                const QPoint globalPos = d->view->viewport()->mapToGlobal(
++                    (fullOption.direction == Qt::RightToLeft ? buttonRect.bottomRight() : buttonRect.bottomLeft()));
++                QPointer<NodeView> view = d->view;
++                const QPersistentModelIndex persistentIndex(index);
++                QTimer::singleShot(0, d->view, [view, globalPos, persistentIndex]() {
++                    if (view && persistentIndex.isValid()) {
++                        view->requestContextMenu(globalPos, persistentIndex);
++                    }
++                });
++            }
++            return true;
++        }
++    }
++
++    // Everything else in the row is laid out next to the menu button.
++    const QStyleOptionViewItem option = contentOption(fullOption, index);
++
+     //Explicitly handle mouse release events
+     if (event->type() == QEvent::MouseButtonRelease &&index.flags() & Qt::ItemIsEnabled)  {
+         //For some reason qt5 doesn't give us which button was released, From my testing i couldn't get a release event on rmb, so we assume that it's lmb
+@@ -1418,6 +1463,78 @@ void NodeDelegate::slotResetState(){
+     }
+ }
+ 
++bool NodeDelegate::menuButtonEnabled()
++{
++#ifdef Q_OS_ANDROID
++    return true;
++#else
++    return false;
++#endif
++}
++
++int NodeDelegate::menuButtonWidth() const
++{
++    KisNodeViewColorScheme scm;
++    // wide enough to hit with a fingertip, small enough not to crowd the row
++    return qMax(24, scm.iconSize() + 2 * scm.iconMargin() + 2 * scm.border());
++}
++
++QRect NodeDelegate::menuButtonRect(const QStyleOptionViewItem &option, const QModelIndex &index) const
++{
++    if (!menuButtonEnabled()
++        || index.column() == NodeView::VISIBILITY_COL || index.column() == NodeView::SELECTED_COL) {
++        return QRect();
++    }
++
++    QRect rc(0, 0, menuButtonWidth(), d->rowHeight > 0 ? d->rowHeight : option.rect.height());
++    rc.moveTop(option.rect.top());
++    if (option.direction == Qt::RightToLeft) {
++        rc.moveRight(option.rect.right());
++    } else {
++        rc.moveLeft(option.rect.left());
++    }
++    return rc;
++}
++
++QStyleOptionViewItem NodeDelegate::contentOption(const QStyleOptionViewItem &option, const QModelIndex &index) const
++{
++    QStyleOptionViewItem content = option;
++    const QRect button = menuButtonRect(option, index);
++    if (button.isValid()) {
++        if (option.direction == Qt::RightToLeft) {
++            content.rect.setRight(button.left() - 1);
++        } else {
++            content.rect.setLeft(button.right() + 1);
++        }
++    }
++    return content;
++}
++
++void NodeDelegate::drawMenuButton(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index) const
++{
++    const QRect button = menuButtonRect(option, index);
++    if (!button.isValid()) return;
++
++    KisNodeViewColorScheme scm;
++    const QIcon icon = KisIconUtils::loadIcon("hamburger_menu_dots");
++    const int size = qMin(scm.iconSize(), button.width() - 2 * scm.border());
++    QRect iconRect(0, 0, size, size);
++    iconRect.moveCenter(button.center());
++
++    p->save();
++    if (!(option.state & QStyle::State_Enabled)) {
++        p->setOpacity(0.35);
++    }
++    icon.paint(p, iconRect, Qt::AlignCenter,
++               (option.state & QStyle::State_Selected) ? QIcon::Selected : QIcon::Normal);
++
++    // thin divider between the button and the layer thumbnail
++    p->setPen(scm.gridColor(option, d->view));
++    const int x = (option.direction == Qt::RightToLeft) ? button.left() : button.right();
++    p->drawLine(x, button.top() + scm.border(), x, button.bottom() - scm.border());
++    p->restore();
++}
++
+ QRect NodeDelegate::filterColorClickRect(const QStyleOptionViewItem &option, const QModelIndex &index) const
+ {
+     KisNodeViewColorScheme scm;
+diff --git a/plugins/dockers/layerdocker/NodeDelegate.h b/plugins/dockers/layerdocker/NodeDelegate.h
+index 746f264..2ff8595 100644
+--- a/plugins/dockers/layerdocker/NodeDelegate.h
++++ b/plugins/dockers/layerdocker/NodeDelegate.h
+@@ -83,6 +83,15 @@ private:
+     // The area taken by the color preview rect for some types of filter masks.
+     QRect filterColorClickRect(const QStyleOptionViewItem &option, const QModelIndex &index) const;
+ 
++    // Krita Nova: layer menu button at the leading edge of each row (touch devices),
++    // replacing press-and-hold as the way to open a layer's context menu.
++    static bool menuButtonEnabled();
++    int menuButtonWidth() const;
++    QRect menuButtonRect(const QStyleOptionViewItem &option, const QModelIndex &index) const;
++    /// \p option with the menu button strip removed: all other row geometry is laid out in it
++    QStyleOptionViewItem contentOption(const QStyleOptionViewItem &option, const QModelIndex &index) const;
++    void drawMenuButton(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index) const;
++
+ public Q_SLOTS:
+     void slotConfigChanged();
+ private Q_SLOTS:
+diff --git a/plugins/dockers/layerdocker/NodeView.cpp b/plugins/dockers/layerdocker/NodeView.cpp
+index 4b60268..6dfb86c 100644
+--- a/plugins/dockers/layerdocker/NodeView.cpp
++++ b/plugins/dockers/layerdocker/NodeView.cpp
+@@ -31,6 +31,7 @@
+ #include <QPainter>
+ #include <QScrollBar>
+ #include <QScroller>
++#include <QTimer>
+ 
+ #include "kis_node_view_color_scheme.h"
+ 
+@@ -51,6 +52,20 @@
+ #endif
+ 
+ 
++namespace {
++// Krita Nova: on touch devices, press-and-hold on a layer drags it (to reorder)
++// instead of opening the context menu, which has its own button in each row.
++bool longPressDragEnabled()
++{
++#ifdef Q_OS_ANDROID
++    return true;
++#else
++    return false;
++#endif
++}
++constexpr int LONG_PRESS_DRAG_DELAY = 450; // ms
++}
++
+ class Q_DECL_HIDDEN NodeView::Private
+ {
+ public:
+@@ -75,6 +90,10 @@ public:
+     bool shiftClickFix;
+ #endif
+     bool ignoreDataChanged = false;
++
++    QTimer longPressTimer;
++    QPersistentModelIndex longPressIndex;
++    QPoint longPressPos;
+ };
+ 
+ 
+@@ -105,6 +124,17 @@ NodeView::NodeView(QWidget *parent)
+                     this, SLOT(slotScrollerStateChanged(QScroller::State)));
+         }
+     }
++
++    if (longPressDragEnabled()) {
++        // Keep KisLongPressEventFilter from turning press-and-hold into a right
++        // click (= context menu) on the layer list; we handle long presses ourselves.
++        setProperty("KRITA_LONG_PRESS", false);
++        viewport()->setProperty("KRITA_LONG_PRESS", false);
++
++        d->longPressTimer.setSingleShot(true);
++        d->longPressTimer.setInterval(LONG_PRESS_DRAG_DELAY);
++        connect(&d->longPressTimer, &QTimer::timeout, this, &NodeView::slotLongPressTimeout);
++    }
+ }
+ 
+ NodeView::~NodeView()
+@@ -224,8 +254,18 @@ bool NodeView::viewportEvent(QEvent *e)
+             if (d->delegate.editorEvent(e, model(), optionForIndex(index), index)) {
+                 return true;
+             }
++
++            if (longPressDragEnabled()) {
++                QMouseEvent *me = static_cast<QMouseEvent*>(e);
++                if (me->button() == Qt::LeftButton && me->modifiers() == Qt::NoModifier) {
++                    d->longPressIndex = index;
++                    d->longPressPos = pos;
++                    d->longPressTimer.start();
++                }
++            }
+         } break;
+         case QEvent::MouseButtonRelease: {
++            d->longPressTimer.stop();
+             const QPoint pos = static_cast<QMouseEvent*>(e)->pos();
+             QModelIndex index = model()->buddy(indexAt(pos));
+             if (!indexAt(pos).isValid()) {
+@@ -246,6 +286,11 @@ bool NodeView::viewportEvent(QEvent *e)
+             d->hovered = QModelIndex();
+         } break;
+         case QEvent::MouseMove: {
++            if (d->longPressTimer.isActive()
++                && (static_cast<QMouseEvent*>(e)->pos() - d->longPressPos).manhattanLength()
++                       > qApp->startDragDistance()) {
++                d->longPressTimer.stop();
++            }
+ #ifdef DRAG_WHILE_DRAG_WORKAROUND
+             if (d->isDragging) {
+                 return false;
+@@ -308,6 +353,31 @@ void NodeView::showContextMenu(const QPoint &globalPos, const QModelIndex &index
+     Q_EMIT contextMenuRequested(globalPos, index);
+ }
+ 
++void NodeView::requestContextMenu(const QPoint &globalPos, const QModelIndex &index)
++{
++    showContextMenu(globalPos, index);
++}
++
++void NodeView::slotLongPressTimeout()
++{
++    const QModelIndex index = d->longPressIndex;
++    d->longPressIndex = QModelIndex();
++    if (!index.isValid() || !model()) return;
++
++    // The finger is still down: stop the kinetic scroller from treating the
++    // rest of the gesture as a scroll, and drag the layer instead.
++    if (QScroller::hasScroller(this)) {
++        QScroller::scroller(this)->stop();
++    }
++
++    QItemSelectionModel *selection = selectionModel();
++    if (!selection->isRowSelected(index.row(), index.parent())) {
++        selection->setCurrentIndex(index, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
++    }
++
++    startDrag(Qt::MoveAction);
++}
++
+ void NodeView::currentChanged(const QModelIndex &current, const QModelIndex &previous)
+ {
+     QTreeView::currentChanged(current, previous);
+diff --git a/plugins/dockers/layerdocker/NodeView.h b/plugins/dockers/layerdocker/NodeView.h
+index 145206f..18b9691 100644
+--- a/plugins/dockers/layerdocker/NodeView.h
++++ b/plugins/dockers/layerdocker/NodeView.h
+@@ -99,6 +99,9 @@ public:
+ 
+     void toggleSolo(const QModelIndex &index);
+ 
++    /// Opens the layer context menu for \p index (used by the per-row menu button)
++    void requestContextMenu(const QPoint &globalPos, const QModelIndex &index);
++
+ protected:
+     QItemSelectionModel::SelectionFlags selectionCommand(const QModelIndex &index, const QEvent *event) const override;
+     QModelIndex indexAt(const QPoint &point) const override;
+@@ -113,6 +116,10 @@ protected:
+      */
+     int cursorPageIndex() const;
+ 
++private Q_SLOTS:
++    /// Krita Nova: press-and-hold on a layer starts dragging it
++    void slotLongPressTimeout();
++
+ public Q_SLOTS:
+     /// called with a theme change to refresh icon colors
+     void slotUpdateIcons();
