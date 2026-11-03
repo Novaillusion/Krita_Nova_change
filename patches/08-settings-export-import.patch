@@ -11,13 +11,13 @@ Previous settings are backed up to <config>/krita-settings-backup first. The dev
 own ResourceDirectory, RecentFiles and File Dialogs entries are kept.
 
 Core logic (KisSettingsTransferCore) depends only on QtCore + KConfigCore and is unit
-tested by tests/settings-transfer (CI workflow tests.yml). KRITA5_XMLGUI_VERSION 546.
+tested by tests/settings-transfer (CI workflow tests.yml). KRITA5_XMLGUI_VERSION 546, xmlgui hash updated.
 
 diff --git a/krita/CMakeLists.txt b/krita/CMakeLists.txt
-index 8358aa1..c00c0cf 100644
+index 8358aa1..c8e4981 100644
 --- a/krita/CMakeLists.txt
 +++ b/krita/CMakeLists.txt
-@@ -126,7 +126,7 @@ endif()
+@@ -126,11 +126,11 @@ endif()
  # make a change that applies to all systems, remove any conditions. The version
  # you specify should always be one higher than any version number you see here,
  # no matter what you're doing. Do not re-use versions.
@@ -26,6 +26,11 @@ index 8358aa1..c00c0cf 100644
  
  # After updating the version number properly, put the new hash that the CMake
  # error lists as the "actual hash" here.
+-set(krita5_xmlgui_hash_expected "3552fc6831582120dfe9eb0d9df537bc")
++set(krita5_xmlgui_hash_expected "c06c58b36619ceb34c37e23584121d56")
+ 
+ # You can stop reading now, the stuff that follows doesn't need to be modified.
+ # ==============================================================================
 diff --git a/krita/krita5.xmlgui b/krita/krita5.xmlgui
 index d76ccc7..7eb11f8 100644
 --- a/krita/krita5.xmlgui

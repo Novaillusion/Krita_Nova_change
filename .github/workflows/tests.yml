@@ -35,6 +35,20 @@ jobs:
             git apply --whitespace=nowarn "$p"
           done
 
+      - name: Check krita5.xmlgui version hash
+        # Krita's CMake refuses to configure when krita5.xmlgui changed without
+        # updating krita5_xmlgui_hash_expected (and bumping KRITA5_XMLGUI_VERSION).
+        run: |
+          python3 - <<'PY'
+          import hashlib, re, sys
+          xml = open('krita/krita/krita5.xmlgui', encoding='utf-8').read()
+          actual = hashlib.md5(re.sub(r'[ \t\r\n]+', '', xml).encode()).hexdigest()
+          expected = re.search(r'krita5_xmlgui_hash_expected "([0-9a-f]+)"',
+                               open('krita/krita/CMakeLists.txt').read()).group(1)
+          print('krita5.xmlgui hash', actual, 'expected', expected)
+          sys.exit(0 if actual == expected else 1)
+          PY
+
       - name: Build and run settings transfer tests
         run: |
           cmake -S tests/settings-transfer -B build-tests -G Ninja -DKRITA_SRC="$PWD/krita"
