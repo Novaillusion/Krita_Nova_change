@@ -2,6 +2,8 @@ Krita Nova 02 - live stroke previews in the brush preset chooser (Details view)
 
 Rebased from krita-6.0.4 onto krita master (5.4/6.1 tree).
 Changes vs the original patch:
+  - brush tip icon uses KisBrush::image() instead of brushTipImage(), which
+    asserts for auto brushes (crash dialog on startup in the first APK)
   - paths: krita-6.0.4/... -> repository root
   - new files marked as new (were diffed against a 1970 placeholder)
   - libs/ui/CMakeLists.txt hunk re-anchored for master
@@ -304,10 +306,10 @@ index 31eae8f..083ca6f 100644
      ViewMode m_mode;
 diff --git a/libs/ui/widgets/kis_preset_stroke_renderer.cpp b/libs/ui/widgets/kis_preset_stroke_renderer.cpp
 new file mode 100644
-index 0000000..5c60635
+index 0000000..69a7522
 --- /dev/null
 +++ b/libs/ui/widgets/kis_preset_stroke_renderer.cpp
-@@ -0,0 +1,338 @@
+@@ -0,0 +1,342 @@
 +/*
 + *  Stroke drawing logic adapted from kis_preset_live_preview_view.cpp
 + *  (SPDX-FileCopyrightText: 2017 Scott Petrovic <scottpetrovic@gmail.com>)
@@ -459,7 +461,11 @@ index 0000000..5c60635
 +            brush = KisBrush::fromXML(element, KisGlobalResourcesInterface::instance());
 +        }
 +
-+        QImage tip = brush ? brush->brushTipImage() : QImage();
++        // Use the brush resource's preview image, not brushTipImage(): auto brushes (e.g. "Basic-5")
++        // generate their tip on demand, so brushTipImage() is null for them and trips a
++        // KIS_SAFE_ASSERT in KisBrush::brushTipImage(). image() is always set: KisAutoBrush stores
++        // createBrushPreview(128) there, other brushes get it from setBrushTipImage().
++        QImage tip = brush ? brush->image() : QImage();
 +        if (!tip.isNull()) {
 +            const int S = 128;
 +            tip = tip.scaled(S, S, Qt::KeepAspectRatio, Qt::SmoothTransformation)
