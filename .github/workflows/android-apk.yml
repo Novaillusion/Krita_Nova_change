@@ -132,6 +132,8 @@ jobs:
 
       - name: Create debug signing key (first run only)
         run: |
+          # Make Gradle use exactly this key (AGP looks at ANDROID_USER_HOME first)
+          echo "ANDROID_USER_HOME=$HOME/.android" >> "$GITHUB_ENV"
           if [ ! -f ~/.android/debug.keystore ]; then
             mkdir -p ~/.android
             keytool -genkeypair -v -keystore ~/.android/debug.keystore -storepass android \
@@ -155,6 +157,24 @@ jobs:
           KRITA_SRC: ${{ env.WORK }}/src
           OUT: ${{ github.workspace }}/out
         run: bash "$WORK/src/packaging/android/local-build/build-krita-android.sh"
+
+      # Every APK must carry the same certificate, or Android refuses to install it
+      # over the previous one (INSTALL_FAILED_UPDATE_INCOMPATIBLE).
+      - name: Check APK signing certificate
+        run: |
+          APK="$(ls out/*.apk | head -1)"
+          SIGNER="$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)"
+          APK_SHA="$("$SIGNER" verify --print-certs "$APK" | sed -n 's/.*certificate SHA-256 digest: //p' | head -1)"
+          KEY_SHA="$(keytool -list -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey \
+                     | sed -n 's/^[[:space:]]*SHA256: //p' | tr -d ':' | tr 'A-F' 'a-f')"
+          echo "APK  certificate SHA-256: $APK_SHA"
+          echo "key  certificate SHA-256: $KEY_SHA"
+          echo "### Signing certificate SHA-256" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$APK_SHA\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$APK_SHA" ] || [ "$APK_SHA" != "$KEY_SHA" ]; then
+            echo "::error::The APK is not signed with the saved Krita Nova debug key"
+            exit 1
+          fi
 
       - name: Save compiler cache
         if: always()
