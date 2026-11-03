@@ -14,6 +14,7 @@ prebuilt Android dependencies (Qt5, KF5, …) itself.
 | `05-layers-hold-to-drag.patch` | Layers docker: press-and-hold drags a layer; a menu button on each row opens the layer menu (Android) |
 | `06-screen-tracker-rotation.patch` | Fixes a SAFE ASSERT dialog when rotating the device with the brush editor open |
 | `07-faster-fill-tool.patch` | Faster Fill tool: default fills use the fast path; other fills no longer paint a whole-canvas temporary layer |
+| `08-settings-export-import.patch` | Settings → Export Settings… / Import Settings… (settings, shortcuts, toolbars, input profiles in one .zip) |
 
 ## Get an APK
 
@@ -66,6 +67,7 @@ KRITA_REF                           upstream Krita commit that is built
 patches/                            Krita Nova changes, applied in order
 patches/original/                   patches as originally received (not applied)
 build/                              build kit, also usable locally (see build/README-local-build.md)
+tests/                              unit tests run against the patched source (workflow tests.yml)
 ```
 
 The same kit builds locally on Windows with Docker:

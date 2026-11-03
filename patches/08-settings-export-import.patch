@@ -1,0 +1,1018 @@
+Krita Nova 08 - Settings > Export Settings... / Import Settings...
+
+Export packs Krita's settings into a zip: kritarc, kritadisplayrc, kritashortcutsrc,
+klanguageoverridesrc (config folder) and krita5.xmlgui + input/*.profile (resource
+folder), with a krita-settings.json manifest.
+
+Import validates the zip (whitelisted file names only), stages it in the config folder
+and applies it at the very beginning of the next start (main()), before anything reads
+the configuration, so nothing written while Krita runs or quits overwrites it.
+Previous settings are backed up to <config>/krita-settings-backup first. The device's
+own ResourceDirectory, RecentFiles and File Dialogs entries are kept.
+
+Core logic (KisSettingsTransferCore) depends only on QtCore + KConfigCore and is unit
+tested by tests/settings-transfer (CI workflow tests.yml). KRITA5_XMLGUI_VERSION 546.
+
+diff --git a/krita/CMakeLists.txt b/krita/CMakeLists.txt
+index 8358aa1..c00c0cf 100644
+--- a/krita/CMakeLists.txt
++++ b/krita/CMakeLists.txt
+@@ -126,7 +126,7 @@ endif()
+ # make a change that applies to all systems, remove any conditions. The version
+ # you specify should always be one higher than any version number you see here,
+ # no matter what you're doing. Do not re-use versions.
+-set(KRITA5_XMLGUI_VERSION 545)
++set(KRITA5_XMLGUI_VERSION 546)
+ 
+ # After updating the version number properly, put the new hash that the CMake
+ # error lists as the "actual hash" here.
+diff --git a/krita/krita5.xmlgui b/krita/krita5.xmlgui
+index d76ccc7..7eb11f8 100644
+--- a/krita/krita5.xmlgui
++++ b/krita/krita5.xmlgui
+@@ -407,6 +407,8 @@ xsi:schemaLocation="http://www.kde.org/standards/kxmlgui/1.0  http://www.kde.org
+       <Action name="switch_application_language"/>
+       <Action name="settings_active_author"/>
+       <Separator/>
++      <Action name="export_settings"/>
++      <Action name="import_settings"/>
+       <Action name="reset_configurations"/>
+       <Separator/>
+     </Menu>
+diff --git a/krita/kritamenu.action b/krita/kritamenu.action
+index 26df199..8d35d2c 100644
+--- a/krita/kritamenu.action
++++ b/krita/kritamenu.action
+@@ -1892,6 +1892,26 @@
+       <isCheckable></isCheckable>
+       <statusTip></statusTip>
+     </Action>
++    <Action name="export_settings">
++      <icon>document-export</icon>
++      <text>Export Settings...</text>
++      <whatsThis></whatsThis>
++      <toolTip>Save Krita's settings, shortcuts, toolbars and input profiles to a file</toolTip>
++      <iconText>Export Settings</iconText>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip></statusTip>
++    </Action>
++    <Action name="import_settings">
++      <icon>document-import</icon>
++      <text>Import Settings...</text>
++      <whatsThis></whatsThis>
++      <toolTip>Restore Krita's settings from a file exported with Export Settings</toolTip>
++      <iconText>Import Settings</iconText>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip></statusTip>
++    </Action>
+     <Action name="reset_configurations">
+       <icon></icon>
+       <text>Reset All Settings</text>
+diff --git a/krita/main.cc b/krita/main.cc
+index 4941497..98e1d96 100644
+--- a/krita/main.cc
++++ b/krita/main.cc
+@@ -93,6 +93,7 @@
+ 
+ #if defined HAVE_KCRASH
+ #include <kcrash.h>
++#include <KisSettingsTransfer.h>
+ #elif defined USE_DRMINGW
+ namespace
+ {
+@@ -220,6 +221,10 @@ extern "C" MAIN_EXPORT int MAIN_FN(int argc, char **argv)
+     KisAndroidUtils::performInitialSetup();
+ #endif
+ 
++    // Krita Nova: settings staged by Settings > Import Settings... are applied
++    // here, before anything reads the configuration files.
++    KisSettingsTransfer::applyPendingImport();
++
+ #ifdef Q_OS_WIN
+     // Fix QCommandLineParser help output with UTF-8 codepage:
+     if (GetACP() == CP_UTF8) {
+diff --git a/libs/ui/CMakeLists.txt b/libs/ui/CMakeLists.txt
+index 43c8ea4..c7045dc 100644
+--- a/libs/ui/CMakeLists.txt
++++ b/libs/ui/CMakeLists.txt
+@@ -176,6 +176,8 @@ set(kritaui_LIB_SRCS
+     KisTextPropertiesManager.cpp
+     KisLongPressEventFilter.cpp
+     KisTouchFriendlyStyle.cpp
++    KisSettingsTransferCore.cpp
++    KisSettingsTransfer.cpp
+ 
+     opengl/kis_opengl.cpp
+     opengl/kis_opengl_canvas2.cpp
+diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
+index 4f17be8..e116b1c 100644
+--- a/libs/ui/KisMainWindow.cpp
++++ b/libs/ui/KisMainWindow.cpp
+@@ -167,6 +167,7 @@
+ #if defined(Q_OS_ANDROID) && KRITA_QT_HAS_ANDROID_QPLATFORMSCREEN_DENSITY_ADJUSTMENT
+ #include <KisAndroidScaling.h>
+ #include "KisTouchFriendlyStyle.h"
++#include "KisSettingsTransfer.h"
+ #endif
+ 
+ class ToolDockerFactory : public KoDockFactoryBase
+@@ -266,6 +267,8 @@ public:
+     KisAction *mdiPreviousWindow {nullptr};
+     KisAction *toggleDockers {nullptr};
+     KisAction *resetConfigurations {nullptr};
++    KisAction *exportSettings {nullptr};
++    KisAction *importSettings {nullptr};
+     KisAction *toggleDockerTitleBars {nullptr};
+ #ifdef Q_OS_ANDROID
+     KisAction *showDonationManagementDialog {nullptr};
+@@ -2399,6 +2402,16 @@ void KisMainWindow::slotResetConfigurations()
+     kisApp->askResetConfig();
+ }
+ 
++void KisMainWindow::slotExportSettings()
++{
++    KisSettingsTransfer::exportSettings(this);
++}
++
++void KisMainWindow::slotImportSettings()
++{
++    KisSettingsTransfer::importSettings(this);
++}
++
+ void KisMainWindow::slotNewToolbarConfig()
+ {
+     applyMainWindowSettings(d->windowStateConfig);
+@@ -3142,6 +3155,14 @@ void KisMainWindow::createActions()
+     d->resetConfigurations  = actionManager->createAction("reset_configurations");
+     connect(d->resetConfigurations, SIGNAL(triggered()), this, SLOT(slotResetConfigurations()));
+ 
++    d->exportSettings = actionManager->createAction("export_settings");
++    connect(d->exportSettings, SIGNAL(triggered()), this, SLOT(slotExportSettings()));
++    d->importSettings = actionManager->createAction("import_settings");
++    connect(d->importSettings, SIGNAL(triggered()), this, SLOT(slotImportSettings()));
++
++    // Tell the user about settings imported at this start (see KisSettingsTransfer)
++    QTimer::singleShot(1500, this, [this]() { KisSettingsTransfer::showImportResult(this); });
++
+ #ifndef Q_OS_ANDROID
+     d->toggleDetachCanvas = actionManager->createAction("view_detached_canvas");
+     d->toggleDetachCanvas->setChecked(false);
+diff --git a/libs/ui/KisMainWindow.h b/libs/ui/KisMainWindow.h
+index d351fa7..c43c566 100644
+--- a/libs/ui/KisMainWindow.h
++++ b/libs/ui/KisMainWindow.h
+@@ -359,6 +359,8 @@ private Q_SLOTS:
+      * Reset User Configurations.
+      */
+     void slotResetConfigurations();
++    void slotExportSettings();
++    void slotImportSettings();
+ 
+     /**
+      *  Shows or hides a toolbar
+diff --git a/libs/ui/KisSettingsTransfer.cpp b/libs/ui/KisSettingsTransfer.cpp
+new file mode 100644
+index 0000000..6288424
+--- /dev/null
++++ b/libs/ui/KisSettingsTransfer.cpp
+@@ -0,0 +1,318 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova contributors
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "KisSettingsTransfer.h"
++#include "KisSettingsTransferCore.h"
++
++#include <QBuffer>
++#include <QDate>
++#include <QDateTime>
++#include <QDebug>
++#include <QDir>
++#include <QFile>
++#include <QJsonObject>
++#include <QLocale>
++#include <QMessageBox>
++#include <QSaveFile>
++#include <QScopedPointer>
++#include <QStandardPaths>
++#include <QSysInfo>
++#include <QTimer>
++#include <QWidget>
++
++#include <KSharedConfig>
++#include <klocalizedstring.h>
++
++#include <KoFileDialog.h>
++#include <KoStore.h>
++#include <KritaVersionWrapper.h>
++
++namespace Core = KisSettingsTransferCore;
++
++namespace {
++
++QString configDir()
++{
++    return QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
++}
++
++QString appDataLocation()
++{
++    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
++}
++
++QString platformName()
++{
++    return QSysInfo::productType(); // "android", "windows", "macos", "ubuntu"...
++}
++
++bool readArchive(const QByteArray &zip,
++                 QVector<Core::Entry> *entries,
++                 QJsonObject *info,
++                 QHash<QString, QByteArray> *files,
++                 QString *error)
++{
++    QBuffer buffer;
++    buffer.setData(zip);
++    QScopedPointer<KoStore> store(KoStore::createStore(&buffer, KoStore::Read, QByteArray(), KoStore::Zip));
++    if (!store || store->bad()) {
++        *error = i18n("The file is not a valid zip archive.");
++        return false;
++    }
++
++    if (!store->hasFile(Core::MANIFEST_NAME) || !store->open(Core::MANIFEST_NAME)) {
++        *error = i18n("This is not a Krita settings file (%1 is missing).", Core::MANIFEST_NAME);
++        return false;
++    }
++    const QByteArray manifest = store->read(store->size());
++    store->close();
++
++    QString parseError;
++    if (!Core::parseManifest(manifest, entries, info, &parseError)) {
++        *error = parseError;
++        return false;
++    }
++
++    if (files) {
++        Q_FOREACH (const Core::Entry &entry, *entries) {
++            const QString name = Core::archivePath(entry);
++            if (!store->hasFile(name) || !store->open(name)) {
++                *error = i18n("The settings file is incomplete: %1 is missing.", name);
++                return false;
++            }
++            files->insert(name, store->read(store->size()));
++            store->close();
++        }
++    }
++    return true;
++}
++
++QString describe(const QJsonObject &info, int fileCount)
++{
++    const QDateTime created = QDateTime::fromString(info.value(QStringLiteral("created")).toString(), Qt::ISODate);
++    return i18n("Created: %1\nKrita version: %2\nDevice type: %3\nFiles: %4",
++                created.isValid() ? QLocale().toString(created.toLocalTime(), QLocale::ShortFormat) : i18n("unknown"),
++                info.value(QStringLiteral("kritaVersion")).toString(),
++                info.value(QStringLiteral("platform")).toString(),
++                fileCount);
++}
++
++} // namespace
++
++QString KisSettingsTransfer::pendingImportPath()
++{
++    return QDir(configDir()).absoluteFilePath(QStringLiteral("krita-settings-import.pending.zip"));
++}
++
++QString KisSettingsTransfer::backupDir()
++{
++    return QDir(configDir()).absoluteFilePath(QStringLiteral("krita-settings-backup"));
++}
++
++QString KisSettingsTransfer::resultPath()
++{
++    return QDir(configDir()).absoluteFilePath(QStringLiteral("krita-settings-import.result"));
++}
++
++void KisSettingsTransfer::exportSettings(QWidget *parent)
++{
++    // Write all pending in-memory changes to kritarc first
++    KSharedConfig::openConfig()->sync();
++
++    const QString cfgDir = configDir();
++    const QString resourceDir = Core::resolveResourceDir(cfgDir, appDataLocation());
++    const QVector<Core::Entry> entries = Core::collectEntries(cfgDir, resourceDir);
++    if (entries.isEmpty()) {
++        QMessageBox::information(parent, i18nc("@title:window", "Export Settings"),
++                                 i18n("There are no settings to export yet."));
++        return;
++    }
++
++    KoFileDialog dialog(parent, KoFileDialog::SaveFile, "KritaSettingsExport");
++    dialog.setCaption(i18n("Export Krita Settings"));
++    dialog.setDefaultDir(QDir(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation))
++                             .absoluteFilePath(QStringLiteral("krita-settings-%1.zip")
++                                                   .arg(QDate::currentDate().toString(Qt::ISODate))));
++    dialog.setMimeTypeFilters(QStringList() << QStringLiteral("application/zip"), QStringLiteral("application/zip"));
++    QString fileName = dialog.filename();
++    if (fileName.isEmpty()) return;
++    if (!fileName.startsWith(QLatin1String("content://")) && !fileName.endsWith(QLatin1String(".zip"), Qt::CaseInsensitive)) {
++        fileName += QStringLiteral(".zip");
++    }
++
++    QBuffer buffer;
++    {
++        QScopedPointer<KoStore> store(KoStore::createStore(&buffer, KoStore::Write,
++                                                           "application/x-krita-settings", KoStore::Zip));
++        bool ok = store && !store->bad();
++
++        auto add = [&store, &ok](const QString &name, const QByteArray &data) {
++            ok = ok && store->open(name) && store->write(data) == data.size() && store->close();
++        };
++
++        add(Core::MANIFEST_NAME,
++            Core::createManifest(entries, KritaVersionWrapper::versionString(true), platformName()));
++
++        Q_FOREACH (const Core::Entry &entry, entries) {
++            QFile file(Core::localPath(entry, cfgDir, resourceDir));
++            if (!file.open(QIODevice::ReadOnly)) {
++                ok = false;
++                break;
++            }
++            add(Core::archivePath(entry), file.readAll());
++        }
++
++        ok = ok && store->finalize();
++        if (!ok) {
++            QMessageBox::warning(parent, i18nc("@title:window", "Export Settings"),
++                                 i18n("Could not create the settings archive."));
++            return;
++        }
++    }
++
++    QFile out(fileName);
++    if (!out.open(QIODevice::WriteOnly) || out.write(buffer.data()) != buffer.data().size()) {
++        QMessageBox::warning(parent, i18nc("@title:window", "Export Settings"),
++                             i18n("Could not write %1:\n%2", fileName, out.errorString()));
++        return;
++    }
++    out.close();
++
++    QMessageBox::information(parent, i18nc("@title:window", "Export Settings"),
++                             i18np("Exported 1 settings file to\n%2",
++                                   "Exported %1 settings files to\n%2",
++                                   entries.size(), fileName));
++}
++
++void KisSettingsTransfer::importSettings(QWidget *parent)
++{
++    KoFileDialog dialog(parent, KoFileDialog::OpenFile, "KritaSettingsImport");
++    dialog.setCaption(i18n("Import Krita Settings"));
++    dialog.setDefaultDir(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation));
++    dialog.setMimeTypeFilters(QStringList() << QStringLiteral("application/zip"), QStringLiteral("application/zip"));
++    const QString fileName = dialog.filename();
++    if (fileName.isEmpty()) return;
++
++    QFile in(fileName);
++    if (!in.open(QIODevice::ReadOnly)) {
++        QMessageBox::warning(parent, i18nc("@title:window", "Import Settings"),
++                             i18n("Could not read %1:\n%2", fileName, in.errorString()));
++        return;
++    }
++    const QByteArray zip = in.readAll();
++    in.close();
++
++    QVector<Core::Entry> entries;
++    QJsonObject info;
++    QHash<QString, QByteArray> files;
++    QString error;
++    if (!readArchive(zip, &entries, &info, &files, &error)) {
++        QMessageBox::warning(parent, i18nc("@title:window", "Import Settings"),
++                             i18n("This file cannot be imported:\n%1", error));
++        return;
++    }
++
++    const QMessageBox::StandardButton answer = QMessageBox::question(
++        parent, i18nc("@title:window", "Import Settings"),
++        i18n("Import these Krita settings?\n\n%1\n\n"
++             "They replace your current settings the next time Krita starts. "
++             "Your current settings are backed up first, to:\n%2\n\n"
++             "Recent files and the resource folder location of this device are kept.",
++             describe(info, entries.size()), backupDir()),
++        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
++    if (answer != QMessageBox::Yes) return;
++
++    QSaveFile pending(pendingImportPath());
++    if (!pending.open(QIODevice::WriteOnly) || pending.write(zip) != zip.size() || !pending.commit()) {
++        QMessageBox::warning(parent, i18nc("@title:window", "Import Settings"),
++                             i18n("Could not prepare the import:\n%1", pending.errorString()));
++        return;
++    }
++
++    const QMessageBox::StandardButton quit = QMessageBox::question(
++        parent, i18nc("@title:window", "Import Settings"),
++        i18n("The settings will be applied when Krita starts again.\n\nClose Krita now?"),
++        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
++    if (quit == QMessageBox::Yes && parent && parent->window()) {
++        // closing the main window asks about unsaved documents, then quits
++        QWidget *window = parent->window();
++        QTimer::singleShot(0, window, [window]() { window->close(); });
++    }
++}
++
++void KisSettingsTransfer::applyPendingImport()
++{
++    const QString pendingPath = pendingImportPath();
++    if (!QFile::exists(pendingPath)) return;
++
++    // Move it out of the way first: a broken archive must never be retried at every start.
++    const QString applyingPath = pendingPath + QStringLiteral(".applying");
++    QFile::remove(applyingPath);
++    if (!QFile::rename(pendingPath, applyingPath)) {
++        qWarning() << "Krita settings import: cannot move" << pendingPath << "- skipping import";
++        QFile::remove(pendingPath);
++        return;
++    }
++
++    QByteArray zip;
++    {
++        QFile file(applyingPath);
++        if (file.open(QIODevice::ReadOnly)) zip = file.readAll();
++    }
++
++    QVector<Core::Entry> entries;
++    QJsonObject info;
++    QHash<QString, QByteArray> files;
++    QString error;
++    QStringList log;
++
++    const bool ok = readArchive(zip, &entries, &info, &files, &error)
++        && Core::applyFiles(entries, files, configDir(), appDataLocation(), backupDir(), &log, &error);
++
++    Q_FOREACH (const QString &line, log) {
++        qInfo() << "Krita settings import:" << line;
++    }
++
++    QFile result(resultPath());
++    if (result.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
++        const QByteArray text = ok
++            ? QByteArray("ok\n") + describe(info, entries.size()).toUtf8()
++            : QByteArray("error\n") + error.toUtf8();
++        result.write(text);
++    }
++
++    if (ok) {
++        QFile::remove(applyingPath);
++    } else {
++        qWarning() << "Krita settings import failed:" << error;
++        QFile::remove(pendingPath + QStringLiteral(".failed"));
++        QFile::rename(applyingPath, pendingPath + QStringLiteral(".failed"));
++    }
++}
++
++void KisSettingsTransfer::showImportResult(QWidget *parent)
++{
++    QFile result(resultPath());
++    if (!result.exists() || !result.open(QIODevice::ReadOnly)) return;
++    const QString text = QString::fromUtf8(result.readAll());
++    result.close();
++    result.remove();
++
++    const QString status = text.section(QLatin1Char('\n'), 0, 0);
++    const QString details = text.section(QLatin1Char('\n'), 1);
++
++    if (status == QLatin1String("ok")) {
++        QMessageBox::information(parent, i18nc("@title:window", "Import Settings"),
++                                 i18n("Your settings were imported.\n\n%1\n\n"
++                                      "Your previous settings were backed up to:\n%2",
++                                      details, backupDir()));
++    } else {
++        QMessageBox::warning(parent, i18nc("@title:window", "Import Settings"),
++                             i18n("Importing the settings failed:\n%1\n\n"
++                                  "If some settings were changed anyway, your previous settings are in:\n%2",
++                                  details, backupDir()));
++    }
++}
+diff --git a/libs/ui/KisSettingsTransfer.h b/libs/ui/KisSettingsTransfer.h
+new file mode 100644
+index 0000000..4b3bca0
+--- /dev/null
++++ b/libs/ui/KisSettingsTransfer.h
+@@ -0,0 +1,49 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova contributors
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef KIS_SETTINGS_TRANSFER_H
++#define KIS_SETTINGS_TRANSFER_H
++
++#include <QString>
++
++#include "kritaui_export.h"
++
++class QWidget;
++
++/**
++ * Settings → Export Settings... / Import Settings...
++ *
++ * Export packs Krita's settings (kritarc, display settings, shortcuts,
++ * interface language, toolbar layout, canvas input profiles) into a zip file.
++ *
++ * Import validates such a zip and *stages* it. The settings are applied by
++ * applyPendingImport() at the very beginning of the next start, before
++ * anything reads them, so nothing Krita writes while running or quitting can
++ * overwrite them. The previous settings are backed up first.
++ *
++ * Brushes, patterns and other resources are not included: use resource
++ * bundles for those.
++ */
++class KRITAUI_EXPORT KisSettingsTransfer
++{
++public:
++    static void exportSettings(QWidget *parent);
++    static void importSettings(QWidget *parent);
++
++    /// Call first thing in main(), before any configuration is read.
++    static void applyPendingImport();
++
++    /// After startup: tells the user about an import applied by applyPendingImport().
++    static void showImportResult(QWidget *parent);
++
++    static QString pendingImportPath();
++    static QString backupDir();
++
++private:
++    static QString resultPath();
++};
++
++#endif // KIS_SETTINGS_TRANSFER_H
+diff --git a/libs/ui/KisSettingsTransferCore.cpp b/libs/ui/KisSettingsTransferCore.cpp
+new file mode 100644
+index 0000000..cde76a4
+--- /dev/null
++++ b/libs/ui/KisSettingsTransferCore.cpp
+@@ -0,0 +1,334 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova contributors
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "KisSettingsTransferCore.h"
++
++#include <QDateTime>
++#include <QDir>
++#include <QDirIterator>
++#include <QFile>
++#include <QFileInfo>
++#include <QJsonArray>
++#include <QJsonDocument>
++#include <QRegularExpression>
++#include <QSaveFile>
++
++#include <KConfig>
++#include <KConfigGroup>
++
++namespace KisSettingsTransferCore
++{
++
++namespace {
++
++const QString RESOURCE_DIRECTORY_KEY = QStringLiteral("ResourceDirectory"); // KisResourceLocator::resourceLocationKey
++const QString TOOLBARS_FILE = QStringLiteral("krita5.xmlgui");
++const QString INPUT_PROFILES_DIR = QStringLiteral("input");
++
++bool writeFileAtomically(const QString &path, const QByteArray &data, QString *error)
++{
++    QDir().mkpath(QFileInfo(path).absolutePath());
++    QSaveFile file(path);
++    if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size() || !file.commit()) {
++        if (error) *error = QStringLiteral("cannot write %1: %2").arg(path, file.errorString());
++        return false;
++    }
++    return true;
++}
++
++bool readFile(const QString &path, QByteArray *data)
++{
++    QFile file(path);
++    if (!file.open(QIODevice::ReadOnly)) return false;
++    *data = file.readAll();
++    return true;
++}
++
++} // namespace
++
++QStringList configFileNames()
++{
++    return {
++        QStringLiteral("kritarc"),              // almost all preferences
++        QStringLiteral("kritadisplayrc"),       // display / OpenGL / tablet resolution
++        QStringLiteral("kritashortcutsrc"),     // keyboard shortcuts
++        QStringLiteral("klanguageoverridesrc"), // interface language
++    };
++}
++
++QStringList preservedRootKeys()
++{
++    return {RESOURCE_DIRECTORY_KEY};
++}
++
++QStringList preservedGroups()
++{
++    // paths that only make sense on the device that wrote them
++    return {QStringLiteral("RecentFiles"), QStringLiteral("File Dialogs")};
++}
++
++bool isAllowedEntry(const Entry &entry)
++{
++    if (entry.path.isEmpty() || entry.path.contains(QLatin1String("..")) ||
++        entry.path.startsWith(QLatin1Char('/')) || entry.path.contains(QLatin1Char('\\')) ||
++        entry.path.contains(QLatin1Char(':'))) {
++        return false;
++    }
++
++    if (entry.location == LOCATION_CONFIG) {
++        return configFileNames().contains(entry.path);
++    }
++
++    if (entry.location == LOCATION_RESOURCES) {
++        static const QRegularExpression inputProfile(
++            QStringLiteral("^input/[A-Za-z0-9_.-]+\\.profile$"));
++        return entry.path == TOOLBARS_FILE || inputProfile.match(entry.path).hasMatch();
++    }
++
++    return false;
++}
++
++QString archivePath(const Entry &entry)
++{
++    return entry.location + QLatin1Char('/') + entry.path;
++}
++
++QString resolveResourceDir(const QString &configDir, const QString &appDataLocation)
++{
++    QString path;
++
++    const QString kritarcPath = QDir(configDir).absoluteFilePath(QStringLiteral("kritarc"));
++    if (QFile::exists(kritarcPath)) {
++        KConfig kritarc(kritarcPath, KConfig::SimpleConfig);
++        path = KConfigGroup(&kritarc, QString()).readEntry(RESOURCE_DIRECTORY_KEY, QString());
++    }
++
++    if (path.isEmpty()) {
++        path = appDataLocation;
++#ifndef Q_OS_ANDROID
++        // KoResourcePaths: on Android the app-specific locations don't end with "krita"
++        if (!path.endsWith(QLatin1String("krita"))) {
++            path += QStringLiteral("/krita");
++        }
++#endif
++    }
++
++    return QDir::cleanPath(path);
++}
++
++QString localPath(const Entry &entry, const QString &configDir, const QString &resourceDir)
++{
++    const QString base = entry.location == LOCATION_CONFIG ? configDir : resourceDir;
++    return QDir(base).absoluteFilePath(entry.path);
++}
++
++QVector<Entry> collectEntries(const QString &configDir, const QString &resourceDir)
++{
++    QVector<Entry> entries;
++
++    Q_FOREACH (const QString &name, configFileNames()) {
++        if (QFileInfo(QDir(configDir).absoluteFilePath(name)).isFile()) {
++            entries.append({LOCATION_CONFIG, name});
++        }
++    }
++
++    if (QFileInfo(QDir(resourceDir).absoluteFilePath(TOOLBARS_FILE)).isFile()) {
++        entries.append({LOCATION_RESOURCES, TOOLBARS_FILE});
++    }
++
++    const QDir inputDir(QDir(resourceDir).absoluteFilePath(INPUT_PROFILES_DIR));
++    const QStringList profiles = inputDir.entryList({QStringLiteral("*.profile")}, QDir::Files, QDir::Name);
++    Q_FOREACH (const QString &profile, profiles) {
++        const Entry entry{LOCATION_RESOURCES, INPUT_PROFILES_DIR + QLatin1Char('/') + profile};
++        if (isAllowedEntry(entry)) {
++            entries.append(entry);
++        }
++    }
++
++    return entries;
++}
++
++QByteArray createManifest(const QVector<Entry> &entries, const QString &kritaVersion, const QString &platform)
++{
++    QJsonArray files;
++    Q_FOREACH (const Entry &entry, entries) {
++        files.append(QJsonObject{{QStringLiteral("location"), entry.location},
++                                 {QStringLiteral("path"), entry.path}});
++    }
++
++    const QJsonObject manifest{
++        {QStringLiteral("format"), FORMAT_ID},
++        {QStringLiteral("version"), FORMAT_VERSION},
++        {QStringLiteral("kritaVersion"), kritaVersion},
++        {QStringLiteral("platform"), platform},
++        {QStringLiteral("created"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
++        {QStringLiteral("files"), files},
++    };
++    return QJsonDocument(manifest).toJson(QJsonDocument::Indented);
++}
++
++bool parseManifest(const QByteArray &json, QVector<Entry> *entries, QJsonObject *info, QString *error)
++{
++    auto fail = [error](const QString &message) {
++        if (error) *error = message;
++        return false;
++    };
++
++    QJsonParseError parseError;
++    const QJsonDocument doc = QJsonDocument::fromJson(json, &parseError);
++    if (doc.isNull() || !doc.isObject()) {
++        return fail(QStringLiteral("the manifest is not valid JSON (%1)").arg(parseError.errorString()));
++    }
++
++    const QJsonObject manifest = doc.object();
++    if (manifest.value(QStringLiteral("format")).toString() != FORMAT_ID) {
++        return fail(QStringLiteral("this is not a Krita settings archive"));
++    }
++    const int version = manifest.value(QStringLiteral("version")).toInt(-1);
++    if (version < 1 || version > FORMAT_VERSION) {
++        return fail(QStringLiteral("unsupported settings archive version %1").arg(version));
++    }
++
++    const QJsonArray files = manifest.value(QStringLiteral("files")).toArray();
++    if (files.isEmpty()) {
++        return fail(QStringLiteral("the archive contains no settings files"));
++    }
++
++    QVector<Entry> result;
++    Q_FOREACH (const QJsonValue &value, files) {
++        const QJsonObject file = value.toObject();
++        const Entry entry{file.value(QStringLiteral("location")).toString(),
++                          file.value(QStringLiteral("path")).toString()};
++        if (!isAllowedEntry(entry)) {
++            return fail(QStringLiteral("the archive contains an unexpected file: %1").arg(archivePath(entry)));
++        }
++        if (!result.contains(entry)) {
++            result.append(entry);
++        }
++    }
++
++    if (entries) *entries = result;
++    if (info) *info = manifest;
++    return true;
++}
++
++bool mergeKritarc(const QByteArray &imported, const QString &currentPath, const QString &targetPath, QString *error)
++{
++    const QString tmpPath = targetPath + QStringLiteral(".import-tmp");
++    QFile::remove(tmpPath);
++    if (!writeFileAtomically(tmpPath, imported, error)) {
++        return false;
++    }
++
++    {
++        KConfig importedConfig(tmpPath, KConfig::SimpleConfig);
++        KConfigGroup importedRoot(&importedConfig, QString());
++
++        if (QFile::exists(currentPath)) {
++            KConfig currentConfig(currentPath, KConfig::SimpleConfig);
++            KConfigGroup currentRoot(&currentConfig, QString());
++
++            Q_FOREACH (const QString &key, preservedRootKeys()) {
++                if (currentRoot.hasKey(key)) {
++                    importedRoot.writeEntry(key, currentRoot.readEntry(key, QString()));
++                } else {
++                    importedRoot.deleteEntry(key);
++                }
++            }
++
++            Q_FOREACH (const QString &groupName, preservedGroups()) {
++                importedConfig.deleteGroup(groupName);
++                const KConfigGroup source(&currentConfig, groupName);
++                KConfigGroup target(&importedConfig, groupName);
++                const QMap<QString, QString> values = source.entryMap();
++                for (auto it = values.constBegin(); it != values.constEnd(); ++it) {
++                    target.writeEntry(it.key(), it.value());
++                }
++            }
++        } else {
++            Q_FOREACH (const QString &key, preservedRootKeys()) {
++                importedRoot.deleteEntry(key);
++            }
++            Q_FOREACH (const QString &groupName, preservedGroups()) {
++                importedConfig.deleteGroup(groupName);
++            }
++        }
++
++        if (!importedConfig.sync()) {
++            QFile::remove(tmpPath);
++            if (error) *error = QStringLiteral("cannot write %1").arg(tmpPath);
++            return false;
++        }
++    }
++
++    QByteArray merged;
++    const bool ok = readFile(tmpPath, &merged) && writeFileAtomically(targetPath, merged, error);
++    QFile::remove(tmpPath);
++    return ok;
++}
++
++bool applyFiles(const QVector<Entry> &entries,
++                const QHash<QString, QByteArray> &files,
++                const QString &configDir,
++                const QString &appDataLocation,
++                const QString &backupDir,
++                QStringList *log,
++                QString *error)
++{
++    auto note = [log](const QString &line) { if (log) log->append(line); };
++
++    Q_FOREACH (const Entry &entry, entries) {
++        if (!isAllowedEntry(entry)) {
++            if (error) *error = QStringLiteral("refusing unexpected file %1").arg(archivePath(entry));
++            return false;
++        }
++        if (!files.contains(archivePath(entry))) {
++            if (error) *error = QStringLiteral("%1 is missing from the archive").arg(archivePath(entry));
++            return false;
++        }
++    }
++
++    // 1. Back up what is there now (only the latest backup is kept)
++    const QString currentResourceDir = resolveResourceDir(configDir, appDataLocation);
++    QDir(backupDir).removeRecursively();
++    const QVector<Entry> current = collectEntries(configDir, currentResourceDir);
++    Q_FOREACH (const Entry &entry, current) {
++        QByteArray data;
++        if (readFile(localPath(entry, configDir, currentResourceDir), &data)) {
++            QString backupError;
++            if (!writeFileAtomically(QDir(backupDir).absoluteFilePath(archivePath(entry)), data, &backupError)) {
++                if (error) *error = QStringLiteral("backup failed, nothing was imported: %1").arg(backupError);
++                return false;
++            }
++        }
++    }
++    note(QStringLiteral("backed up %1 files to %2").arg(current.size()).arg(backupDir));
++
++    // 2. Config files first: kritarc decides where the resource folder is
++    Q_FOREACH (const Entry &entry, entries) {
++        if (entry.location != LOCATION_CONFIG) continue;
++        const QString target = localPath(entry, configDir, currentResourceDir);
++        const QByteArray &data = files[archivePath(entry)];
++        const bool ok = entry.path == QLatin1String("kritarc")
++            ? mergeKritarc(data, target, target, error)
++            : writeFileAtomically(target, data, error);
++        if (!ok) return false;
++        note(QStringLiteral("imported %1").arg(target));
++    }
++
++    // 3. Resource files (toolbars, input profiles) into the resource folder
++    const QString resourceDir = resolveResourceDir(configDir, appDataLocation);
++    Q_FOREACH (const Entry &entry, entries) {
++        if (entry.location != LOCATION_RESOURCES) continue;
++        const QString target = localPath(entry, configDir, resourceDir);
++        if (!writeFileAtomically(target, files[archivePath(entry)], error)) return false;
++        note(QStringLiteral("imported %1").arg(target));
++    }
++
++    return true;
++}
++
++} // namespace KisSettingsTransferCore
+diff --git a/libs/ui/KisSettingsTransferCore.h b/libs/ui/KisSettingsTransferCore.h
+new file mode 100644
+index 0000000..48a9fb6
+--- /dev/null
++++ b/libs/ui/KisSettingsTransferCore.h
+@@ -0,0 +1,119 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova contributors
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef KIS_SETTINGS_TRANSFER_CORE_H
++#define KIS_SETTINGS_TRANSFER_CORE_H
++
++#include <QByteArray>
++#include <QHash>
++#include <QJsonObject>
++#include <QString>
++#include <QStringList>
++#include <QVector>
++
++#include "kritaui_export.h"
++
++/**
++ * Archive-independent logic of Krita's settings export/import
++ * (see KisSettingsTransfer for the UI and the zip handling).
++ *
++ * Only depends on QtCore and KConfigCore, and never touches
++ * KSharedConfig, so it can run at the very beginning of main(),
++ * before the application object and its configuration exist.
++ *
++ * Archive layout:
++ *   krita-settings.json          manifest (format, version, origin, file list)
++ *   config/<name>                files from the config folder (kritarc, ...)
++ *   resources/<path>             files from the resource folder (toolbars, input profiles)
++ */
++namespace KisSettingsTransferCore
++{
++
++struct Entry {
++    QString location; ///< "config" or "resources"
++    QString path;     ///< relative path inside that location, '/' separated
++
++    bool operator==(const Entry &rhs) const {
++        return location == rhs.location && path == rhs.path;
++    }
++};
++
++static const QString MANIFEST_NAME = QStringLiteral("krita-settings.json");
++static const QString FORMAT_ID = QStringLiteral("krita-nova-settings");
++static constexpr int FORMAT_VERSION = 1;
++
++static const QString LOCATION_CONFIG = QStringLiteral("config");
++static const QString LOCATION_RESOURCES = QStringLiteral("resources");
++
++/// Settings files in the config folder that are transferred
++KRITAUI_EXPORT QStringList configFileNames();
++
++/// Entries in kritarc that describe this device rather than the user's preferences;
++/// on import the receiving device keeps its own values for these.
++KRITAUI_EXPORT QStringList preservedRootKeys();
++KRITAUI_EXPORT QStringList preservedGroups();
++
++/// Only whitelisted file names, no absolute paths, no "..": archives may come from anywhere.
++KRITAUI_EXPORT bool isAllowedEntry(const Entry &entry);
++
++/// Path of the entry inside the archive, e.g. "config/kritarc"
++KRITAUI_EXPORT QString archivePath(const Entry &entry);
++
++/**
++ * Krita's writable resource folder, resolved the same way as
++ * KoResourcePaths::saveLocation("data"): the "ResourceDirectory" entry
++ * of kritarc if set, otherwise \p appDataLocation (plus "/krita" outside
++ * of Android).
++ */
++KRITAUI_EXPORT QString resolveResourceDir(const QString &configDir, const QString &appDataLocation);
++
++/// The settings files that currently exist on this device
++KRITAUI_EXPORT QVector<Entry> collectEntries(const QString &configDir, const QString &resourceDir);
++
++/// Absolute path of an entry on this device
++KRITAUI_EXPORT QString localPath(const Entry &entry, const QString &configDir, const QString &resourceDir);
++
++KRITAUI_EXPORT QByteArray createManifest(const QVector<Entry> &entries,
++                                         const QString &kritaVersion,
++                                         const QString &platform);
++
++/**
++ * Parses and validates a manifest. \p info receives the manifest object
++ * (kritaVersion, platform, created...).
++ */
++KRITAUI_EXPORT bool parseManifest(const QByteArray &json,
++                                  QVector<Entry> *entries,
++                                  QJsonObject *info,
++                                  QString *error);
++
++/**
++ * Writes the imported kritarc (\p imported) to \p targetPath, keeping the
++ * device-specific entries (preservedRootKeys(), preservedGroups()) from the
++ * current kritarc at \p currentPath, or dropping them when there is none.
++ */
++KRITAUI_EXPORT bool mergeKritarc(const QByteArray &imported,
++                                 const QString &currentPath,
++                                 const QString &targetPath,
++                                 QString *error);
++
++/**
++ * Applies an import: backs up the current settings files to \p backupDir
++ * (replacing any older backup), then writes the config files (kritarc merged,
++ * see mergeKritarc()), then the resource files into the resource folder.
++ *
++ * \p files maps archivePath(entry) to the file contents.
++ */
++KRITAUI_EXPORT bool applyFiles(const QVector<Entry> &entries,
++                               const QHash<QString, QByteArray> &files,
++                               const QString &configDir,
++                               const QString &appDataLocation,
++                               const QString &backupDir,
++                               QStringList *log,
++                               QString *error);
++
++} // namespace KisSettingsTransferCore
++
++#endif // KIS_SETTINGS_TRANSFER_CORE_H
