@@ -3,7 +3,7 @@ name: Krita Nova unit tests
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, 'nova/**']
     paths:
       - 'patches/**'
       - 'tests/**'
@@ -55,7 +55,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import pathlib, re, sys
-          ours = re.compile(r'#\s*include\s*[<"](KisTouchFriendlyStyle|KisSettingsTransfer|KisSettingsTransferCore|KisPresetStrokeRenderer|kis_preset_stroke_renderer|kis_tool_eraser)\.h[>"]')
+          ours = re.compile(r'#\s*include\s*[<"](KisTouchFriendlyStyle|KisSettingsTransfer|KisSettingsTransferCore|KisPresetStrokeRenderer|kis_preset_stroke_renderer|kis_tool_eraser|KisPalmRejection)\.h[>"]')
           bad = []
           for path in list(pathlib.Path('krita').rglob('*.cpp')) + list(pathlib.Path('krita').rglob('*.cc')):
               depth = 0
@@ -73,3 +73,11 @@ jobs:
           cmake -S tests/settings-transfer -B build-tests -G Ninja -DKRITA_SRC="$PWD/krita"
           cmake --build build-tests
           ./build-tests/test_settings_transfer
+
+      - name: Build and run palm rejection tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          cmake -S tests/palm-rejection -B build-palm -G Ninja -DKRITA_SRC="$PWD/krita"
+          cmake --build build-palm
+          ./build-palm/test_palm_rejection

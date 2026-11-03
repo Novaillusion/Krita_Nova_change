@@ -15,6 +15,7 @@ prebuilt Android dependencies (Qt5, KF5, …) itself.
 | `06-screen-tracker-rotation.patch` | Fixes a SAFE ASSERT dialog when rotating the device with the brush editor open |
 | `07-faster-fill-tool.patch` | Faster Fill tool: default fills use the fast path; other fills no longer paint a whole-canvas temporary layer |
 | `08-settings-export-import.patch` | Settings → Export Settings… / Import Settings… (settings, shortcuts, toolbars, input profiles in one .zip) |
+| `09-palm-rejection.patch` | Palm rejection: touch on the canvas is ignored while the pen is down/hovering and shortly after, plus touches larger than a fingertip (Configure Krita → General → Tools) |
 
 ## Get an APK
 

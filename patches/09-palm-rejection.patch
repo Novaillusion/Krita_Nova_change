@@ -1,0 +1,504 @@
+Krita Nova 09 - palm rejection
+
+Touch on the canvas is ignored while the pen is in use, so a resting hand
+neither paints (touch painting) nor pans/zooms/rotates the canvas.
+
+1. KisPalmRejection (libs/ui/input): an application event filter that tracks
+   the pen - press/release, moves (incl. hover) and enter/leave proximity.
+   The pen counts as "in use" while it is down, while it is in proximity
+   (capped at 5 s without pen events, for drivers that never send "leave"),
+   and for a grace period after its last event (default 500 ms).
+2. Touches larger than a fingertip (default 18 mm, from the reported contact
+   ellipse and the screen's physical DPI) are treated as a palm. Only works on
+   screens that report contact size; unknown size (0) is never rejected.
+3. KisInputManager: a touch sequence is rejected as a whole at TouchBegin, so
+   the shortcut matcher always sees balanced begin/end events. If the pen
+   comes into use or a palm-sized contact appears during a running sequence,
+   the touch action is cancelled and the rest of the sequence is ignored.
+4. Configure Krita > General > Tools, below "Touch Pressure Sensitivity":
+   on/off, delay (ms), large-contact check and its size (mm).
+   kritarc: palmRejectionEnabled, palmRejectionDelay,
+   palmRejectionLargeContacts, palmRejectionMaxContactMm.
+
+diff --git a/libs/ui/CMakeLists.txt b/libs/ui/CMakeLists.txt
+index c7045dc..ad30725 100644
+--- a/libs/ui/CMakeLists.txt
++++ b/libs/ui/CMakeLists.txt
+@@ -354,6 +354,7 @@ set(kritaui_LIB_SRCS
+     input/KisCanvasNavigationActionStrategyTouch.cpp
+     input/KisInputEventsEater.cpp
+     input/kis_input_manager.cpp
++    input/KisPalmRejection.cpp
+     input/kis_input_manager_p.cpp
+     input/kis_extended_modifiers_mapper.cpp
+     input/KisExtendedModifiersMapperPluginInterface.cpp
+diff --git a/libs/ui/dialogs/kis_dlg_preferences.cc b/libs/ui/dialogs/kis_dlg_preferences.cc
+index a11dcaf..43c940d 100644
+--- a/libs/ui/dialogs/kis_dlg_preferences.cc
++++ b/libs/ui/dialogs/kis_dlg_preferences.cc
+@@ -417,6 +417,7 @@ GeneralTab::GeneralTab(QWidget *_parent, const char *_name)
+     connect(cmbTouchPainting, SIGNAL(currentIndexChanged(int)),
+             SLOT(updateTouchPressureSensitivityEnabled(int)));
+     updateTouchPressureSensitivityEnabled(cmbTouchPainting->currentIndex());
++    setupPalmRejectionSettings(cfg);
+ 
+     chkEnableTransformToolAfterPaste->setChecked(cfg.activateTransformToolAfterPaste());
+     chkZoomHorizontally->setChecked(cfg.zoomHorizontal());
+@@ -868,6 +869,10 @@ void GeneralTab::setDefault()
+     m_chkSwitchSelectionCtrlAlt->setChecked(cfg.switchSelectionCtrlAlt(true));
+     cmbTouchPainting->setCurrentIndex(int(cfg.touchPainting(true)));
+     chkTouchPressureSensitivity->setChecked(true);
++    m_chkPalmRejection->setChecked(true);
++    m_spnPalmRejectionDelay->setValue(500);
++    m_chkPalmLargeContacts->setChecked(true);
++    m_spnPalmMaxContactMm->setValue(18);
+     chkEnableTransformToolAfterPaste->setChecked(cfg.activateTransformToolAfterPaste(true));
+     chkZoomHorizontally->setChecked(cfg.zoomHorizontal(true));
+     m_chkConvertOnImport->setChecked(cfg.convertToImageColorspaceOnImport(true));
+@@ -1231,6 +1236,81 @@ void GeneralTab::enableSubWindowOptions(int mdi_mode)
+     group_subWinMode->setEnabled(mdi_mode == QMdiArea::SubWindowView);
+ }
+ 
++void GeneralTab::setupPalmRejectionSettings(KisConfig &cfg)
++{
++
++    m_chkPalmRejection = new QCheckBox(i18n("Palm rejection: ignore touch on the canvas while the pen is in use"), this);
++    m_chkPalmRejection->setToolTip(i18n("Touches on the canvas are ignored while the pen is touching or hovering over the screen, and for a short time after it was used, so a resting hand neither paints nor moves the canvas."));
++    m_chkPalmRejection->setChecked(cfg.readEntry("palmRejectionEnabled", true));
++
++    m_spnPalmRejectionDelay = new QSpinBox(this);
++    m_spnPalmRejectionDelay->setRange(0, 5000);
++    m_spnPalmRejectionDelay->setSingleStep(100);
++    m_spnPalmRejectionDelay->setSuffix(i18n(" ms"));
++    m_spnPalmRejectionDelay->setToolTip(i18n("How long touch stays ignored after the pen was last used"));
++    m_spnPalmRejectionDelay->setValue(cfg.readEntry("palmRejectionDelay", 500));
++
++    m_chkPalmLargeContacts = new QCheckBox(i18n("Also ignore touches larger than"), this);
++    m_chkPalmLargeContacts->setToolTip(i18n("Ignore contacts bigger than a fingertip. Works only on screens that report the size of a touch."));
++    m_chkPalmLargeContacts->setChecked(cfg.readEntry("palmRejectionLargeContacts", true));
++
++    m_spnPalmMaxContactMm = new QSpinBox(this);
++    m_spnPalmMaxContactMm->setRange(5, 100);
++    m_spnPalmMaxContactMm->setSuffix(i18n(" mm"));
++    m_spnPalmMaxContactMm->setValue(cfg.readEntry("palmRejectionMaxContactMm", 18));
++
++    QWidget *sizeRow = new QWidget(this);
++    QHBoxLayout *sizeLayout = new QHBoxLayout(sizeRow);
++    sizeLayout->setContentsMargins(0, 0, 0, 0);
++    sizeLayout->addWidget(m_chkPalmLargeContacts);
++    sizeLayout->addWidget(m_spnPalmMaxContactMm);
++    sizeLayout->addStretch();
++
++    QWidget *delayRow = new QWidget(this);
++    QHBoxLayout *delayLayout = new QHBoxLayout(delayRow);
++    delayLayout->setContentsMargins(0, 0, 0, 0);
++    delayLayout->addWidget(new QLabel(i18n("Keep ignoring touch after the pen for"), delayRow));
++    delayLayout->addWidget(m_spnPalmRejectionDelay);
++    delayLayout->addStretch();
++
++    // put the rows right below "Enable Touch Pressure Sensitivity"
++    QFormLayout *form = qobject_cast<QFormLayout *>(chkTouchPressureSensitivity->parentWidget()->layout());
++    int row = -1;
++    QFormLayout::ItemRole role;
++    if (form) {
++        form->getWidgetPosition(chkTouchPressureSensitivity, &row, &role);
++    }
++    if (form && row >= 0) {
++        form->insertRow(row + 1, QString(), m_chkPalmRejection);
++        form->insertRow(row + 2, QString(), delayRow);
++        form->insertRow(row + 3, QString(), sizeRow);
++    } else if (QLayout *layout = chkTouchPressureSensitivity->parentWidget()->layout()) {
++        layout->addWidget(m_chkPalmRejection);
++        layout->addWidget(delayRow);
++        layout->addWidget(sizeRow);
++    }
++
++    connect(m_chkPalmRejection, &QCheckBox::toggled, this, [this]() { updatePalmRejectionEnabled(); });
++    connect(m_chkPalmLargeContacts, &QCheckBox::toggled, this, [this]() { updatePalmRejectionEnabled(); });
++    updatePalmRejectionEnabled();
++}
++
++void GeneralTab::updatePalmRejectionEnabled()
++{
++    const bool on = m_chkPalmRejection->isChecked();
++    m_spnPalmRejectionDelay->setEnabled(on);
++    m_chkPalmLargeContacts->setEnabled(on);
++    m_spnPalmMaxContactMm->setEnabled(on && m_chkPalmLargeContacts->isChecked());
++}
++
++void GeneralTab::savePalmRejectionSettings(KisConfig &cfg)
++{
++    cfg.writeEntry("palmRejectionEnabled", m_chkPalmRejection->isChecked());
++    cfg.writeEntry("palmRejectionDelay", m_spnPalmRejectionDelay->value());
++    cfg.writeEntry("palmRejectionLargeContacts", m_chkPalmLargeContacts->isChecked());
++    cfg.writeEntry("palmRejectionMaxContactMm", m_spnPalmMaxContactMm->value());
++}
++
+ void GeneralTab::updateTouchPressureSensitivityEnabled(int touchPainting)
+ {
+     chkTouchPressureSensitivity->setEnabled(touchPainting != int(KisConfig::TOUCH_PAINTING_DISABLED));
+@@ -3123,6 +3203,7 @@ bool KisDlgPreferences::editPreferences(std::optional<PageDesc>page)
+         cfg.setSwitchSelectionCtrlAlt(m_general->switchSelectionCtrlAlt());
+         cfg.setTouchPainting(KisConfig::TouchPainting(m_general->cmbTouchPainting->currentIndex()));
+         cfg.writeEntry("useTouchPressureSensitivity", m_general->chkTouchPressureSensitivity->isChecked());
++        m_general->savePalmRejectionSettings(cfg);
+         cfg.setActivateTransformToolAfterPaste(m_general->chkEnableTransformToolAfterPaste->isChecked());
+         cfg.setZoomHorizontal(m_general->chkZoomHorizontally->isChecked());
+         cfg.setSelectionActionBar(m_general->chkEnableSelectionActionBar->isChecked());
+diff --git a/libs/ui/dialogs/kis_dlg_preferences.h b/libs/ui/dialogs/kis_dlg_preferences.h
+index b19c89b..5f1179c 100644
+--- a/libs/ui/dialogs/kis_dlg_preferences.h
++++ b/libs/ui/dialogs/kis_dlg_preferences.h
+@@ -13,6 +13,8 @@
+ #include <QWidget>
+ #include <QButtonGroup>
+ #include <QMap>
++#include <QCheckBox>
++#include <QSpinBox>
+ #include <QString>
+ 
+ #include <kpagedialog.h>
+@@ -137,6 +139,16 @@ private Q_SLOTS:
+ public:
+     QButtonGroup m_pasteFormatGroup;
+     KisCumulativeUndoData m_cumulativeUndoData;
++
++    // Krita Nova: palm rejection (see input/KisPalmRejection.h)
++    void savePalmRejectionSettings(KisConfig &cfg);
++private:
++    void setupPalmRejectionSettings(KisConfig &cfg);
++    void updatePalmRejectionEnabled();
++    QCheckBox *m_chkPalmRejection {nullptr};
++    QSpinBox *m_spnPalmRejectionDelay {nullptr};
++    QCheckBox *m_chkPalmLargeContacts {nullptr};
++    QSpinBox *m_spnPalmMaxContactMm {nullptr};
+ };
+ 
+ 
+diff --git a/libs/ui/input/KisPalmRejection.cpp b/libs/ui/input/KisPalmRejection.cpp
+new file mode 100644
+index 0000000..7dd987f
+--- /dev/null
++++ b/libs/ui/input/KisPalmRejection.cpp
+@@ -0,0 +1,134 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "KisPalmRejection.h"
++
++#include <QCoreApplication>
++#include <QGuiApplication>
++#include <QScreen>
++#include <QTouchEvent>
++#include <QWidget>
++#include <QWindow>
++
++#include <kis_config.h>
++#include <kis_config_notifier.h>
++#include <kis_debug.h>
++
++namespace {
++// Even with a proximity flag set, stop rejecting when the pen has been silent
++// this long: some drivers never send "leave proximity".
++constexpr qint64 PROXIMITY_TIMEOUT_MS = 5000;
++}
++
++KisPalmRejection *KisPalmRejection::instance()
++{
++    static KisPalmRejection *s_instance = new KisPalmRejection();
++    return s_instance;
++}
++
++KisPalmRejection::KisPalmRejection()
++    : QObject(qApp)
++{
++    reloadConfig();
++    if (qApp) {
++        qApp->installEventFilter(this);
++    }
++    connect(KisConfigNotifier::instance(), &KisConfigNotifier::configChanged,
++            this, &KisPalmRejection::reloadConfig);
++}
++
++void KisPalmRejection::reloadConfig()
++{
++    KisConfig cfg(true);
++    m_enabled = cfg.readEntry("palmRejectionEnabled", true);
++    m_graceMs = qBound(0, cfg.readEntry("palmRejectionDelay", 500), 5000);
++    m_checkContactSize = cfg.readEntry("palmRejectionLargeContacts", true);
++    m_maxContactMm = qBound(5, cfg.readEntry("palmRejectionMaxContactMm", 18), 100);
++}
++
++bool KisPalmRejection::eventFilter(QObject *watched, QEvent *event)
++{
++    switch (event->type()) {
++    case QEvent::TabletPress:
++        m_penDown = true;
++        m_penInProximity = true;
++        m_lastPenEvent.start();
++        break;
++    case QEvent::TabletRelease:
++        m_penDown = false;
++        m_lastPenEvent.start();
++        break;
++    case QEvent::TabletMove:
++        // includes hover moves on platforms that report them
++        m_penInProximity = true;
++        m_lastPenEvent.start();
++        break;
++    case QEvent::TabletEnterProximity:
++        m_penInProximity = true;
++        m_lastPenEvent.start();
++        break;
++    case QEvent::TabletLeaveProximity:
++        m_penInProximity = false;
++        m_penDown = false;
++        m_lastPenEvent.start();
++        break;
++    default:
++        break;
++    }
++    return QObject::eventFilter(watched, event);
++}
++
++bool KisPalmRejection::isPenActive() const
++{
++    if (!m_lastPenEvent.isValid()) return false;
++
++    const qint64 elapsed = m_lastPenEvent.elapsed();
++    if (m_penDown) return elapsed < PROXIMITY_TIMEOUT_MS * 6; // a long, still press
++    if (m_penInProximity && elapsed < PROXIMITY_TIMEOUT_MS) return true;
++    return elapsed < m_graceMs;
++}
++
++qreal KisPalmRejection::contactSizeMm(qreal diameterPx, qreal physicalDpi)
++{
++    if (diameterPx <= 0.0 || physicalDpi <= 0.0) return 0.0;
++    return diameterPx / physicalDpi * 25.4;
++}
++
++bool KisPalmRejection::hasPalmSizedContact(const QTouchEvent *event, const QWidget *widget) const
++{
++    if (!m_enabled || !m_checkContactSize || !event) return false;
++
++    const QScreen *screen = nullptr;
++    if (widget && widget->window() && widget->window()->windowHandle()) {
++        screen = widget->window()->windowHandle()->screen();
++    }
++    if (!screen) screen = QGuiApplication::primaryScreen();
++    if (!screen) return false;
++
++    const qreal dpi = screen->physicalDotsPerInch();
++
++    Q_FOREACH (const QTouchEvent::TouchPoint &point, event->touchPoints()) {
++        if (point.state() == Qt::TouchPointReleased) continue;
++        const QSizeF d = point.ellipseDiameters();
++        const qreal sizeMm = contactSizeMm(qMax(d.width(), d.height()), dpi);
++        if (sizeMm > m_maxContactMm) {
++            dbgInputMatcher << "Palm rejection: contact of" << sizeMm << "mm";
++            return true;
++        }
++    }
++    return false;
++}
++
++bool KisPalmRejection::shouldRejectTouchBegin(const QTouchEvent *event, const QWidget *widget)
++{
++    if (!m_enabled) return false;
++
++    if (isPenActive()) {
++        dbgInputMatcher << "Palm rejection: touch ignored, the pen is in use";
++        return true;
++    }
++    return hasPalmSizedContact(event, widget);
++}
+diff --git a/libs/ui/input/KisPalmRejection.h b/libs/ui/input/KisPalmRejection.h
+new file mode 100644
+index 0000000..8dc93b2
+--- /dev/null
++++ b/libs/ui/input/KisPalmRejection.h
+@@ -0,0 +1,77 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef KIS_PALM_REJECTION_H
++#define KIS_PALM_REJECTION_H
++
++#include <QObject>
++#include <QElapsedTimer>
++
++#include "kritaui_export.h"
++
++class QTouchEvent;
++class QWidget;
++
++/**
++ * Palm rejection for the canvas.
++ *
++ * Watches every tablet (pen) event the application receives, and tells the
++ * canvas input manager to ignore touch input that is most likely a resting
++ * hand:
++ *
++ *  - while the pen is touching the screen, hovering over it (in proximity),
++ *    or was used less than "palmRejectionDelay" ms ago;
++ *  - touches whose contact area is larger than "palmRejectionMaxContactMm"
++ *    millimetres (only on screens that report the contact size).
++ *
++ * A touch sequence is either rejected as a whole or not at all, so the
++ * shortcut matcher always sees balanced begin/end events.
++ *
++ * Settings (kritarc, edited in Configure Krita > General > Tools):
++ *   palmRejectionEnabled       bool, default true
++ *   palmRejectionDelay         int ms, default 500
++ *   palmRejectionLargeContacts bool, default true
++ *   palmRejectionMaxContactMm  int mm, default 18
++ */
++class KRITAUI_EXPORT KisPalmRejection : public QObject
++{
++    Q_OBJECT
++public:
++    static KisPalmRejection *instance();
++
++    /// true when a touch sequence starting with this event must be ignored
++    bool shouldRejectTouchBegin(const QTouchEvent *event, const QWidget *widget);
++
++    /// true when a touch update contains a contact that looks like a palm
++    bool hasPalmSizedContact(const QTouchEvent *event, const QWidget *widget) const;
++
++    /// pen is down, in proximity, or was used within the grace period
++    bool isPenActive() const;
++
++    void reloadConfig();
++
++    bool isEnabled() const { return m_enabled; }
++
++    // exposed for tests
++    static qreal contactSizeMm(qreal diameterPx, qreal physicalDpi);
++
++protected:
++    bool eventFilter(QObject *watched, QEvent *event) override;
++
++private:
++    KisPalmRejection();
++
++    bool m_enabled {true};
++    int m_graceMs {500};
++    bool m_checkContactSize {true};
++    int m_maxContactMm {18};
++
++    bool m_penDown {false};
++    bool m_penInProximity {false};
++    QElapsedTimer m_lastPenEvent;
++};
++
++#endif // KIS_PALM_REJECTION_H
+diff --git a/libs/ui/input/kis_input_manager.cpp b/libs/ui/input/kis_input_manager.cpp
+index 5beabe3..6dfd2fd 100644
+--- a/libs/ui/input/kis_input_manager.cpp
++++ b/libs/ui/input/kis_input_manager.cpp
+@@ -36,6 +36,7 @@
+ #include "kis_stroke_shortcut.h"
+ #include "kis_single_action_shortcut.h"
+ #include "kis_touch_shortcut.h"
++#include "KisPalmRejection.h"
+ 
+ #include "kis_input_profile.h"
+ #include "kis_input_profile_manager.h"
+@@ -60,6 +61,10 @@ KisInputManager::KisInputManager(QObject *parent, KoToolManager *toolManager)
+ {
+     d->setupActions();
+ 
++    // Krita Nova: start tracking the pen right away, so palm rejection
++    // already knows about it when the first touch arrives
++    KisPalmRejection::instance();
++
+     connect(KisConfigNotifier::instance(), SIGNAL(configChanged()), SLOT(slotConfigChanged()));
+     slotConfigChanged();
+ 
+@@ -662,6 +667,16 @@ bool KisInputManager::eventFilterImpl(QEvent * event)
+         // The popup was dismissed in previous TouchBegin->TouchEnd sequence. We now have a new TouchBegin.
+         d->popupWasActive = false;
+         QTouchEvent *touchEvent = static_cast<QTouchEvent *>(event);
++
++        // Krita Nova: palm rejection. The whole sequence is ignored, so the
++        // shortcut matcher never sees an unbalanced begin/end.
++        d->palmRejectedTouch = KisPalmRejection::instance()->shouldRejectTouchBegin(
++            touchEvent, d->canvas ? d->canvas->canvasWidget() : nullptr);
++        if (d->palmRejectedTouch) {
++            event->accept();
++            return true;
++        }
++
+         KisAbstractInputAction::setInputManager(this);
+ 
+         retval = d->matcher.touchBeginEvent(touchEvent);
+@@ -675,12 +690,26 @@ bool KisInputManager::eventFilterImpl(QEvent * event)
+ 
+     case QEvent::TouchUpdate:
+     {
+-        if (d->popupWasActive) {
++        if (d->popupWasActive || d->palmRejectedTouch) {
+             event->setAccepted(true);
+             return true;
+         }
+         QTouchEvent *touchEvent = static_cast<QTouchEvent*>(event);
+ 
++        // Krita Nova: a palm landed during a running touch sequence, or the
++        // pen came into use: stop the touch action and ignore the rest of it.
++        {
++            KisPalmRejection *palm = KisPalmRejection::instance();
++            if (palm->isEnabled() &&
++                (palm->isPenActive() ||
++                 palm->hasPalmSizedContact(touchEvent, d->canvas ? d->canvas->canvasWidget() : nullptr))) {
++                d->matcher.touchCancelEvent(touchEvent);
++                d->palmRejectedTouch = true;
++                event->setAccepted(true);
++                return true;
++            }
++        }
++
+ #ifdef Q_OS_MAC
+         const int pressedCount = KisTouchShortcut::countTouchPoints(touchEvent, KisTouchShortcut::pressedOnlyTouchStates());
+         const int totalPointCount = KisTouchShortcut::countTouchPoints(touchEvent, KisTouchShortcut::allTouchStates());
+@@ -727,6 +756,11 @@ bool KisInputManager::eventFilterImpl(QEvent * event)
+ 
+     case QEvent::TouchEnd:
+     {
++        if (d->palmRejectedTouch) {   // Krita Nova: end of an ignored palm sequence
++            d->palmRejectedTouch = false;
++            event->setAccepted(true);
++            return true;
++        }
+         if (d->popupWasActive) {
+             event->setAccepted(true);
+             return true;
+@@ -742,6 +776,11 @@ bool KisInputManager::eventFilterImpl(QEvent * event)
+     }
+     case QEvent::TouchCancel:
+     {
++        if (d->palmRejectedTouch) {   // Krita Nova: end of an ignored palm sequence
++            d->palmRejectedTouch = false;
++            event->setAccepted(true);
++            return true;
++        }
+         if (d->popupWasActive) {
+             event->setAccepted(true);
+             return true;
+diff --git a/libs/ui/input/kis_input_manager_p.h b/libs/ui/input/kis_input_manager_p.h
+index 063a983..482c36b 100644
+--- a/libs/ui/input/kis_input_manager_p.h
++++ b/libs/ui/input/kis_input_manager_p.h
+@@ -64,6 +64,7 @@ public:
+     int priorityEventFilterSeqNo;
+ 
+     bool popupWasActive = false;
++    bool palmRejectedTouch = false;   // Krita Nova: current touch sequence is a palm
+ 
+     bool useUnbalancedKeyPressEventWorkaround = false;
+     bool shouldSynchronizeOnNextKeyPress = false;
