@@ -61,7 +61,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential git rsync file unzip zip python3-venv python3-dev \
             ninja-build ccache pkg-config patchelf \
-            autoconf automake libtool gettext gperf bison flex nasm
+            autoconf automake libtool gettext gperf bison flex nasm \
+            qtdeclarative5-dev-tools
+          # Host Qt 5 qmlimportscanner: the one bundled with KDE's Android Qt segfaults
+          # on these runners, so build/qmlimportscanner-wrapper.py falls back to this one.
+          QIS="$(dpkg -L qtdeclarative5-dev-tools | grep '/qmlimportscanner$' | head -1)"
+          [ -n "$QIS" ] || QIS="$(command -v qmlimportscanner || true)"
+          if [ -n "$QIS" ]; then
+            echo "Host qmlimportscanner: $QIS"
+            echo "KRITA_HOST_QMLIMPORTSCANNER=$QIS" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No host qmlimportscanner found; QML modules may be missing from the APK"
+          fi
           # CMake 3.x on purpose (CMake 4 drops old cmake_minimum_required compatibility)
           pip3 install --user "cmake>=3.28,<4"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"

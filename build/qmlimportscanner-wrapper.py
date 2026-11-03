@@ -6,10 +6,14 @@
 # scanner can crash (segfault) on QML it does not understand, and androiddeployqt
 # then aborts with "Invalid json output from qmlimportscanner".
 #
-# This wrapper runs the real scanner (qmlimportscanner.real). If it crashes or its
-# output is not valid JSON, the wrapper scans the .qml/.js files one at a time,
-# merges the results, and reports every file that crashes the scanner on stderr,
-# so the APK still gets built and the culprit is visible in the build log.
+# This wrapper tries, in order:
+#   1. the scanner shipped with KDE's Android Qt (qmlimportscanner.real)
+#   2. a host Qt 5 scanner ($KRITA_HOST_QMLIMPORTSCANNER, or Ubuntu's
+#      qtdeclarative5-dev-tools build in /usr/lib/qt5/bin)
+# on the whole tree, and uses the first one that produces valid JSON. If all of
+# them crash, it scans the .qml/.js files one at a time with each scanner, merges
+# the results and reports every file that could not be scanned, so the APK still
+# gets built and the problem is visible in the build log.
 
 import json
 import os
@@ -18,6 +22,11 @@ import sys
 
 MARKER = "krita-nova: qmlimportscanner wrapper"  # used by build-krita-android.sh
 REAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qmlimportscanner.real")
+HOST_CANDIDATES = [
+    os.environ.get("KRITA_HOST_QMLIMPORTSCANNER", ""),
+    "/usr/lib/qt5/bin/qmlimportscanner",
+    "/usr/lib/x86_64-linux-gnu/qt5/bin/qmlimportscanner",
+]
 SCAN_EXTENSIONS = (".qml", ".js", ".mjs")
 
 
@@ -25,8 +34,19 @@ def log(msg):
     print("[qmlimportscanner-wrapper] " + msg, file=sys.stderr, flush=True)
 
 
-def run(args):
-    proc = subprocess.run([REAL] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def scanners():
+    found = [REAL]
+    for path in HOST_CANDIDATES:
+        if path and os.access(path, os.X_OK) and os.path.realpath(path) not in map(os.path.realpath, found):
+            found.append(path)
+    return found
+
+
+def run(args, scanner=REAL):
+    try:
+        proc = subprocess.run([scanner] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as e:
+        proc = subprocess.CompletedProcess([scanner] + args, 127, b"", str(e).encode())
     try:
         data = json.loads(proc.stdout.decode("utf-8", "replace") or "null")
     except ValueError:
@@ -66,15 +86,24 @@ def files_under(root):
 
 def main():
     argv = sys.argv[1:]
-    ok, data, proc = run(argv)
-    if ok:
-        sys.stdout.write(proc.stdout.decode("utf-8", "replace"))
-        sys.stderr.write(proc.stderr.decode("utf-8", "replace"))
-        return 0
+    available = scanners()
 
-    log("real scanner failed (exit code %d, %s); falling back to per-file scanning"
-        % (proc.returncode, "valid JSON" if isinstance(data, list) else "invalid JSON"))
+    for scanner in available:
+        ok, data, proc = run(argv, scanner)
+        if ok:
+            if scanner != REAL:
+                log("using host scanner %s (%d imports)" % (scanner, len(data)))
+            sys.stdout.write(proc.stdout.decode("utf-8", "replace"))
+            sys.stderr.write(proc.stderr.decode("utf-8", "replace"))
+            return 0
+        log("%s failed on the whole tree (exit code %d, %s)"
+            % (scanner, proc.returncode, "valid JSON" if isinstance(data, list) else "invalid JSON"))
+        err = proc.stderr.decode("utf-8", "replace").strip()
+        if err:
+            log("  stderr: " + err[:500])
+
     log("command: qmlimportscanner " + " ".join(argv))
+    log("falling back to per-file scanning with: " + ", ".join(available))
 
     roots, files, rest = split_args(argv)
     candidates = list(files)
@@ -84,7 +113,10 @@ def main():
 
     merged, seen, crashed = [], set(), []
     for path in candidates:
-        ok, data, proc = run(["-qmlFiles", path] + rest)
+        for scanner in available:
+            ok, data, proc = run(["-qmlFiles", path] + rest, scanner)
+            if ok:
+                break
         if not ok:
             crashed.append((path, proc.returncode))
             continue
@@ -97,6 +129,9 @@ def main():
     for path, code in crashed:
         log("SKIPPED (scanner exit code %d): %s" % (code, path))
     log("%d files scanned, %d skipped, %d imports found" % (len(candidates), len(crashed), len(merged)))
+    if candidates and len(crashed) == len(candidates):
+        log("WARNING: no file could be scanned - the APK will lack Qt Quick modules, "
+            "so Krita's QML panels (text properties, glyph palette...) will not load")
 
     json.dump(merged, sys.stdout, indent=1)
     sys.stdout.write("\n")

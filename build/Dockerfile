@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ninja-build ccache pkg-config patchelf \
         autoconf automake libtool gettext gperf bison flex nasm \
         openjdk-17-jdk-headless \
+        qtdeclarative5-dev-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Newer CMake than Ubuntu 22.04 ships (3.22). Pinned below 4.0 on purpose:
