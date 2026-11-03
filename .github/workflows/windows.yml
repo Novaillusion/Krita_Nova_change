@@ -29,7 +29,8 @@ concurrency:
 
 defaults:
   run:
-    shell: pwsh
+    # stop at the first failing command, native ones included
+    shell: pwsh -NoProfile -Command "$ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
 
 jobs:
   windows:
@@ -102,11 +103,10 @@ jobs:
           git init -q $env:SRC
           Set-Location $env:SRC
           git remote add origin https://invent.kde.org/graphics/krita.git
-          git fetch -q --depth=1 origin $ref
-          if ($LASTEXITCODE -ne 0) {
+          try { git fetch -q --depth=1 origin $ref }
+          catch {
             git remote set-url origin https://github.com/KDE/krita.git
             git fetch -q --depth=1 origin $ref
-            if ($LASTEXITCODE -ne 0) { throw "could not fetch Krita $ref" }
           }
           git checkout -q FETCH_HEAD
           git log -1 --format='%H %cd %s'
@@ -136,13 +136,14 @@ jobs:
             pip install -q -r krita-deps-management/ci-utilities/requirements-windows.txt
           }
           pip install -q ninja "cmake>=3.28,<4"
-          # keep the venv first on PATH for the next steps
-          "PATH=$env:SRC\venv\Scripts;$env:PATH" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          # venv first on PATH for the next steps (GITHUB_PATH entries win over setup-python's)
+          "$env:SRC\venv\Scripts" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
           "VIRTUAL_ENV=$env:SRC\venv"            | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
       - name: Generate dependency list
         working-directory: ${{ env.SRC }}
         run: |
+          (Get-Command python).Source
           python -u krita-deps-management/tools/replace-branch-in-seed-file.py krita-deps-management/latest/krita-deps.yml -p -o branch-corrected-deps.yml -d master
           python -u krita-deps-management/tools/generate-deps-file.py -s branch-corrected-deps.yml -o .kde-ci.yml
           # Ninja instead of MinGW Makefiles (faster, and needs no mingw32-make); no cppcheck
