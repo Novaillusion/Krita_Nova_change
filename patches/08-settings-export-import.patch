@@ -76,17 +76,17 @@ index 26df199..8d35d2c 100644
        <icon></icon>
        <text>Reset All Settings</text>
 diff --git a/krita/main.cc b/krita/main.cc
-index 4941497..98e1d96 100644
+index 4941497..5b9ea83 100644
 --- a/krita/main.cc
 +++ b/krita/main.cc
-@@ -93,6 +93,7 @@
+@@ -36,6 +36,7 @@
+ #include <kaboutdata.h>
  
- #if defined HAVE_KCRASH
- #include <kcrash.h>
+ #include <KisApplication.h>
 +#include <KisSettingsTransfer.h>
- #elif defined USE_DRMINGW
- namespace
- {
+ #include <KisMainWindow.h>
+ #include <KisSupportedArchitectures.h>
+ #include <KisUsageLogger.h>
 @@ -220,6 +221,10 @@ extern "C" MAIN_EXPORT int MAIN_FN(int argc, char **argv)
      KisAndroidUtils::performInitialSetup();
  #endif
@@ -112,18 +112,18 @@ index 43c8ea4..c7045dc 100644
      opengl/kis_opengl.cpp
      opengl/kis_opengl_canvas2.cpp
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 4f17be8..e116b1c 100644
+index 9db63de..2c48914 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
-@@ -167,6 +167,7 @@
- #if defined(Q_OS_ANDROID) && KRITA_QT_HAS_ANDROID_QPLATFORMSCREEN_DENSITY_ADJUSTMENT
- #include <KisAndroidScaling.h>
- #include "KisTouchFriendlyStyle.h"
-+#include "KisSettingsTransfer.h"
+@@ -169,6 +169,7 @@
  #endif
  
+ #include "KisTouchFriendlyStyle.h"
++#include "KisSettingsTransfer.h"
+ 
  class ToolDockerFactory : public KoDockFactoryBase
-@@ -266,6 +267,8 @@ public:
+ {
+@@ -267,6 +268,8 @@ public:
      KisAction *mdiPreviousWindow {nullptr};
      KisAction *toggleDockers {nullptr};
      KisAction *resetConfigurations {nullptr};
@@ -132,7 +132,7 @@ index 4f17be8..e116b1c 100644
      KisAction *toggleDockerTitleBars {nullptr};
  #ifdef Q_OS_ANDROID
      KisAction *showDonationManagementDialog {nullptr};
-@@ -2399,6 +2402,16 @@ void KisMainWindow::slotResetConfigurations()
+@@ -2400,6 +2403,16 @@ void KisMainWindow::slotResetConfigurations()
      kisApp->askResetConfig();
  }
  
@@ -149,7 +149,7 @@ index 4f17be8..e116b1c 100644
  void KisMainWindow::slotNewToolbarConfig()
  {
      applyMainWindowSettings(d->windowStateConfig);
-@@ -3142,6 +3155,14 @@ void KisMainWindow::createActions()
+@@ -3143,6 +3156,14 @@ void KisMainWindow::createActions()
      d->resetConfigurations  = actionManager->createAction("reset_configurations");
      connect(d->resetConfigurations, SIGNAL(triggered()), this, SLOT(slotResetConfigurations()));
  

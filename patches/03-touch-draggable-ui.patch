@@ -20,18 +20,19 @@ index a37600f..43c8ea4 100644
      opengl/kis_opengl.cpp
      opengl/kis_opengl_canvas2.cpp
 diff --git a/libs/ui/KisApplication.cpp b/libs/ui/KisApplication.cpp
-index a3bcdb2..67884cf 100644
+index a3bcdb2..e358d5d 100644
 --- a/libs/ui/KisApplication.cpp
 +++ b/libs/ui/KisApplication.cpp
-@@ -140,6 +140,7 @@
- 
- #if defined(Q_OS_ANDROID) && KRITA_QT_HAS_ANDROID_QPLATFORMSCREEN_DENSITY_ADJUSTMENT
+@@ -142,6 +142,8 @@
  #include <KisAndroidScaling.h>
-+#include "KisTouchFriendlyStyle.h"
  #endif
  
++#include "KisTouchFriendlyStyle.h"
++
  namespace {
-@@ -248,12 +249,18 @@ KisApplication::KisApplication(const QString &key, int &argc, char **argv)
+ const QTime appStartTime(QTime::currentTime());
+ }
+@@ -248,12 +250,18 @@ KisApplication::KisApplication(const QString &key, int &argc, char **argv)
      QString widgetStyleFromConfig = cfg.widgetStyle();
      QString defaultStyle = style()->objectName().toLower();
      if (!widgetStyleFromConfig.isEmpty()) {
@@ -99,18 +100,19 @@ index 5e8d0fc..45bcdd5 100644
      return true;
  }
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index ee717b1..4f17be8 100644
+index ee717b1..9db63de 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
-@@ -166,6 +166,7 @@
- 
- #if defined(Q_OS_ANDROID) && KRITA_QT_HAS_ANDROID_QPLATFORMSCREEN_DENSITY_ADJUSTMENT
+@@ -168,6 +168,8 @@
  #include <KisAndroidScaling.h>
-+#include "KisTouchFriendlyStyle.h"
  #endif
  
++#include "KisTouchFriendlyStyle.h"
++
  class ToolDockerFactory : public KoDockFactoryBase
-@@ -2573,7 +2574,7 @@ void KisMainWindow::slotUpdateWidgetStyle()
+ {
+ public:
+@@ -2573,7 +2575,7 @@ void KisMainWindow::slotUpdateWidgetStyle()
           if(d->actionMap.value(key)->isChecked()) {
              cfg.setWidgetStyle(key);
              qApp->setProperty(currentUnderlyingStyleNameProperty, key);

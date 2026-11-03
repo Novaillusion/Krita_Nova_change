@@ -49,6 +49,25 @@ jobs:
           sys.exit(0 if actual == expected else 1)
           PY
 
+      - name: Check Krita Nova includes are unconditional
+        # An include placed inside e.g. "#if defined(Q_OS_ANDROID) && ..." compiles on
+        # one platform/Qt build only. Our headers must be included at #if depth 0.
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+          ours = re.compile(r'#\s*include\s*[<"](KisTouchFriendlyStyle|KisSettingsTransfer|KisSettingsTransferCore|KisPresetStrokeRenderer|kis_preset_stroke_renderer|kis_tool_eraser)\.h[>"]')
+          bad = []
+          for path in list(pathlib.Path('krita').rglob('*.cpp')) + list(pathlib.Path('krita').rglob('*.cc')):
+              depth = 0
+              for n, line in enumerate(path.read_text(errors='ignore').splitlines(), 1):
+                  t = line.strip()
+                  if re.match(r'#\s*if', t): depth += 1
+                  elif re.match(r'#\s*endif', t): depth -= 1
+                  elif ours.search(t) and depth > 0: bad.append(f'{path}:{n}: {t}')
+          print('\n'.join(bad) or 'all Krita Nova includes are unconditional')
+          sys.exit(1 if bad else 0)
+          PY
+
       - name: Build and run settings transfer tests
         run: |
           cmake -S tests/settings-transfer -B build-tests -G Ninja -DKRITA_SRC="$PWD/krita"
