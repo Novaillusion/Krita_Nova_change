@@ -1,0 +1,214 @@
+name: Krita Nova Windows build
+
+# Builds Krita (Qt 5, x64) with every patch in patches/ applied, using KDE's own
+# Windows CI scripts and prebuilt dependencies (teams/ci-artifacts/krita-windows),
+# and uploads a portable zip: unzip it anywhere and run bin\krita.exe.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: CMake build type
+        type: choice
+        options: [Release, RelWithDebInfo]
+        default: Release
+      krita_ref:
+        description: Krita commit to build (empty = the one in KRITA_REF)
+        type: string
+        default: ''
+  push:
+    branches: [main]
+    paths:
+      - 'patches/**'
+      - 'KRITA_REF'
+      - '.github/workflows/windows.yml'
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 355
+    env:
+      BUILD_TYPE: ${{ inputs.build_type || 'Release' }}
+      SRC: C:\k                      # short path: Windows path-length limits
+      TOOLS: C:\kt
+      CCACHE_DIR: C:\kcache\ccache
+      CCACHE_MAXSIZE: 6G
+      LLVM_MINGW_MAJOR: '21'         # same clang as KDE's krita-windows-clang21 CI image
+      PYTHONUTF8: '1'
+
+    steps:
+      - name: Disk space
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
+
+      - name: Check out this repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install llvm-mingw (clang ${{ env.LLVM_MINGW_MAJOR }}), ccache
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force $env:TOOLS | Out-Null
+          $hdr = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'krita-nova-ci' }
+          $rels = Invoke-RestMethod -Headers $hdr 'https://api.github.com/repos/mstorsjo/llvm-mingw/releases?per_page=40'
+          $rel = $rels | Where-Object { -not $_.prerelease -and $_.name -match "LLVM $($env:LLVM_MINGW_MAJOR)\." } | Select-Object -First 1
+          if (-not $rel) { throw "no llvm-mingw release with LLVM $env:LLVM_MINGW_MAJOR" }
+          $asset = $rel.assets | Where-Object { $_.name -match '^llvm-mingw-.*-ucrt-x86_64\.zip$' } | Select-Object -First 1
+          Write-Host "llvm-mingw: $($rel.name) -> $($asset.name)"
+          Invoke-WebRequest $asset.browser_download_url -OutFile "$env:TOOLS\llvm-mingw.zip"
+          Expand-Archive "$env:TOOLS\llvm-mingw.zip" $env:TOOLS
+          $lm = (Get-ChildItem $env:TOOLS -Directory -Filter 'llvm-mingw-*' | Select-Object -First 1).FullName
+
+          $cc = Invoke-RestMethod -Headers $hdr 'https://api.github.com/repos/ccache/ccache/releases/latest'
+          $ca = $cc.assets | Where-Object { $_.name -match 'windows-x86_64\.zip$' } | Select-Object -First 1
+          Invoke-WebRequest $ca.browser_download_url -OutFile "$env:TOOLS\ccache.zip"
+          Expand-Archive "$env:TOOLS\ccache.zip" "$env:TOOLS\ccache-zip"
+          $ccdir = (Get-ChildItem "$env:TOOLS\ccache-zip" -Recurse -Filter ccache.exe | Select-Object -First 1).DirectoryName
+
+          # Drop the runner's other compilers (Strawberry gcc, MinGW gcc, MSVC-target LLVM)
+          # so CMake can only find llvm-mingw.
+          $drop = 'Strawberry\\c\\bin', '^C:\\mingw64', 'Program Files\\LLVM', 'msys64'
+          $keep = $env:PATH -split ';' | Where-Object { $p = $_; -not ($drop | Where-Object { $p -match $_ }) }
+          $path = @("$lm\bin", "$lm\x86_64-w64-mingw32\bin", $ccdir) + $keep
+          "PATH=$($path -join ';')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_MINGW=$lm"          | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "CC=clang"                | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "CXX=clang++"             | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Tool versions
+        run: |
+          clang --version; ccache --version | Select-Object -First 1
+          Get-Command clang, mingw32-make, windres -ErrorAction SilentlyContinue | Format-Table Name, Source
+
+      - name: Fetch Krita source
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+          $ref = "${{ inputs.krita_ref }}"
+          if (-not $ref) { $ref = (Get-Content KRITA_REF -Raw).Trim() }
+          Write-Host "Building Krita $ref"
+          git init -q $env:SRC
+          Set-Location $env:SRC
+          git remote add origin https://invent.kde.org/graphics/krita.git
+          git fetch -q --depth=1 origin $ref
+          if ($LASTEXITCODE -ne 0) {
+            git remote set-url origin https://github.com/KDE/krita.git
+            git fetch -q --depth=1 origin $ref
+            if ($LASTEXITCODE -ne 0) { throw "could not fetch Krita $ref" }
+          }
+          git checkout -q FETCH_HEAD
+          git log -1 --format='%H %cd %s'
+          "KRITA_SHA=$(git rev-parse --short HEAD)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Apply Krita Nova patches
+        shell: bash
+        run: |
+          cd /c/k
+          for p in "$GITHUB_WORKSPACE"/patches/*.patch; do
+            git apply --whitespace=nowarn "$p" && echo "[applied] $(basename "$p")" \
+              || { echo "::error::$(basename "$p") does not apply"; exit 1; }
+          done
+          git add -A
+          git -c user.name="Krita Nova" -c user.email=krita-nova@localhost commit -q -m "Krita Nova patches"
+          echo "CI_COMMIT_SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: Fetch KDE CI tooling + Python env
+        working-directory: ${{ env.SRC }}
+        run: |
+          git clone -q --depth=1 -b master https://invent.kde.org/packaging/krita-deps-management.git
+          git clone -q --depth=1 https://invent.kde.org/packaging/krita-ci-utilities.git krita-deps-management/ci-utilities
+          python -m venv venv --upgrade-deps
+          . venv\Scripts\Activate.ps1
+          pip install -q -r krita-deps-management/requirements.txt
+          if (Test-Path krita-deps-management/ci-utilities/requirements-windows.txt) {
+            pip install -q -r krita-deps-management/ci-utilities/requirements-windows.txt
+          }
+          pip install -q ninja "cmake>=3.28,<4"
+          # keep the venv first on PATH for the next steps
+          "PATH=$env:SRC\venv\Scripts;$env:PATH" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "VIRTUAL_ENV=$env:SRC\venv"            | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Generate dependency list
+        working-directory: ${{ env.SRC }}
+        run: |
+          python -u krita-deps-management/tools/replace-branch-in-seed-file.py krita-deps-management/latest/krita-deps.yml -p -o branch-corrected-deps.yml -d master
+          python -u krita-deps-management/tools/generate-deps-file.py -s branch-corrected-deps.yml -o .kde-ci.yml
+          # Ninja instead of MinGW Makefiles (faster, and needs no mingw32-make); no cppcheck
+          python -c "import yaml; p='.kde-ci.yml'; c=yaml.safe_load(open(p)); o=c.setdefault('Options',{}); o['force-ninja-on-windows']=True; o['run-cppcheck']=False; yaml.dump(c,open(p,'w'),indent=2)"
+          Get-Content .kde-ci.yml | Select-String -Pattern 'Options' -Context 0,20
+
+      - name: Restore compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: C:\kcache\ccache
+          key: ccache-windows-${{ env.BUILD_TYPE }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-windows-${{ env.BUILD_TYPE }}-
+
+      - name: Build Krita
+        timeout-minutes: 300
+        working-directory: ${{ env.SRC }}
+        env:
+          KDECI_BUILD_TYPE: ${{ env.BUILD_TYPE }}
+          KDECI_CC_CACHE: C:\kcache\ccache
+          KDECI_CACHE_PATH: C:\kcache\artifacts
+          KDECI_GITLAB_SERVER: https://invent.kde.org/
+          KDECI_PACKAGE_PROJECT: teams/ci-artifacts/krita-windows
+          KDECI_REPO_METADATA_PATH: C:\k\krita-deps-management\repo-metadata
+          KDECI_COMPRESS_PACKAGES_ON_DOWNLOAD: 'False'
+          KDECI_EXTRA_CMAKE_ARGS: -DHIDE_SAFE_ASSERTS=OFF -DBUILD_TESTING=OFF
+        run: |
+          New-Item -ItemType Directory -Force $env:KDECI_CC_CACHE, $env:KDECI_CACHE_PATH | Out-Null
+          git config --global --add safe.directory '*'
+          python -u krita-deps-management/ci-utilities/run-ci-build.py --project krita --branch master --platform Windows/Qt5/Shared --only-build --skip-publishing 2>&1 | Tee-Object -FilePath build-krita.log
+          if ($LASTEXITCODE -ne 0) { throw "run-ci-build.py failed ($LASTEXITCODE)" }
+          ccache -s
+
+      - name: Save compiler cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: C:\kcache\ccache
+          key: ccache-windows-${{ env.BUILD_TYPE }}-${{ github.run_id }}
+
+      - name: Package
+        working-directory: ${{ env.SRC }}
+        env:
+          KRITACI_SKIP_DEBUG_PACKAGE: 'True'
+          KRITACI_BUILD_INSTALLERS: 'False'
+        run: |
+          python -u build-tools/ci-scripts/build-windows-package.py 2>&1 | Tee-Object -FilePath build-package.log
+          if ($LASTEXITCODE -ne 0) { throw "build-windows-package.py failed ($LASTEXITCODE)" }
+          Get-ChildItem -Filter 'krita-x64-*' | Format-Table Name, Length
+
+      - name: Upload Krita Nova (Windows zip)
+        uses: actions/upload-artifact@v4
+        with:
+          name: krita-nova-windows-x64-${{ env.KRITA_SHA }}
+          path: C:\k\krita-x64-*.zip
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-logs
+          path: |
+            C:\k\*.log
+            C:\k\.kde-ci.yml
+            C:\k\_build\CMakeCache.txt
+            C:\k\_build\CMakeFiles\CMakeConfigureLog.yaml
+          if-no-files-found: ignore
