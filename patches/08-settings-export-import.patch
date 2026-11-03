@@ -179,10 +179,10 @@ index d351fa7..c43c566 100644
       *  Shows or hides a toolbar
 diff --git a/libs/ui/KisSettingsTransfer.cpp b/libs/ui/KisSettingsTransfer.cpp
 new file mode 100644
-index 0000000..6288424
+index 0000000..03710df
 --- /dev/null
 +++ b/libs/ui/KisSettingsTransfer.cpp
-@@ -0,0 +1,318 @@
+@@ -0,0 +1,353 @@
 +/*
 + *  SPDX-FileCopyrightText: 2026 Krita Nova contributors
 + *
@@ -206,6 +206,7 @@ index 0000000..6288424
 +#include <QStandardPaths>
 +#include <QSysInfo>
 +#include <QTimer>
++#include <QUrl>
 +#include <QWidget>
 +
 +#include <KSharedConfig>
@@ -218,6 +219,29 @@ index 0000000..6288424
 +namespace Core = KisSettingsTransferCore;
 +
 +namespace {
++
++// Success messages without an icon: on Android the "information" icon is drawn
++// as a warning triangle, which made a successful export look like a failure.
++void showSuccess(QWidget *parent, const QString &title, const QString &text)
++{
++    QMessageBox box(QMessageBox::NoIcon, title, text, QMessageBox::Ok, parent);
++    box.exec();
++}
++
++// "content://.../document/primary%3Afolder%2Fname.zip" -> "folder/name.zip (internal storage)"
++QString readableLocation(const QString &fileName)
++{
++    if (!fileName.startsWith(QLatin1String("content://"))) {
++        return QDir::toNativeSeparators(fileName);
++    }
++    const QString decoded = QUrl::fromPercentEncoding(fileName.section(QLatin1Char('/'), -1).toUtf8());
++    const QString volume = decoded.section(QLatin1Char(':'), 0, 0);
++    const QString path = decoded.section(QLatin1Char(':'), 1);
++    if (path.isEmpty()) return decoded;
++    return volume == QLatin1String("primary")
++        ? i18nc("file location on an Android device", "%1 (internal storage)", path)
++        : QStringLiteral("%1 (%2)").arg(path, volume);
++}
 +
 +QString configDir()
 +{
@@ -366,10 +390,21 @@ index 0000000..6288424
 +    }
 +    out.close();
 +
-+    QMessageBox::information(parent, i18nc("@title:window", "Export Settings"),
-+                             i18np("Exported 1 settings file to\n%2",
-+                                   "Exported %1 settings files to\n%2",
-+                                   entries.size(), fileName));
++    // Read the archive back where possible (content:// URIs may not allow it)
++    {
++        QFile check(fileName);
++        if (check.open(QIODevice::ReadOnly) && check.size() > 0 && check.size() != buffer.data().size()) {
++            QMessageBox::warning(parent, i18nc("@title:window", "Export Settings"),
++                                 i18n("The settings archive was not written completely:\n%1",
++                                      readableLocation(fileName)));
++            return;
++        }
++    }
++
++    showSuccess(parent, i18nc("@title:window", "Export Settings"),
++                i18np("Settings exported successfully (1 file) to:\n%2",
++                      "Settings exported successfully (%1 files) to:\n%2",
++                      entries.size(), readableLocation(fileName)));
 +}
 +
 +void KisSettingsTransfer::importSettings(QWidget *parent)
@@ -490,10 +525,10 @@ index 0000000..6288424
 +    const QString details = text.section(QLatin1Char('\n'), 1);
 +
 +    if (status == QLatin1String("ok")) {
-+        QMessageBox::information(parent, i18nc("@title:window", "Import Settings"),
-+                                 i18n("Your settings were imported.\n\n%1\n\n"
-+                                      "Your previous settings were backed up to:\n%2",
-+                                      details, backupDir()));
++        showSuccess(parent, i18nc("@title:window", "Import Settings"),
++                    i18n("Your settings were imported successfully.\n\n%1\n\n"
++                         "Your previous settings were backed up to:\n%2",
++                         details, backupDir()));
 +    } else {
 +        QMessageBox::warning(parent, i18nc("@title:window", "Import Settings"),
 +                             i18n("Importing the settings failed:\n%1\n\n"
