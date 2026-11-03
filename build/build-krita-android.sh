@@ -195,7 +195,8 @@ if [ -f "$KIT_DIR/qmlimportscanner-wrapper.py" ] && [ -x "$QIS" ]; then
     chmod +x "$QIS"
     echo "## qmlimportscanner wrapper installed ($QIS)"
     # diagnostics for the bundled scanner, which segfaults on GitHub's runners
-    { file "$QIS.real"; ldd "$QIS.real" 2>&1 | grep -iE "qt|not found" | head -20; } 2>/dev/null | sed 's/^/##   /'
+    # (diagnostics only: must never fail the build, hence the "|| true")
+    { file "$QIS.real"; ldd "$QIS.real" 2>&1 | grep -iE "qt|not found" | head -20; } 2>/dev/null | sed 's/^/##   /' || true
     for host in "${KRITA_HOST_QMLIMPORTSCANNER:-}" /usr/lib/qt5/bin/qmlimportscanner; do
         [ -n "$host" ] && [ -x "$host" ] && { echo "## host qmlimportscanner available: $host"; break; }
     done
