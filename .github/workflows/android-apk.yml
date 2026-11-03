@@ -40,7 +40,7 @@ jobs:
       BUILD_TYPE: ${{ inputs.build_type || 'Release' }}
       NDK_VERSION: 27.3.13750724          # packaging/android/apk/build.gradle
       WORK: /mnt/krita-work                # the runner's big scratch disk
-      CCACHE_MAXSIZE: 5G
+      CCACHE_MAXSIZE: 3G
 
     steps:
       - name: Free disk space
@@ -123,31 +123,16 @@ jobs:
           restore-keys: |
             ccache-${{ env.ABI }}-${{ env.BUILD_TYPE }}-
 
-      # Same debug signing key on every run, so a new APK installs over the previous one
-      - name: Restore debug signing key
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.android/debug.keystore
-          key: android-debug-keystore-v1
-
-      - name: Create debug signing key (first run only)
+      # One fixed debug key, kept in this repo (build/krita-nova-debug.keystore), so every
+      # APK installs over the previous one. It used to live in the Actions cache, which
+      # evicted it when the compiler caches filled the 10 GB limit -> a new key ->
+      # INSTALL_FAILED_UPDATE_INCOMPATIBLE on the tablet.
+      - name: Install debug signing key
         run: |
+          mkdir -p ~/.android
+          cp build/krita-nova-debug.keystore ~/.android/debug.keystore
           # Make Gradle use exactly this key (AGP looks at ANDROID_USER_HOME first)
           echo "ANDROID_USER_HOME=$HOME/.android" >> "$GITHUB_ENV"
-          if [ ! -f ~/.android/debug.keystore ]; then
-            mkdir -p ~/.android
-            keytool -genkeypair -v -keystore ~/.android/debug.keystore -storepass android \
-              -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-            echo "NEW_KEYSTORE=1" >> "$GITHUB_ENV"
-          fi
-
-      - name: Save debug signing key
-        if: env.NEW_KEYSTORE == '1'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.android/debug.keystore
-          key: android-debug-keystore-v1
 
       - name: Build Krita + APK
         timeout-minutes: 330

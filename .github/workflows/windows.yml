@@ -41,7 +41,7 @@ jobs:
       SRC: C:\k                      # short path: Windows path-length limits
       TOOLS: C:\kt
       CCACHE_DIR: C:\kcache\ccache
-      CCACHE_MAXSIZE: 6G
+      CCACHE_MAXSIZE: 4G
       LLVM_MINGW_MAJOR: '21'         # same clang as KDE's krita-windows-clang21 CI image
       PYTHONUTF8: '1'
 

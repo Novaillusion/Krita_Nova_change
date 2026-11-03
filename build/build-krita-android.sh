@@ -175,6 +175,15 @@ python3 -u krita-deps-management/tools/generate-deps-file.py \
     -s branch-corrected-deps.yml -o .kde-ci.yml
 
 # ---------------------------------------------------------------------------
+# Krita Nova's fixed debug key: APKs from GitHub and from local builds then share one
+# signature and install over each other.
+NOVA_KEY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/krita-nova-debug.keystore"
+if [ -f "$NOVA_KEY" ]; then
+    mkdir -p "$HOME/.android"
+    cp -f "$NOVA_KEY" "$HOME/.android/debug.keystore"
+    export ANDROID_USER_HOME="$HOME/.android"
+fi
+
 log "5/6  Downloading prebuilt deps + compiling Krita for $ABI ($BUILD_TYPE)"
 python3 -u krita-deps-management/ci-utilities/run-ci-build.py \
     --project krita --branch master \
