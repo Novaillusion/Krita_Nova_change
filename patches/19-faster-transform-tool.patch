@@ -1,0 +1,130 @@
+Krita Nova 19 - faster Transform tool
+
+The Transform tool's in-stack preview ("Accurate" / "Accurate with Instant
+Preview", the default) re-transforms the whole layer on every update (at
+most every 30 ms), with the chosen filter, on a single thread. On a big
+canvas that makes dragging the handles lag.
+
+1. KisTransformWorker::transformPass() (the two resampling passes of every
+   scale/rotate/shear): lines (columns in the vertical pass) are independent
+   and only write to themselves, so passes of 128+ lines are split into
+   chunks processed on up to 8 threads (QThread::idealThreadCount()). Tile
+   access is thread-safe (filters process one device from many threads);
+   the weights buffer and the applicator are only read. Same result, faster
+   on multi-core CPUs (tablets have 8 cores). This also speeds up Scale
+   Image/Layer, Rotate, Shear and transform masks, which use the same worker.
+2. InplaceTransformStrokeStrategy::reapplyTransform(): the low-resolution
+   (level of detail) preview uses the bilinear filter instead of e.g. the
+   default bicubic or Lanczos3. That preview is thrown away: when the
+   transform is applied it is redone at full resolution with the chosen
+   filter, so the result does not change.
+
+diff --git a/libs/image/kis_transform_worker.cc b/libs/image/kis_transform_worker.cc
+index 666e7f5..d764873 100644
+--- a/libs/image/kis_transform_worker.cc
++++ b/libs/image/kis_transform_worker.cc
+@@ -14,6 +14,9 @@
+ #include <klocalizedstring.h>
+ 
+ #include <QTransform>
++#include <QThread>
++#include <thread>
++#include <vector>
+ 
+ #include <KoColorSpace.h>
+ #include <KoCompositeOpRegistry.h>
+@@ -205,15 +208,66 @@ void KisTransformWorker::transformPass(KisPaintDevice *src, KisPaintDevice *dst,
+     KisFilterWeightsApplicator applicator(src, dst, floatscale, shear, dx, clampToEdge);
+ 
+     KisFilterWeightsApplicator::LinePos dstBounds;
++    const qreal support = filterStrategy->support(buf.weightsPositionScale().toFloat());
+ 
+-    for (int i = firstLine; i < firstLine + numLines; i++) {
+-        KisFilterWeightsApplicator::LinePos dstPos;
+-        KisFilterWeightsApplicator::LinePos srcPos(srcStart, srcLen);
++    /**
++     * Krita Nova: every line (column for the vertical pass) is resampled
++     * independently and only writes to itself, so big passes are split into
++     * chunks of lines processed on several threads. The paint device's tiles
++     * are thread-safe (filters process one device from many threads, too);
++     * the weights buffer and the applicator are only read.
++     */
++    const int maxThreads = qBound(1, QThread::idealThreadCount(), 8);
++    const int minLinesPerChunk = 64;
++    const int chunks = qMin(maxThreads, numLines / minLinesPerChunk);
+ 
+-        dstPos = applicator.processLine<T>(srcPos, i, &buf, filterStrategy->support(buf.weightsPositionScale().toFloat()));
+-        dstBounds.unite(dstPos);
++    if (chunks <= 1) {
++        for (int i = firstLine; i < firstLine + numLines; i++) {
++            KisFilterWeightsApplicator::LinePos dstPos;
++            KisFilterWeightsApplicator::LinePos srcPos(srcStart, srcLen);
+ 
+-        progressHelper.step();
++            dstPos = applicator.processLine<T>(srcPos, i, &buf, support);
++            dstBounds.unite(dstPos);
++
++            progressHelper.step();
++        }
++    } else {
++        std::vector<KisFilterWeightsApplicator::LinePos> chunkBounds(chunks);
++        std::vector<std::thread> workers;
++        workers.reserve(chunks);
++
++        for (int c = 0; c < chunks; c++) {
++            const int begin = firstLine + int(qint64(numLines) * c / chunks);
++            const int end = firstLine + int(qint64(numLines) * (c + 1) / chunks);
++
++            workers.emplace_back([&applicator, &buf, &chunkBounds, c, begin, end, srcStart, srcLen, support]() {
++                KisFilterWeightsApplicator::LinePos bounds;
++                for (int i = begin; i < end; i++) {
++                    KisFilterWeightsApplicator::LinePos srcPos(srcStart, srcLen);
++                    bounds.unite(applicator.processLine<T>(srcPos, i, &buf, support));
++                }
++                chunkBounds[c] = bounds;
++            });
++        }
++        for (std::thread &worker : workers) {
++            worker.join();
++        }
++
++        bool first = true;
++        for (const KisFilterWeightsApplicator::LinePos &bounds : chunkBounds) {
++            if (first || bounds.size() > 0) {
++                if (first) {
++                    dstBounds = bounds;
++                    first = false;
++                } else {
++                    dstBounds.unite(bounds);
++                }
++            }
++        }
++
++        for (int i = 0; i < numLines; i++) {
++            progressHelper.step();
++        }
+     }
+ 
+     updateBounds<T>(m_boundRect, dstBounds);
+diff --git a/plugins/tools/tool_transform2/strokes/inplace_transform_stroke_strategy.cpp b/plugins/tools/tool_transform2/strokes/inplace_transform_stroke_strategy.cpp
+index e337c58..bdb9ff4 100644
+--- a/plugins/tools/tool_transform2/strokes/inplace_transform_stroke_strategy.cpp
++++ b/plugins/tools/tool_transform2/strokes/inplace_transform_stroke_strategy.cpp
+@@ -952,6 +952,17 @@ void InplaceTransformStrokeStrategy::reapplyTransform(ToolTransformArgs args,
+ {
+     if (levelOfDetail > 0) {
+         args.scale3dSrcAndDst(KisLodTransform::lodToScale(levelOfDetail));
++
++        /**
++         * Krita Nova: the low-resolution preview is thrown away and redone at
++         * full resolution with the chosen filter when the transform is applied
++         * (finishAction() -> reapplyTransform(..., 0, ...)), so preview it with
++         * the cheap bilinear filter instead of e.g. bicubic or Lanczos.
++         */
++        const QString filter = args.filterId();
++        if (filter != QLatin1String("NearestNeighbor") && filter != QLatin1String("Bilinear")) {
++            args.setFilterId(QStringLiteral("Bilinear"));
++        }
+     }
+ 
+     KisBatchNodeUpdateSP updateData(new KisBatchNodeUpdate());

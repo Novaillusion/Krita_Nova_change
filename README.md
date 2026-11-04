@@ -25,6 +25,7 @@ prebuilt Android dependencies (Qt5, KF5, …) itself.
 | `16-status-items-in-top-bar.patch` | Android: image size, canvas rotation and zoom move from the bottom-right status bar to the right end of the top bar |
 | `17-nova-splash-screen.patch` | Krita Nova loading screen (artwork by novaillusion); no Krita logo/banner, version and loading text at the bottom right |
 | `18-app-name-nova-krita.patch` | App name shown as "Nova Krita" (Android launcher, window titles, dialogs); settings and package id unchanged |
+| `19-faster-transform-tool.patch` | Faster Transform tool: multi-threaded resampling passes, bilinear filter for the low-resolution live preview (final result unchanged) |
 
 ## Get an APK
 
