@@ -49,6 +49,10 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
    dragging. First placement: 78 px wide, 60% of the window height, vertically
    centered at the left edge (kritarc: androidBrushPanelPlaced3). Thinner
    frame (PM_DockWidgetFrameWidth 3 for this panel, 1 px content margins).
+   The panel and the "more" popup have rounded corners (8 px) and a grey
+   1.5 px outline: translucent window background, painted by
+   RoundedPanelPainter (an event filter) instead of the widget's own
+   background and frame.
 5. mirror_actions, select_layout and workspaces are moved from the brush
    toolbar to the top bar (mainToolBar); the expanding spacer is hidden, so
    the vertical sliders get the panel's spare height. The image size,
@@ -62,7 +66,7 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
 Desktop builds are unchanged.
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 2c48914..94e43a5 100644
+index 2c48914..86c6cb2 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
 @@ -20,6 +20,26 @@
@@ -92,7 +96,7 @@ index 2c48914..94e43a5 100644
  #include <QIcon>
  #include <QInputDialog>
  #include <QLayout>
-@@ -366,6 +386,682 @@ public:
+@@ -366,6 +386,726 @@ public:
      }
  };
  
@@ -638,6 +642,48 @@ index 2c48914..94e43a5 100644
 +    QElapsedTimer m_stackChanged;
 +};
 +
++/**
++ * Rounded corners and a grey outline for a floating window (the Brush Panel
++ * and its "more" popup). The window gets a translucent background and this
++ * filter paints the rounded panel instead of the widget's own background and
++ * frame; the children paint on top of it as usual.
++ */
++class RoundedPanelPainter : public QObject
++{
++public:
++    static void install(QWidget *window, qreal radius = 8.0)
++    {
++        window->setAttribute(Qt::WA_TranslucentBackground, true);
++        window->setAutoFillBackground(false);
++        window->installEventFilter(new RoundedPanelPainter(window, radius));
++    }
++
++protected:
++    bool eventFilter(QObject *watched, QEvent *event) override
++    {
++        if (event->type() != QEvent::Paint) return false;
++        QWidget *widget = static_cast<QWidget *>(watched);
++        QPainter p(widget);
++        p.setRenderHint(QPainter::Antialiasing, true);
++        p.setCompositionMode(QPainter::CompositionMode_Source);
++        p.fillRect(widget->rect(), Qt::transparent);
++        p.setCompositionMode(QPainter::CompositionMode_SourceOver);
++
++        QColor outline = widget->palette().color(QPalette::WindowText);
++        outline.setAlpha(110); // grey on dark and on light themes
++        const qreal pen = 1.5;
++        const QRectF r = QRectF(widget->rect()).adjusted(pen / 2, pen / 2, -pen / 2, -pen / 2);
++        p.setPen(QPen(outline, pen));
++        p.setBrush(widget->palette().color(QPalette::Window));
++        p.drawRoundedRect(r, m_radius, m_radius);
++        return true; // no square background or frame from the widget itself
++    }
++
++private:
++    RoundedPanelPainter(QObject *parent, qreal radius) : QObject(parent), m_radius(radius) {}
++    qreal m_radius {8.0};
++};
++
 +/// Title bar of the Brush Panel: an empty strip with a small grip mark.
 +/// Mouse events are not accepted, so QDockWidget moves the panel.
 +class NovaPanelGrip : public QWidget
@@ -680,6 +726,7 @@ index 2c48914..94e43a5 100644
 +    // floating panel resize it (patch 14), so the grip is tall enough to have
 +    // room to move it below that.
 +    QWidget *titleBar = new NovaPanelGrip(dock);
++    RoundedPanelPainter::install(dock);
 +    dock->setTitleBarWidget(titleBar);
 +
 +    // Column, everything centered: undo, redo | more (3 dots) | size | opacity | color sampler
@@ -708,6 +755,7 @@ index 2c48914..94e43a5 100644
 +    // is one row, "brush toolbar | x"
 +    if (QFrame *frame = qobject_cast<QFrame *>(moreContent->parentWidget())) {
 +        frame->setFrameStyle(QFrame::NoFrame);
++        RoundedPanelPainter::install(frame);
 +    }
 +    {
 +        QFrame *separator = new QFrame(moreContent);
@@ -775,7 +823,7 @@ index 2c48914..94e43a5 100644
  KisMainWindow::KisMainWindow(QUuid uuid)
      : KXmlGuiWindow()
      , d(new Private(this, uuid))
-@@ -608,6 +1304,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
+@@ -608,6 +1348,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
          }
      }
  
