@@ -41,10 +41,10 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
 Desktop builds are unchanged.
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 2c48914..ed777bd 100644
+index 2c48914..fc6dfbd 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
-@@ -20,6 +20,20 @@
+@@ -20,6 +20,21 @@
  #include <QScreen>
  #include <QDialog>
  #include <QDockWidget>
@@ -52,6 +52,7 @@ index 2c48914..ed777bd 100644
 +#include <QTimer>
 +#include <functional>
 +#include <QWidgetAction>
++#include <QLocale>
 +#include <QAbstractButton>
 +#include <QBoxLayout>
 +#include <QAbstractItemView>
@@ -65,7 +66,7 @@ index 2c48914..ed777bd 100644
  #include <QIcon>
  #include <QInputDialog>
  #include <QLayout>
-@@ -366,6 +380,408 @@ public:
+@@ -366,6 +381,415 @@ public:
      }
  };
  
@@ -143,7 +144,8 @@ index 2c48914..ed777bd 100644
 +                                     : palette().color(QPalette::Mid));
 +        p.restore();
 +        if (m_dragging) {
-+            const QString text = (m_spin->prefix() + m_spin->textFromValue(m_painted) + m_spin->suffix()).trimmed();
++            const QString text = QString(m_spin->prefix() + QLocale().toString(m_painted, 'f', m_spin->decimals())
++                                         + m_spin->suffix()).trimmed();
 +            QFont f = font();
 +            f.setPointSizeF(qMax(6.0, f.pointSizeF() * 0.8));
 +            p.setFont(f);
@@ -289,9 +291,9 @@ index 2c48914..ed777bd 100644
 +        if (KisCanvasResourceProvider *resources = m_viewManager->canvasResourceProvider()) {
 +            connect(resources, &KisCanvasResourceProvider::sigFGColorChanged, this, [this]() { update(); });
 +        }
-+        connect(KoToolManager::instance(), &KoToolManager::changedTool, this, [this]() {
++        if (toolManager()) connect(toolManager(), &KoToolManager::changedTool, this, [this]() {
 +            // the user picked another tool by hand: nothing to switch back from
-+            if (m_armed && KoToolManager::instance()->activeToolId() != samplerId()) {
++            if (m_armed && toolManager() && toolManager()->activeToolId() != samplerId()) {
 +                disarm(false);
 +            }
 +        });
@@ -300,6 +302,11 @@ index 2c48914..ed777bd 100644
 +    QSize sizeHint() const override { return QSize(34, 34); }
 +
 +protected:
++    KoToolManager *toolManager() const
++    {
++        return m_viewManager ? m_viewManager->toolManager() : nullptr;
++    }
++
 +    static QString samplerId() { return QStringLiteral("KritaSelected/KisToolColorSampler"); }
 +
 +    void toggleArmed()
@@ -308,7 +315,8 @@ index 2c48914..ed777bd 100644
 +            disarm(true);
 +            return;
 +        }
-+        KoToolManager *tools = KoToolManager::instance();
++        KoToolManager *tools = toolManager();
++        if (!tools) return;
 +        m_previousTool = tools->activeToolId();
 +        if (m_previousTool == samplerId()) m_previousTool.clear();
 +        m_armed = true;
@@ -322,9 +330,9 @@ index 2c48914..ed777bd 100644
 +        if (!m_armed) return;
 +        m_armed = false;
 +        qApp->removeEventFilter(this);
-+        if (switchBack && !m_previousTool.isEmpty()
-+            && KoToolManager::instance()->activeToolId() == samplerId()) {
-+            KoToolManager::instance()->switchToolRequested(m_previousTool);
++        if (switchBack && !m_previousTool.isEmpty() && toolManager()
++            && toolManager()->activeToolId() == samplerId()) {
++            toolManager()->switchToolRequested(m_previousTool);
 +        }
 +        update();
 +    }
@@ -474,7 +482,7 @@ index 2c48914..ed777bd 100644
  KisMainWindow::KisMainWindow(QUuid uuid)
      : KXmlGuiWindow()
      , d(new Private(this, uuid))
-@@ -608,6 +1024,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
+@@ -608,6 +1032,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
          }
      }
  

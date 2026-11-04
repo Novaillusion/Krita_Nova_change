@@ -157,10 +157,10 @@ index a8f4ed6..48509a7 100644
                              warningMessage().split("\n", Qt::SkipEmptyParts));
  
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index b20225d..7e7dc59 100644
+index 5d2ff03..aa6bb13 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
-@@ -1486,7 +1486,7 @@ void KisMainWindow::setCanvasDetached(bool detach)
+@@ -1494,7 +1494,7 @@ void KisMainWindow::setCanvasDetached(bool detach)
  {
  #ifdef Q_OS_ANDROID
      if (detach) {
@@ -169,7 +169,7 @@ index b20225d..7e7dc59 100644
                               "Detach Canvas is unsupported on Android");
      }
  #else
-@@ -1556,7 +1556,7 @@ bool KisMainWindow::openDocument(const QString &path, OpenFlags flags)
+@@ -1564,7 +1564,7 @@ bool KisMainWindow::openDocument(const QString &path, OpenFlags flags)
  
      if (!QFile(path).exists()) {
          if (!(flags & BatchMode)) {
@@ -178,7 +178,7 @@ index b20225d..7e7dc59 100644
          }
          KisRecentFilesManager::instance()->remove(QUrl::fromLocalFile(path)); //remove the file from the recent-opened-file-list
          return false;
-@@ -1700,7 +1700,7 @@ void KisMainWindow::slotSaveCanceled(const QString &errMsg)
+@@ -1708,7 +1708,7 @@ void KisMainWindow::slotSaveCanceled(const QString &errMsg)
  {
      if (!errMsg.isEmpty()) {   // empty when cancelled by user
          KisUsageLogger::log(QString("Saving cancelled. Error:").arg(errMsg));
@@ -187,7 +187,7 @@ index b20225d..7e7dc59 100644
      }
      else {
          KisUsageLogger::log(QString("Saving cancelled by the user."));
-@@ -1797,7 +1797,7 @@ bool KisMainWindow::saveDocument(KisDocument *document, bool saveas, bool isExpo
+@@ -1805,7 +1805,7 @@ bool KisMainWindow::saveDocument(KisDocument *document, bool saveas, bool isExpo
      }
      else if (dlg.result() == KisDelayedSaveDialog::Ignored) {
          QMessageBox::critical(qApp->activeWindow(),
@@ -196,7 +196,7 @@ index b20225d..7e7dc59 100644
                                i18n("You are saving a file while the image is "
                                     "still rendering. The saved file may be "
                                     "incomplete or corrupted.\n\n"
-@@ -2544,7 +2544,7 @@ void KisMainWindow::slotStoragesWarning(const QString &/*location*/)
+@@ -2552,7 +2552,7 @@ void KisMainWindow::slotStoragesWarning(const QString &/*location*/)
  
      if (!checkPaintOpAvailable()) {
          warning += i18n("\nThere are no brush presets available. Please enable a bundle that has presets before continuing.\n");
@@ -205,7 +205,7 @@ index b20225d..7e7dc59 100644
  
          QAction *action = actionCollection()->action("manage_bundles");
          if (action) {
-@@ -2553,7 +2553,7 @@ void KisMainWindow::slotStoragesWarning(const QString &/*location*/)
+@@ -2561,7 +2561,7 @@ void KisMainWindow::slotStoragesWarning(const QString &/*location*/)
      }
  
      if (!checkActiveBundlesAvailable()) {
@@ -214,7 +214,7 @@ index b20225d..7e7dc59 100644
      }
  
  }
-@@ -2692,7 +2692,7 @@ void KisMainWindow::importAnimation()
+@@ -2700,7 +2700,7 @@ void KisMainWindow::importAnimation()
          if (!status.isOk() && !status.isInternalError()) {
              QString msg = status.errorMessage();
              if (!msg.isEmpty())
@@ -223,7 +223,7 @@ index b20225d..7e7dc59 100644
          }
          activeView()->canvasBase()->refetchDataFromImage();
      }
-@@ -2753,7 +2753,7 @@ void KisMainWindow::importVideoAnimation()
+@@ -2761,7 +2761,7 @@ void KisMainWindow::importVideoAnimation()
              KoColor bgColor(qc, cs);
  
              if (!document->newImage(name, width, height, cs, bgColor, KisConfig::RASTER_LAYER, 1, "", double(resolution / 72) )) {
@@ -232,7 +232,7 @@ index b20225d..7e7dc59 100644
                  return;
              }
  
-@@ -2772,7 +2772,7 @@ void KisMainWindow::importVideoAnimation()
+@@ -2780,7 +2780,7 @@ void KisMainWindow::importVideoAnimation()
          if (!status.isOk() && !status.isInternalError()) {
              QString msg = status.errorMessage();
              if (!msg.isEmpty())
@@ -241,7 +241,7 @@ index b20225d..7e7dc59 100644
          }
  
          activeView()->canvasBase()->refetchDataFromImage();
-@@ -3424,7 +3424,7 @@ void KisMainWindow::newWindow()
+@@ -3432,7 +3432,7 @@ void KisMainWindow::newWindow()
  #ifdef Q_OS_ANDROID
      // Check if current mainwindow exists, just to be sure.
      if (KisPart::instance()->currentMainwindow()) {
