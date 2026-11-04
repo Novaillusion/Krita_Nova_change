@@ -16,7 +16,7 @@ layouts and workspaces (patch 15).
 Desktop builds are unchanged.
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 27f9093..290670c 100644
+index 1fda919..68855f4 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
 @@ -530,6 +530,16 @@ void adaptBrushToolBarToColumn(KisToolBar *toolBar, QMainWindow *mainWindow)

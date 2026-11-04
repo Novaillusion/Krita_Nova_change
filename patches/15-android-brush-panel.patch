@@ -10,8 +10,12 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
    XMLGUI toolbars "editToolBar" and "BrushesAndStuff" into it, vertical and
    not movable. They stay the same XMLGUI-managed KisToolBar objects, so
    Configure Toolbars keeps working. QMainWindow::restoreState() (window
-   settings, workspaces) puts known toolbars back into the toolbar areas; an
-   event filter catches the ParentChange and moves them into the panel again.
+   settings, workspaces) puts known toolbars back into its toolbar layout
+   without reparenting them, which left them invisible in the panel and kept
+   the top bar from stretching; an event filter (ParentChange, Move, explicit
+   Hide) and the panel's start-up checks take them out of the main window's
+   layout again. The dock has no allowed dock areas, is re-floated when
+   something docks it, and has no keyboard accelerator in its title.
 2. BrushPanelShower shows the panel 400 ms after the main window is first
    shown (a floating dock is a window of its own and is not shown along with
    the main window; startup's window state / workspace restore may also hide
@@ -44,7 +48,7 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
 Desktop builds are unchanged.
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 2c48914..27f9093 100644
+index 2c48914..1fda919 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
 @@ -20,6 +20,21 @@
@@ -69,7 +73,7 @@ index 2c48914..27f9093 100644
  #include <QIcon>
  #include <QInputDialog>
  #include <QLayout>
-@@ -366,6 +381,471 @@ public:
+@@ -366,6 +381,493 @@ public:
      }
  };
  
@@ -397,10 +401,15 @@ index 2c48914..27f9093 100644
 +                toolBar->installEventFilter(this);
 +                m_watched.append(toolBar);
 +            }
++            // QMainWindow::restoreState() (startup, workspaces) puts toolbars it
++            // knows back into its toolbar layout WITHOUT reparenting them: the
++            // toolbar then sits in our panel but is positioned by the main
++            // window (invisible here, and a ghost entry that keeps the top bar
++            // from stretching). Take it out of the main window's layout again.
++            if (m_mainWindow->toolBarArea(toolBar) != Qt::NoToolBarArea) {
++                m_mainWindow->removeToolBar(toolBar);
++            }
 +            if (toolBar->parentWidget() != m_container) {
-+                if (m_mainWindow->toolBarArea(toolBar) != Qt::NoToolBarArea) {
-+                    m_mainWindow->removeToolBar(toolBar);
-+                }
 +                toolBar->setParent(m_container);
 +                layout->insertWidget(index, toolBar);
 +            }
@@ -409,6 +418,9 @@ index 2c48914..27f9093 100644
 +            toolBar->setFloatable(false);
 +            if (toolBar->objectName() == QLatin1String("BrushesAndStuff")) {
 +                adaptBrushToolBarToColumn(toolBar, m_mainWindow);
++            }
++            if (layout->indexOf(toolBar) < 0) {
++                layout->insertWidget(index, toolBar);
 +            }
 +            toolBar->show();
 +            index++;
@@ -419,7 +431,10 @@ index 2c48914..27f9093 100644
 +protected:
 +    bool eventFilter(QObject *watched, QEvent *event) override
 +    {
-+        if (event->type() == QEvent::ParentChange && !m_busy && !m_pending) {
++        const QEvent::Type type = event->type();
++        const bool suspicious = type == QEvent::ParentChange || type == QEvent::Move
++            || (type == QEvent::Hide && static_cast<QWidget *>(watched)->isHidden());
++        if (suspicious && !m_busy && !m_pending) {
 +            m_pending = true;
 +            QTimer::singleShot(0, this, [this]() {
 +                m_pending = false;
@@ -447,11 +462,15 @@ index 2c48914..27f9093 100644
 +class BrushPanelShower : public QObject
 +{
 +public:
-+    BrushPanelShower(QMainWindow *mainWindow, QDockWidget *dock)
-+        : QObject(dock), m_mainWindow(mainWindow), m_dock(dock)
++    BrushPanelShower(QMainWindow *mainWindow, QDockWidget *dock, BrushPanelToolBarKeeper *keeper)
++        : QObject(dock), m_mainWindow(mainWindow), m_dock(dock), m_keeper(keeper)
 +    {
 +        mainWindow->installEventFilter(this);
 +        if (mainWindow->isVisible()) schedule();
++        // The panel is always floating: restoreState() may dock it again.
++        connect(dock, &QDockWidget::topLevelChanged, this, [this](bool floating) {
++            if (!floating) QTimer::singleShot(0, this, [this]() { place(true); });
++        });
 +    }
 +
 +protected:
@@ -469,13 +488,17 @@ index 2c48914..27f9093 100644
 +        if (m_done || !m_mainWindow) return;
 +        m_done = true;
 +        m_mainWindow->removeEventFilter(this);
-+        // after the rest of startup (workspace restore, first view) has run
-+        QTimer::singleShot(400, this, [this]() { place(); });
++        // after the rest of startup (workspace restore, first view) has run;
++        // checked again a little later in case something restores the layout late
++        for (int delay : {400, 2000, 6000}) {
++            QTimer::singleShot(delay, this, [this]() { place(false); });
++        }
 +    }
 +
-+    void place()
++    void place(bool force)
 +    {
 +        if (!m_dock || !m_mainWindow) return;
++        if (m_keeper) m_keeper->relocate();
 +        const QRect area = m_mainWindow->geometry();
 +        QScreen *screen = m_mainWindow->screen();
 +        const QRect available = screen ? screen->availableGeometry() : area;
@@ -485,7 +508,7 @@ index 2c48914..27f9093 100644
 +        const bool onScreen = m_dock->isFloating() && m_dock->width() > 20 && m_dock->height() > 100
 +                              && available.intersects(m_dock->frameGeometry());
 +
-+        if (!placedBefore || !onScreen) {
++        if (force || !placedBefore || !onScreen) {
 +            m_dock->setFloating(true);
 +            m_dock->adjustSize();
 +            const int top = area.top() + area.height() / 10;
@@ -500,6 +523,7 @@ index 2c48914..27f9093 100644
 +
 +    QPointer<QMainWindow> m_mainWindow;
 +    QPointer<QDockWidget> m_dock;
++    QPointer<BrushPanelToolBarKeeper> m_keeper;
 +    bool m_done {false};
 +};
 +
@@ -507,6 +531,8 @@ index 2c48914..27f9093 100644
 +{
 +    QDockWidget *dock = new QDockWidget(i18nc("@title:window", "Brush Panel"), mainWindow);
 +    dock->setObjectName(QStringLiteral("KritaNovaBrushPanel"));
++    KAcceleratorManager::setNoAccel(dock); // no "&" in the title
++    dock->setAllowedAreas(Qt::NoDockWidgetArea); // floating only
 +    dock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable
 +                      | QDockWidget::DockWidgetClosable);
 +    KoDockWidgetTitleBar *titleBar = new KoDockWidgetTitleBar(dock);
@@ -531,7 +557,7 @@ index 2c48914..27f9093 100644
 +    // Show it once the main window is on screen: a floating dock is a window
 +    // of its own and is not shown along with the main window, and the saved
 +    // window state / workspace restored during startup may hide or re-dock it.
-+    new BrushPanelShower(mainWindow, dock);
++    new BrushPanelShower(mainWindow, dock, keeper);
 +    return dock;
 +}
 +
@@ -541,7 +567,7 @@ index 2c48914..27f9093 100644
  KisMainWindow::KisMainWindow(QUuid uuid)
      : KXmlGuiWindow()
      , d(new Private(this, uuid))
-@@ -608,6 +1088,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
+@@ -608,6 +1110,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
          }
      }
  
