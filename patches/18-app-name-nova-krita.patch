@@ -1,0 +1,1123 @@
+Krita Nova 18 - app name "Nova Krita"
+
+The name people see is now "Nova Krita"; internal identifiers stay the same,
+so existing settings, resources and file associations keep working.
+
+1. KAboutData display name (krita/main.cc): "Nova Krita". Qt uses it as the
+   application display name (window titles, About dialog, crash dialogs).
+2. Message box / dialog titles: every i18n("Krita") and
+   i18nc("@title:window", "Krita") becomes "Nova Krita" (103 places).
+3. Android launcher name: AndroidManifest.xml "Nova Krita"; the debug flavor
+   (the CI APKs) "Nova Krita" instead of "Krita Debug"; the next flavor
+   "Nova Krita Next".
+
+Unchanged on purpose: the application/config name "krita" (kritarc, resource
+folder), the Android package id org.krita(.debug), and Krita's own links and
+donation texts.
+
+diff --git a/krita/main.cc b/krita/main.cc
+index 5b9ea83..81cb0ec 100644
+--- a/krita/main.cc
++++ b/krita/main.cc
+@@ -721,7 +721,7 @@ if (!qEnvironmentVariableIsEmpty("KRITA_OPENGL_DEBUG")) {
+     /// Initialize application info, it will be used by both, Qt and
+     /// DrKonqi of the host system
+     KAboutData aboutData("krita",
+-                            i18n("Krita"),
++                            i18n("Nova Krita"),
+                             KritaVersionWrapper::versionString(true),
+                             i18n("Krita is the full-featured digital art studio"),
+                             KAboutLicense::GPL,
+diff --git a/libs/resources/KisResourceCacheDb.cpp b/libs/resources/KisResourceCacheDb.cpp
+index e901450..f130e30 100644
+--- a/libs/resources/KisResourceCacheDb.cpp
++++ b/libs/resources/KisResourceCacheDb.cpp
+@@ -350,7 +350,7 @@ QSqlError createDatabase(const QString &location)
+                 }
+ 
+                 if (schemaIsOutDated) {
+-                    QMessageBox::critical(0, i18nc("@title:window", "Krita"), i18n("The resource database scheme has changed. Krita will backup your database and create a new database."));
++                    QMessageBox::critical(0, i18nc("@title:window", "Nova Krita"), i18n("The resource database scheme has changed. Krita will backup your database and create a new database."));
+                     if (QVersionNumber::compare(oldSchemaVersionNumber, QVersionNumber::fromString("0.0.14")) > 0) {
+                         KisResourceLocator::instance()->saveTags();
+                     }
+diff --git a/libs/resourcewidgets/KisStorageChooserWidget.cpp b/libs/resourcewidgets/KisStorageChooserWidget.cpp
+index 253b7f2..2a74da7 100644
+--- a/libs/resourcewidgets/KisStorageChooserWidget.cpp
++++ b/libs/resourcewidgets/KisStorageChooserWidget.cpp
+@@ -176,7 +176,7 @@ void KisStorageChooserWidget::activated(const QModelIndex &index)
+     }
+ 
+     if (!warning.isEmpty()) {
+-        QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"), warning);
++        QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), warning);
+     }
+ 
+     repaint(); // this helps the chooser widget update the active state checkbox. The first checkbox doesn't repaint correctly without it
+diff --git a/libs/ui/KisApplication.cpp b/libs/ui/KisApplication.cpp
+index e358d5d..cfb2869 100644
+--- a/libs/ui/KisApplication.cpp
++++ b/libs/ui/KisApplication.cpp
+@@ -1235,10 +1235,10 @@ bool KisApplication::createNewDocFromTemplate(const QString &fileName, KisMainWi
+         }
+ 
+         if (paths.isEmpty()) {
+-            QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"),
++            QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"),
+                                   i18n("No template found for: %1", desktopName));
+         } else if (paths.count() > 1) {
+-            QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"),
++            QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"),
+                                   i18n("Too many templates found for: %1", desktopName));
+         } else {
+             templatePath = paths.at(0);
+@@ -1254,7 +1254,7 @@ bool KisApplication::createNewDocFromTemplate(const QString &fileName, KisMainWi
+             return true;
+         }
+         else {
+-            QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"),
++            QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"),
+                                   i18n("Template %1 failed to load.", fileName));
+         }
+     }
+@@ -1286,7 +1286,7 @@ void KisApplication::resetConfig()
+             }
+ 
+             QMessageBox::information(qApp->activeWindow(),
+-                                 i18nc("@title:window", "Krita"),
++                                 i18nc("@title:window", "Nova Krita"),
+                                  i18n("Krita configurations reset!\n\n"
+                                       "Backup file was created at: %1\n\n"
+                                       "Restart Krita for changes to take effect.",
+@@ -1300,7 +1300,7 @@ void KisApplication::resetConfig()
+         }
+         else {
+             QMessageBox::warning(qApp->activeWindow(),
+-                                 i18nc("@title:window", "Krita"),
++                                 i18nc("@title:window", "Nova Krita"),
+                                  i18n("Failed to clear %1\n\n"
+                                       "Please make sure no other program is using the file and try again.",
+                                       kritarcPath),
+@@ -1328,7 +1328,7 @@ void KisApplication::resetConfig()
+ void KisApplication::askResetConfig()
+ {
+     bool ok = QMessageBox::question(qApp->activeWindow(),
+-                                    i18nc("@title:window", "Krita"),
++                                    i18nc("@title:window", "Nova Krita"),
+                                     i18n("Do you want to clear the settings file?"),
+                                     QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
+     if (ok) {
+diff --git a/libs/ui/KisDocument.cpp b/libs/ui/KisDocument.cpp
+index a8f4ed6..48509a7 100644
+--- a/libs/ui/KisDocument.cpp
++++ b/libs/ui/KisDocument.cpp
+@@ -1054,7 +1054,7 @@ void KisDocument::slotCompleteSavingDocument(const KritaUtils::ExportFileJob &jo
+ 
+ 
+         if (!fileBatchMode()) {
+-            DlgLoadMessages dlg(i18nc("@title:window", "Krita"),
++            DlgLoadMessages dlg(i18nc("@title:window", "Nova Krita"),
+                                 i18n("Could not save %1.", job.filePath),
+                                 errorMessage.split("\n", Qt::SkipEmptyParts)
+                                     + warningMessage.split("\n", Qt::SkipEmptyParts),
+@@ -1069,7 +1069,7 @@ void KisDocument::slotCompleteSavingDocument(const KritaUtils::ExportFileJob &jo
+             QStringList reasons = warningMessage.split("\n", Qt::SkipEmptyParts);
+ 
+             DlgLoadMessages dlg(
+-                i18nc("@title:window", "Krita"),
++                i18nc("@title:window", "Nova Krita"),
+                 i18nc("dialog box shown to the user if there were warnings while saving the document, "
+                       "%1 is the file path",
+                       "%1 has been saved but is incomplete.",
+@@ -2036,7 +2036,7 @@ bool KisDocument::openFile()
+ {
+     //dbgUI <<"for" << localFilePath();
+     if (!QFile::exists(localFilePath()) && !fileBatchMode()) {
+-        QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"), i18n("File %1 does not exist.", localFilePath()));
++        QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), i18n("File %1 does not exist.", localFilePath()));
+         return false;
+     }
+ 
+@@ -2079,7 +2079,7 @@ bool KisDocument::openFile()
+         KisUsageLogger::log(QString("Loading %1 failed: %2").arg(prettyPath(), msg));
+ 
+         if (!msg.isEmpty() && !fileBatchMode()) {
+-            DlgLoadMessages dlg(i18nc("@title:window", "Krita"),
++            DlgLoadMessages dlg(i18nc("@title:window", "Nova Krita"),
+                                 i18n("Could not open %1.", prettyPath()),
+                                 errorMessage().split("\n", Qt::SkipEmptyParts)
+                                     + warningMessage().split("\n", Qt::SkipEmptyParts),
+@@ -2090,7 +2090,7 @@ bool KisDocument::openFile()
+         return false;
+     }
+     else if (!warningMessage().isEmpty() && !fileBatchMode()) {
+-        DlgLoadMessages dlg(i18nc("@title:window", "Krita"),
++        DlgLoadMessages dlg(i18nc("@title:window", "Nova Krita"),
+                             i18n("There were problems opening %1.", prettyPath()),
+                             warningMessage().split("\n", Qt::SkipEmptyParts));
+ 
+diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
+index b20225d..7e7dc59 100644
+--- a/libs/ui/KisMainWindow.cpp
++++ b/libs/ui/KisMainWindow.cpp
+@@ -1486,7 +1486,7 @@ void KisMainWindow::setCanvasDetached(bool detach)
+ {
+ #ifdef Q_OS_ANDROID
+     if (detach) {
+-        QMessageBox::warning(this, i18nc("@title:window", "Krita"),
++        QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"),
+                              "Detach Canvas is unsupported on Android");
+     }
+ #else
+@@ -1556,7 +1556,7 @@ bool KisMainWindow::openDocument(const QString &path, OpenFlags flags)
+ 
+     if (!QFile(path).exists()) {
+         if (!(flags & BatchMode)) {
+-            QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"), i18n("The file %1 does not exist.", path));
++            QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), i18n("The file %1 does not exist.", path));
+         }
+         KisRecentFilesManager::instance()->remove(QUrl::fromLocalFile(path)); //remove the file from the recent-opened-file-list
+         return false;
+@@ -1700,7 +1700,7 @@ void KisMainWindow::slotSaveCanceled(const QString &errMsg)
+ {
+     if (!errMsg.isEmpty()) {   // empty when cancelled by user
+         KisUsageLogger::log(QString("Saving cancelled. Error:").arg(errMsg));
+-        QMessageBox::critical(this, i18nc("@title:window", "Krita"), errMsg);
++        QMessageBox::critical(this, i18nc("@title:window", "Nova Krita"), errMsg);
+     }
+     else {
+         KisUsageLogger::log(QString("Saving cancelled by the user."));
+@@ -1797,7 +1797,7 @@ bool KisMainWindow::saveDocument(KisDocument *document, bool saveas, bool isExpo
+     }
+     else if (dlg.result() == KisDelayedSaveDialog::Ignored) {
+         QMessageBox::critical(qApp->activeWindow(),
+-                              i18nc("@title:window", "Krita"),
++                              i18nc("@title:window", "Nova Krita"),
+                               i18n("You are saving a file while the image is "
+                                    "still rendering. The saved file may be "
+                                    "incomplete or corrupted.\n\n"
+@@ -2544,7 +2544,7 @@ void KisMainWindow::slotStoragesWarning(const QString &/*location*/)
+ 
+     if (!checkPaintOpAvailable()) {
+         warning += i18n("\nThere are no brush presets available. Please enable a bundle that has presets before continuing.\n");
+-        QMessageBox::critical(this, i18nc("@title:window", "Krita"), warning);
++        QMessageBox::critical(this, i18nc("@title:window", "Nova Krita"), warning);
+ 
+         QAction *action = actionCollection()->action("manage_bundles");
+         if (action) {
+@@ -2553,7 +2553,7 @@ void KisMainWindow::slotStoragesWarning(const QString &/*location*/)
+     }
+ 
+     if (!checkActiveBundlesAvailable()) {
+-        QMessageBox::warning(this, i18nc("@title:window", "Krita"), warning + i18n("\nOnly your local resources are available."));
++        QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), warning + i18n("\nOnly your local resources are available."));
+     }
+ 
+ }
+@@ -2692,7 +2692,7 @@ void KisMainWindow::importAnimation()
+         if (!status.isOk() && !status.isInternalError()) {
+             QString msg = status.errorMessage();
+             if (!msg.isEmpty())
+-                QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"), i18n("Could not finish import animation:\n%1", msg));
++                QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), i18n("Could not finish import animation:\n%1", msg));
+         }
+         activeView()->canvasBase()->refetchDataFromImage();
+     }
+@@ -2753,7 +2753,7 @@ void KisMainWindow::importVideoAnimation()
+             KoColor bgColor(qc, cs);
+ 
+             if (!document->newImage(name, width, height, cs, bgColor, KisConfig::RASTER_LAYER, 1, "", double(resolution / 72) )) {
+-                QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"), i18n("Failed to create new document. Animation import aborted."));
++                QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), i18n("Failed to create new document. Animation import aborted."));
+                 return;
+             }
+ 
+@@ -2772,7 +2772,7 @@ void KisMainWindow::importVideoAnimation()
+         if (!status.isOk() && !status.isInternalError()) {
+             QString msg = status.errorMessage();
+             if (!msg.isEmpty())
+-                QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"), i18n("Could not finish import animation:\n%1", msg));
++                QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), i18n("Could not finish import animation:\n%1", msg));
+         }
+ 
+         activeView()->canvasBase()->refetchDataFromImage();
+@@ -3424,7 +3424,7 @@ void KisMainWindow::newWindow()
+ #ifdef Q_OS_ANDROID
+     // Check if current mainwindow exists, just to be sure.
+     if (KisPart::instance()->currentMainwindow()) {
+-        QMessageBox::warning(this, i18nc("@title:window", "Krita"),
++        QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"),
+                              "Creating a New Main Window is unsupported on Android");
+         return;
+     }
+diff --git a/libs/ui/KisPart.cpp b/libs/ui/KisPart.cpp
+index 78fa082..94c2193 100644
+--- a/libs/ui/KisPart.cpp
++++ b/libs/ui/KisPart.cpp
+@@ -550,10 +550,10 @@ void KisPart::openTemplate(const QUrl &url)
+     }
+     else {
+         if (document->errorMessage().isEmpty()) {
+-            QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"), i18n("Could not create document from template\n%1", document->localFilePath()));
++            QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), i18n("Could not create document from template\n%1", document->localFilePath()));
+         }
+         else {
+-            QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"), i18n("Could not create document from template\n%1\nReason: %2", document->localFilePath(), document->errorMessage()));
++            QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), i18n("Could not create document from template\n%1\nReason: %2", document->localFilePath(), document->errorMessage()));
+         }
+         delete document;
+         return;
+diff --git a/libs/ui/KisReferenceImage.cpp b/libs/ui/KisReferenceImage.cpp
+index 748eb25..3d1935f 100644
+--- a/libs/ui/KisReferenceImage.cpp
++++ b/libs/ui/KisReferenceImage.cpp
+@@ -194,7 +194,7 @@ KisReferenceImage * KisReferenceImage::fromFile(const QString &filename, const K
+         delete reference;
+ 
+         if (parent) {
+-            QMessageBox::critical(parent, i18nc("@title:window", "Krita"), i18n("Could not load %1.", filename));
++            QMessageBox::critical(parent, i18nc("@title:window", "Nova Krita"), i18n("Could not load %1.", filename));
+         }
+ 
+         return nullptr;
+diff --git a/libs/ui/KisRemoteFileFetcher.cpp b/libs/ui/KisRemoteFileFetcher.cpp
+index 16e3de8..702b267 100644
+--- a/libs/ui/KisRemoteFileFetcher.cpp
++++ b/libs/ui/KisRemoteFileFetcher.cpp
+@@ -37,7 +37,7 @@ bool KisRemoteFileFetcher::fetchFile(const QUrl &remote, QIODevice *io)
+ 
+     if (remote.scheme() != "data") {
+         QMessageBox msgBox;
+-        msgBox.setWindowTitle(i18nc("@title:window", "Krita"));
++        msgBox.setWindowTitle(i18nc("@title:window", "Nova Krita"));
+         msgBox.setIcon(QMessageBox::Question);
+         msgBox.setText(i18nc("Fetching remote image",
+                              "Do you want to download the image from %1?\nClick \"Show Details\" to view the full link "
+@@ -61,7 +61,7 @@ bool KisRemoteFileFetcher::fetchFile(const QUrl &remote, QIODevice *io)
+     QLocale loc;
+ 
+     QProgressDialog progress;
+-    progress.setWindowTitle(i18nc("@title:window", "Krita"));
++    progress.setWindowTitle(i18nc("@title:window", "Nova Krita"));
+     progress.setLabelText(i18nc("Fetching remote image", "Downloading image from %1...").arg(remote.host()));
+     progress.setMinimum(0);
+     progress.setMaximum(0);
+@@ -88,7 +88,7 @@ bool KisRemoteFileFetcher::fetchFile(const QUrl &remote, QIODevice *io)
+ 
+     if (m_reply->error() != QNetworkReply::NoError) {
+         QMessageBox msgBox;
+-        msgBox.setWindowTitle(i18nc("@title:window", "Krita"));
++        msgBox.setWindowTitle(i18nc("@title:window", "Nova Krita"));
+         msgBox.setIcon(QMessageBox::Critical);
+         msgBox.setText(i18nc("Fetching remote image", "Could not download %1.").arg(remote.toDisplayString()));
+         msgBox.setDetailedText(m_reply->errorString());
+diff --git a/libs/ui/KisTemplateCreateDia.cpp b/libs/ui/KisTemplateCreateDia.cpp
+index d1c826e..95dd180 100644
+--- a/libs/ui/KisTemplateCreateDia.cpp
++++ b/libs/ui/KisTemplateCreateDia.cpp
+@@ -281,7 +281,7 @@ void KisTemplateCreateDia::slotOk() {
+         KisTemplate *existingTemplate=group->find(d->m_name->text());
+         if (existingTemplate && !existingTemplate->isHidden()) {
+             if (QMessageBox::warning(this,
+-                                     i18nc("@title:window", "Krita"),
++                                     i18nc("@title:window", "Nova Krita"),
+                                      i18n("Do you really want to overwrite the existing '%1' template?", existingTemplate->name()),
+                                      QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes) == QMessageBox::Yes) {
+                 group->add(t, true);
+@@ -387,7 +387,7 @@ void KisTemplateCreateDia::slotSelect() {
+     }
+     QImage image(fn);
+     if (image.isNull()) {
+-        QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("%1 is not a valid image file!", fn));
++        QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("%1 is not a valid image file!", fn));
+     }
+     d->m_customFile = fn;
+     d->m_customPixmap = QPixmap();
+diff --git a/libs/ui/KisView.cpp b/libs/ui/KisView.cpp
+index 52087c9..513f0c0 100644
+--- a/libs/ui/KisView.cpp
++++ b/libs/ui/KisView.cpp
+@@ -686,7 +686,7 @@ void KisView::dropEvent(QDropEvent *event)
+                                     .errorMessage();
+                             QMessageBox::warning(
+                                 this,
+-                                i18nc("@title:window", "Krita"),
++                                i18nc("@title:window", "Nova Krita"),
+                                 i18n("Could not open %2.\nReason: %1.",
+                                      msg,
+                                      url.toDisplayString()));
+@@ -1173,7 +1173,7 @@ bool KisView::queryClose()
+             name = i18n("Untitled");
+ 
+         int res = QMessageBox::warning(this,
+-                                       i18nc("@title:window", "Krita"),
++                                       i18nc("@title:window", "Nova Krita"),
+                                        i18n("<p>The document <b>'%1'</b> has been modified.</p><p>Do you want to save it?</p>", name),
+                                        QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel, QMessageBox::Yes);
+ 
+diff --git a/libs/ui/KisWelcomePageWidget.cpp b/libs/ui/KisWelcomePageWidget.cpp
+index 8df5f27..a7d12a1 100644
+--- a/libs/ui/KisWelcomePageWidget.cpp
++++ b/libs/ui/KisWelcomePageWidget.cpp
+@@ -731,7 +731,7 @@ void KisWelcomePageWidget::slotSetUpdateStatus(KisUpdaterStatus updateStatus)
+ 
+ void KisWelcomePageWidget::slotShowUpdaterErrorDetails()
+ {
+-    QMessageBox::warning(qApp->activeWindow(), i18nc("@title:window", "Krita"), m_updaterStatus.updaterOutput());
++    QMessageBox::warning(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), m_updaterStatus.updaterOutput());
+ }
+ 
+ void KisWelcomePageWidget::updateVersionUpdaterFrame()
+diff --git a/libs/ui/KisWindowLayoutResource.cpp b/libs/ui/KisWindowLayoutResource.cpp
+index 9b226ae..4ae2a8b 100644
+--- a/libs/ui/KisWindowLayoutResource.cpp
++++ b/libs/ui/KisWindowLayoutResource.cpp
+@@ -387,7 +387,7 @@ void KisWindowLayoutResource::loadXml(const QDomElement &element) const
+ 
+ #ifdef Q_OS_ANDROID
+     if (element.firstChildElement("window") != element.lastChildElement("window")) {
+-        QMessageBox::warning(qApp->activeWindow(), i18nc("@title:window", "Krita"),
++        QMessageBox::warning(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"),
+                              "Workspaces with multiple windows isn't supported on Android");
+         return;
+     }
+diff --git a/libs/ui/animation/KisAnimationRender.cpp b/libs/ui/animation/KisAnimationRender.cpp
+index ad18b96..1f48f56 100644
+--- a/libs/ui/animation/KisAnimationRender.cpp
++++ b/libs/ui/animation/KisAnimationRender.cpp
+@@ -110,7 +110,7 @@ bool KisAnimationRender::render(KisDocument *doc, KisViewManager *viewManager, K
+ 
+             qWarning() << type <<"requires width and height to be even, resize and try again!";
+             doc->setErrorMessage(i18n("%1 requires width and height to be even numbers.  Please resize or crop the image before exporting.", type));
+-            QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"), i18n("Could not render animation:\n%1", doc->errorMessage()));
++            QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), i18n("Could not render animation:\n%1", doc->errorMessage()));
+ 
+             return false;
+         }
+@@ -196,7 +196,7 @@ bool KisAnimationRender::render(KisDocument *doc, KisViewManager *viewManager, K
+                 }
+ 
+                 if (!exportResult.isOk()) {
+-                    QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"), i18n("Could not render animation:\n%1", exportResult.errorMessage()));
++                    QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), i18n("Could not render animation:\n%1", exportResult.errorMessage()));
+ 
+                     delayReturnSuccess = false; // Delay return to clean up exported frames.
+                 }
+diff --git a/libs/ui/animation/KisDlgAnimationRenderer.cpp b/libs/ui/animation/KisDlgAnimationRenderer.cpp
+index e8e64ff..d218a78 100644
+--- a/libs/ui/animation/KisDlgAnimationRenderer.cpp
++++ b/libs/ui/animation/KisDlgAnimationRenderer.cpp
+@@ -988,16 +988,16 @@ void KisDlgAnimationRenderer::slotButtonClicked(int button)
+         QString fileName = m_page->videoFilename->fileName();
+ 
+         if (fileName.isEmpty()) {
+-            QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("Please enter a file name to render to."));
++            QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("Please enter a file name to render to."));
+             return;
+         }
+         else {
+             switch (validateFFmpeg(m_page->ffmpegLocation->fileName())) {
+                 case FFmpegValidationResult::COMPRESSED_FORMAT:
+-                    QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("The FFmpeg that you've given us appears to be compressed. Please try to extract FFmpeg from the archive first."));
++                    QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("The FFmpeg that you've given us appears to be compressed. Please try to extract FFmpeg from the archive first."));
+                     return;
+                 case FFmpegValidationResult::NOT_A_BINARY:
+-                    QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("The FFmpeg that you've given us appears to be invalid. Please select the correct location of an FFmpeg executable on your system."));
++                    QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("The FFmpeg that you've given us appears to be invalid. Please select the correct location of an FFmpeg executable on your system."));
+                     return;
+                 default:
+                     break;
+diff --git a/libs/ui/animation/KisDlgImportVideoAnimation.cpp b/libs/ui/animation/KisDlgImportVideoAnimation.cpp
+index 14ae987..137be21 100644
+--- a/libs/ui/animation/KisDlgImportVideoAnimation.cpp
++++ b/libs/ui/animation/KisDlgImportVideoAnimation.cpp
+@@ -62,7 +62,7 @@ KisDlgImportVideoAnimation::KisDlgImportVideoAnimation(KisMainWindow *mainWindow
+     } else {
+         enableButtonOk(false);
+         m_ui.tabGeneral->setEnabled(false);
+-        QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("FFMpeg not found! Please add a path to FFMpeg in the \"Advanced\" tab"));
++        QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("FFMpeg not found! Please add a path to FFMpeg in the \"Advanced\" tab"));
+     }
+ 
+     QJsonObject ffprobeInfo = KisFFMpegWrapper::findFFProbe(ffprobeFileInfo.absoluteFilePath());
+@@ -170,7 +170,7 @@ RenderedFrames KisDlgImportVideoAnimation::renderFrames(const QDir& directory)
+     QList<int> &frameTimeList = frames.renderedFrameTargetTimes;
+ 
+     if ( !directory.mkpath(".") ) {
+-        QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("Failed to create a work directory, make sure you have write permission"));
++        QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("Failed to create a work directory, make sure you have write permission"));
+         return frames;
+     }
+ 
+@@ -287,7 +287,7 @@ RenderedFrames KisDlgImportVideoAnimation::renderFrames(const QDir& directory)
+     }
+ 
+     if ( frameFileList.isEmpty() ) {
+-         QMessageBox::critical(this, i18nc("@title:window", "Krita"), i18n("Failed to export frames from video"));
++         QMessageBox::critical(this, i18nc("@title:window", "Nova Krita"), i18n("Failed to export frames from video"));
+     }
+ 
+     return frames;
+@@ -565,7 +565,7 @@ void KisDlgImportVideoAnimation::slotFFProbeFile()
+             m_ui.cmbFFProbeLocation->setCurrentText(filenames[0]);
+             return;
+         }
+-        QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("FFProbe is invalid!"));
++        QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("FFProbe is invalid!"));
+     }
+ 
+ }
+@@ -586,14 +586,14 @@ void KisDlgImportVideoAnimation::slotFFMpegFile()
+                 m_ui.cmbFFMpegLocation->addItem(filenames[0],ffmpegInfo);
+                 m_ui.cmbFFMpegLocation->setCurrentText(filenames[0]);
+             } else {
+-                QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("FFMpeg is invalid!"));
++                QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("FFMpeg is invalid!"));
+             }
+             m_ui.tabGeneral->setEnabled(true);
+             return;
+         }
+ 
+         m_ui.tabGeneral->setEnabled(false);
+-        QMessageBox::critical(this, i18nc("@title:window", "Krita"), i18n("No FFMpeg found!"));
++        QMessageBox::critical(this, i18nc("@title:window", "Nova Krita"), i18n("No FFMpeg found!"));
+     }
+ 
+ }
+@@ -660,7 +660,7 @@ KisBasicVideoInfo KisDlgImportVideoAnimation::loadVideoInfo(const QString &input
+     QJsonObject ffprobeJsonObj;
+ 
+     std::function<void(void)> warnFFmpegFormatSupport = [this](){
+-        QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("Your FFMpeg version does not support this format"));
++        QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("Your FFMpeg version does not support this format"));
+     };
+ 
+     if (ffprobeInfo["enabled"].toBool()) {
+@@ -700,7 +700,7 @@ KisBasicVideoInfo KisDlgImportVideoAnimation::loadVideoInfo(const QString &input
+         }
+ 
+         if ( videoInfoData.stream == -1 ) {
+-            QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("No video stream could be found!"));
++            QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("No video stream could be found!"));
+             return {};
+         }
+ 
+@@ -770,7 +770,7 @@ KisBasicVideoInfo KisDlgImportVideoAnimation::loadVideoInfo(const QString &input
+             dbgFile << "ffmpeg probe2" << ffmpegJsonObj;
+ 
+             if ( ffprobeJsonObj["error"].toInt() != FFProbeErrorCodes::NONE ) {
+-                QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("Failed to load video information"));
++                QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("Failed to load video information"));
+                 return {};
+             }
+ 
+diff --git a/libs/ui/dialogs/kis_dlg_layer_style.cpp b/libs/ui/dialogs/kis_dlg_layer_style.cpp
+index 5f772cd..5a64676 100644
+--- a/libs/ui/dialogs/kis_dlg_layer_style.cpp
++++ b/libs/ui/dialogs/kis_dlg_layer_style.cpp
+@@ -398,7 +398,7 @@ void KisDlgLayerStyle::slotLoadStyle()
+             if (!storage->valid()) {
+                 qWarning() << "Attempted to import an invalid layer style library!" << filename;
+                 QMessageBox::warning(this,
+-                                     i18nc("@title:window", "Krita"),
++                                     i18nc("@title:window", "Nova Krita"),
+                                      i18n("Could not load layer style library %1.", filename));
+                 return;
+             }
+diff --git a/libs/ui/dialogs/kis_dlg_preferences.cc b/libs/ui/dialogs/kis_dlg_preferences.cc
+index 43c940d..fdcdb75 100644
+--- a/libs/ui/dialogs/kis_dlg_preferences.cc
++++ b/libs/ui/dialogs/kis_dlg_preferences.cc
+@@ -1204,7 +1204,7 @@ void GeneralTab::getBackgroundImage()
+ 
+     QImage image(fn);
+     if (image.isNull()) {
+-        QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("%1 is not a valid image file!", fn));
++        QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("%1 is not a valid image file!", fn));
+     }
+     else {
+         m_backgroundimage->setText(fn);
+diff --git a/libs/ui/input/kis_tablet_debugger.cpp b/libs/ui/input/kis_tablet_debugger.cpp
+index 9e79acd..1663555 100644
+--- a/libs/ui/input/kis_tablet_debugger.cpp
++++ b/libs/ui/input/kis_tablet_debugger.cpp
+@@ -118,7 +118,7 @@ KisTabletDebugger* KisTabletDebugger::instance()
+ void KisTabletDebugger::toggleDebugging()
+ {
+     m_debugEnabled = !m_debugEnabled;
+-    QMessageBox::information(qApp->activeWindow(), i18nc("@title:window", "Krita"), m_debugEnabled ?
++    QMessageBox::information(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), m_debugEnabled ?
+                              i18n("Tablet Event Logging Enabled") :
+                              i18n("Tablet Event Logging Disabled"));
+     if (m_debugEnabled) {
+diff --git a/libs/ui/kis_clipboard.cc b/libs/ui/kis_clipboard.cc
+index 783f69c..23cb8a5 100644
+--- a/libs/ui/kis_clipboard.cc
++++ b/libs/ui/kis_clipboard.cc
+@@ -503,7 +503,7 @@ KisImageSP KisClipboard::fetchImageByURL(const QUrl &originalUrl) const
+         if (!mimes.contains(type)) {
+             QString msg = KisImportExportErrorCode(ImportExportCodes::FileFormatNotSupported).errorMessage();
+             QMessageBox::warning(KisPart::instance()->currentMainwindow(),
+-                                 i18nc("@title:window", "Krita"),
++                                 i18nc("@title:window", "Nova Krita"),
+                                  i18n("Could not open %2.\nReason: %1.", msg, url.toDisplayString()));
+             return clipImage;
+         }
+diff --git a/libs/ui/kis_custom_pattern.cc b/libs/ui/kis_custom_pattern.cc
+index 75e81f6..94475d0 100644
+--- a/libs/ui/kis_custom_pattern.cc
++++ b/libs/ui/kis_custom_pattern.cc
+@@ -123,7 +123,7 @@ void KisCustomPattern::slotAddPredefined()
+     bool overwrite = false;
+     if (fi.exists()) {
+         if (hadToChangeFilename) { // if not, the File Dialog would show the warning
+-            if (QMessageBox::warning(this,  i18nc("@title:window", "Krita"), i18n("This pattern already exists. Do you want to overwrite it?"), QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
++            if (QMessageBox::warning(this,  i18nc("@title:window", "Nova Krita"), i18n("This pattern already exists. Do you want to overwrite it?"), QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
+                 overwrite = true;
+             }
+         } else { // the File Dialog showed the warning and the user said "yeah fine"
+diff --git a/libs/ui/kis_filter_manager.cc b/libs/ui/kis_filter_manager.cc
+index e4556f2..3b13a81 100644
+--- a/libs/ui/kis_filter_manager.cc
++++ b/libs/ui/kis_filter_manager.cc
+@@ -231,7 +231,7 @@ void KisFilterManager::showFilterDialog(const QString &filterId, KisFilterConfig
+         // Warning bells!
+         if (filter->colorSpaceIndependence() == TO_LAB16) {
+             if (QMessageBox::warning(d->view->mainWindow(),
+-                                     i18nc("@title:window", "Krita"),
++                                     i18nc("@title:window", "Nova Krita"),
+                                      i18n("The %1 filter will convert your %2 data to 16-bit L*a*b* and vice versa. ",
+                                           filter->name(),
+                                           dev->colorSpace()->name()),
+@@ -240,7 +240,7 @@ void KisFilterManager::showFilterDialog(const QString &filterId, KisFilterConfig
+ 
+         } else if (filter->colorSpaceIndependence() == TO_RGBA16) {
+             if (QMessageBox::warning(d->view->mainWindow(),
+-                                     i18nc("@title:window", "Krita"),
++                                     i18nc("@title:window", "Nova Krita"),
+                                      i18n("The %1 filter will convert your %2 data to 16-bit RGBA and vice versa. ",
+                                           filter->name() , dev->colorSpace()->name()),
+                                      QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Ok)
+diff --git a/libs/ui/kis_layer_manager.cc b/libs/ui/kis_layer_manager.cc
+index 526bdf3..42f7669 100644
+--- a/libs/ui/kis_layer_manager.cc
++++ b/libs/ui/kis_layer_manager.cc
+@@ -324,7 +324,7 @@ void KisLayerManager::layerProperties()
+             QString scalingFilterNew = dlg.scalingFilter();
+ 
+             if(fileNameNew.isEmpty()){
+-                QMessageBox::critical(m_view->mainWindow(), i18nc("@title:window", "Krita"), i18n("No file name specified"));
++                QMessageBox::critical(m_view->mainWindow(), i18nc("@title:window", "Nova Krita"), i18n("No file name specified"));
+                 return;
+             }
+ 
+@@ -1042,7 +1042,7 @@ KisNodeSP KisLayerManager::addFileLayer(KisNodeSP activeNode)
+         QString fileName = dlg.fileName();
+ 
+         if(fileName.isEmpty()){
+-            QMessageBox::critical(m_view->mainWindow(), i18nc("@title:window", "Krita"), i18n("No file name specified"));
++            QMessageBox::critical(m_view->mainWindow(), i18nc("@title:window", "Nova Krita"), i18n("No file name specified"));
+             return 0;
+         }
+ 
+diff --git a/libs/ui/kis_node_manager.cpp b/libs/ui/kis_node_manager.cpp
+index 371654c..15d8695 100644
+--- a/libs/ui/kis_node_manager.cpp
++++ b/libs/ui/kis_node_manager.cpp
+@@ -1318,7 +1318,7 @@ void KisNodeManager::Private::saveDeviceAsImage(KisPaintDeviceSP device,
+ 
+     if (!doc->exportDocumentSync(filename, mimefilter.toLatin1())) {
+         QMessageBox::warning(qApp->activeWindow(),
+-                             i18nc("@title:window", "Krita"),
++                             i18nc("@title:window", "Nova Krita"),
+                              i18n("Could not save the layer. %1", doc->errorMessage().toUtf8().data()),
+                              QMessageBox::Ok);
+ 
+@@ -1381,7 +1381,7 @@ void KisNodeManager::saveVectorLayerAsImage()
+ 
+     SvgWriter writer(shapes);
+     if (!writer.save(filename, sizeInPt, true)) {
+-        QMessageBox::warning(qApp->activeWindow(), i18nc("@title:window", "Krita"), i18n("Could not save to svg: %1", filename));
++        QMessageBox::warning(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), i18n("Could not save to svg: %1", filename));
+     }
+ }
+ 
+diff --git a/libs/ui/kis_splash_screen.cpp b/libs/ui/kis_splash_screen.cpp
+index cc32839..07afd30 100644
+--- a/libs/ui/kis_splash_screen.cpp
++++ b/libs/ui/kis_splash_screen.cpp
+@@ -43,7 +43,7 @@ KisSplashScreen::KisSplashScreen(int height, QWidget *parent, Qt::WindowFlags f)
+     : QWidget(parent, f)
+       , m_versionHtml(qApp->applicationVersion().toHtmlEscaped())
+ {
+-    setWindowTitle(i18n("Krita"));
++    setWindowTitle(i18n("Nova Krita"));
+ #ifndef Q_OS_MACOS
+     setWindowIcon(KisIconUtils::loadIcon("krita-branding"));
+ #endif
+diff --git a/libs/ui/opengl/KisOpenGLCanvasRenderer.cpp b/libs/ui/opengl/KisOpenGLCanvasRenderer.cpp
+index e520934..44ff719 100644
+--- a/libs/ui/opengl/KisOpenGLCanvasRenderer.cpp
++++ b/libs/ui/opengl/KisOpenGLCanvasRenderer.cpp
+@@ -332,7 +332,7 @@ void KisOpenGLCanvasRenderer::reportFailedShaderCompilation(const QString &conte
+ 
+     qDebug() << "Shader Compilation Failure: " << context;
+     // TODO: Should do something else when using QtQuick2
+-    QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"),
++    QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"),
+                           i18n("Krita could not initialize the OpenGL canvas:\n\n%1\n\n Krita will disable OpenGL and close now.", context),
+                           QMessageBox::Close);
+ 
+diff --git a/libs/ui/widgets/kis_custom_image_widget.cc b/libs/ui/widgets/kis_custom_image_widget.cc
+index 20a9280..fbaae2e 100644
+--- a/libs/ui/widgets/kis_custom_image_widget.cc
++++ b/libs/ui/widgets/kis_custom_image_widget.cc
+@@ -295,7 +295,7 @@ KisDocument* KisCustomImageWidget::createNewImage()
+ 
+             int result =
+                 QMessageBox::warning(this,
+-                                     i18nc("@title:window", "Krita"),
++                                     i18nc("@title:window", "Nova Krita"),
+                                      i18n("Linear gamma RGB color spaces are not supposed to be used "
+                                           "in 8-bit integer modes. It is suggested to use 16-bit integer "
+                                           "or any floating point colorspace for linear profiles.\n\n"
+@@ -453,7 +453,7 @@ void KisCustomImageWidget::saveAsPredefined()
+     QFile f(saveLocation + '/' + fileName.replace(' ', '_').replace('(', '_').replace(')', '_').replace(':', '_') + ".predefinedimage");
+ 
+     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+-        QMessageBox::warning(this, i18nc("@title:window", "Krita"),
++        QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"),
+             i18n("Could not save %1.\nReason: %2.", f.fileName(), f.errorString()));
+         return;
+     }
+diff --git a/packaging/android/apk/AndroidManifest.xml b/packaging/android/apk/AndroidManifest.xml
+index 553aff4..c90a91a 100644
+--- a/packaging/android/apk/AndroidManifest.xml
++++ b/packaging/android/apk/AndroidManifest.xml
+@@ -5,14 +5,14 @@
+ 
+     <application android:hardwareAccelerated="true"
+                  android:name="org.qtproject.qt5.android.bindings.QtApplication"
+-                 android:label="Krita"
++                 android:label="Nova Krita"
+                  android:icon="@mipmap/ic_launcher"
+                  android:roundIcon="@mipmap/ic_launcher_round"
+                  android:hasFragileUserData="true" >
+ 
+         <activity android:configChanges="orientation|uiMode|screenLayout|screenSize|smallestScreenSize|layoutDirection|locale|fontScale|keyboard|keyboardHidden|navigation|mcc|mnc|density"
+                   android:name="org.krita.android.MainActivity"
+-                  android:label="Krita"
++                  android:label="Nova Krita"
+                   android:screenOrientation="unspecified"
+                   android:resizeableActivity="true"
+                   android:theme="@style/DefaultTheme"
+diff --git a/packaging/android/apk/flavors/debug/AndroidManifest.xml b/packaging/android/apk/flavors/debug/AndroidManifest.xml
+index 30cc95d..3c74e01 100644
+--- a/packaging/android/apk/flavors/debug/AndroidManifest.xml
++++ b/packaging/android/apk/flavors/debug/AndroidManifest.xml
+@@ -7,7 +7,7 @@
+         <activity
+             android:name="org.krita.android.MainActivity"
+             tools:replace="android:label"
+-            android:label="Krita Debug" />
++            android:label="Nova Krita" />
+     </application>
+ 
+ </manifest>
+diff --git a/packaging/android/apk/flavors/next/AndroidManifest.xml b/packaging/android/apk/flavors/next/AndroidManifest.xml
+index 3e6087e..7e1538e 100644
+--- a/packaging/android/apk/flavors/next/AndroidManifest.xml
++++ b/packaging/android/apk/flavors/next/AndroidManifest.xml
+@@ -7,7 +7,7 @@
+         <activity
+             android:name="org.krita.android.MainActivity"
+             tools:replace="android:label"
+-            android:label="Krita Next" />
++            android:label="Nova Krita Next" />
+ 
+     </application>
+ </manifest>
+diff --git a/plugins/assistants/Assistants/kis_assistant_tool.cc b/plugins/assistants/Assistants/kis_assistant_tool.cc
+index ae0c046..194cdd6 100644
+--- a/plugins/assistants/Assistants/kis_assistant_tool.cc
++++ b/plugins/assistants/Assistants/kis_assistant_tool.cc
+@@ -1578,10 +1578,10 @@ void KisAssistantTool::loadAssistants()
+         assistant.clear();
+     }
+     if (xml.hasError()) {
+-        QMessageBox::warning(qApp->activeWindow(), i18nc("@title:window", "Krita"), xml.errorString());
++        QMessageBox::warning(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), xml.errorString());
+     }
+     if (errors) {
+-        QMessageBox::warning(qApp->activeWindow(), i18nc("@title:window", "Krita"), i18n("Errors were encountered. Not all assistants were successfully loaded."));
++        QMessageBox::warning(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), i18n("Errors were encountered. Not all assistants were successfully loaded."));
+     }
+ 
+     KUndo2Command *command = new EditAssistantsCommand(m_canvas, m_origAssistantList, KisPaintingAssistant::cloneAssistantList(m_canvas->paintingAssistantsDecoration()->assistants()));
+diff --git a/plugins/dockers/gamutmask/gamutmask_dock.cpp b/plugins/dockers/gamutmask/gamutmask_dock.cpp
+index 63d3856..3ddabbf 100644
+--- a/plugins/dockers/gamutmask/gamutmask_dock.cpp
++++ b/plugins/dockers/gamutmask/gamutmask_dock.cpp
+@@ -290,7 +290,7 @@ int GamutMaskDock::getUserFeedback(QString text, QString informativeText,
+                                    QMessageBox::Icon severity)
+ {
+     QMessageBox msgBox;
+-    msgBox.setWindowTitle(i18nc("@title:window", "Krita"));
++    msgBox.setWindowTitle(i18nc("@title:window", "Nova Krita"));
+     msgBox.setText(QString("<p><b>%1</b></p>").arg(text));
+     msgBox.setInformativeText(informativeText);
+     msgBox.setStandardButtons(buttons);
+diff --git a/plugins/dockers/logdocker/LogDockerDock.cpp b/plugins/dockers/logdocker/LogDockerDock.cpp
+index 9dec348..8c7902b 100644
+--- a/plugins/dockers/logdocker/LogDockerDock.cpp
++++ b/plugins/dockers/logdocker/LogDockerDock.cpp
+@@ -223,7 +223,7 @@ void LogDockerDock::saveLog()
+             f.write(txtLogViewer->document()->toPlainText().toUtf8());
+             f.close();
+         } else {
+-            QMessageBox::warning(this, i18nc("@title:window", "Krita"),
++            QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"),
+                 i18n("Could not save %1.\nReason: %2.", f.fileName(), f.errorString()));
+         }
+     }
+diff --git a/plugins/dockers/lut/lutdocker_dock.cpp b/plugins/dockers/lut/lutdocker_dock.cpp
+index 964205f..f2a47e1 100644
+--- a/plugins/dockers/lut/lutdocker_dock.cpp
++++ b/plugins/dockers/lut/lutdocker_dock.cpp
+@@ -693,7 +693,7 @@ void LutDockerDock::slotBakeCurrentConfigIntoNewImage()
+         projection->convertTo(ocioCs);
+ 
+         QProgressDialog progress(win->canvasWindow());
+-        progress.setWindowTitle(i18nc("@title:window", "Krita"));
++        progress.setWindowTitle(i18nc("@title:window", "Nova Krita"));
+         progress.setLabelText(i18nc("Message for ocio baking progress bar.", "Baking configuration into image..."));
+         progress.setWindowModality(Qt::ApplicationModal);
+         progress.setWindowFlag(Qt::WindowCloseButtonHint, false);
+diff --git a/plugins/dockers/storyboarddocker/DlgExportStoryboard.cpp b/plugins/dockers/storyboarddocker/DlgExportStoryboard.cpp
+index 4ba2a95..36f3a1c 100644
+--- a/plugins/dockers/storyboarddocker/DlgExportStoryboard.cpp
++++ b/plugins/dockers/storyboarddocker/DlgExportStoryboard.cpp
+@@ -182,10 +182,10 @@ void DlgExportStoryboard::slotExportClicked()
+ {
+     if (m_page->exportPathFileRequester->fileName().isEmpty()) {
+         if (m_format == ExportFormat::PDF) {
+-            QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("Please enter a file name to export to."));
++            QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("Please enter a file name to export to."));
+         }
+         else {
+-            QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("Please enter a directory to export to."));
++            QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("Please enter a directory to export to."));
+         }
+         return;
+     }
+@@ -194,7 +194,7 @@ void DlgExportStoryboard::slotExportClicked()
+ 
+         QDir dir(m_page->exportPathFileRequester->fileName());
+         if (!dir.exists()) {
+-            QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("Please enter an existing directory."));
++            QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("Please enter an existing directory."));
+             return;
+         }
+ 
+@@ -221,12 +221,12 @@ void DlgExportStoryboard::slotExportClicked()
+     }
+ 
+     if (layoutSpecifiedBySvgFile() && m_page->svgTemplatePathFileRequester->fileName().isEmpty()) {
+-        QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("Please choose svg file to specify the layout for exporting."));
++        QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("Please choose svg file to specify the layout for exporting."));
+         return;
+     }
+     QFileInfo fi(m_page->svgTemplatePathFileRequester->fileName());
+     if (layoutSpecifiedBySvgFile() && !fi.exists()) {
+-        QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("The SVG file to specify layout doesn't exist. Please choose an existing SVG file."));
++        QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("The SVG file to specify layout doesn't exist. Please choose an existing SVG file."));
+         return;
+     }
+ 
+diff --git a/plugins/dockers/storyboarddocker/StoryboardDockerDock.cpp b/plugins/dockers/storyboarddocker/StoryboardDockerDock.cpp
+index cb9c4e0..71b636b 100644
+--- a/plugins/dockers/storyboarddocker/StoryboardDockerDock.cpp
++++ b/plugins/dockers/storyboarddocker/StoryboardDockerDock.cpp
+@@ -428,7 +428,7 @@ void StoryboardDockerDock::slotExport(ExportFormat format)
+         QModelIndex lastIndex  = m_storyboardModel->index(m_storyboardModel->rowCount() - 1, 0);
+ 
+         if (!firstIndex.isValid() || !lastIndex.isValid()) {
+-            QMessageBox::warning((QWidget*)(&dlg), i18nc("@title:window", "Krita"), i18n("Please enter correct range. There are no panels in the range of frames provided."));
++            QMessageBox::warning((QWidget*)(&dlg), i18nc("@title:window", "Nova Krita"), i18n("Please enter correct range. There are no panels in the range of frames provided."));
+             return;
+         }
+ 
+@@ -437,7 +437,7 @@ void StoryboardDockerDock::slotExport(ExportFormat format)
+ 
+         int numBoards = lastItemRow - firstItemRow + 1;
+         if (numBoards <= 0) {
+-            QMessageBox::warning((QWidget*)(&dlg), i18nc("@title:window", "Krita"), i18n("Please enter correct range. There are no panels in the range of frames provided."));
++            QMessageBox::warning((QWidget*)(&dlg), i18nc("@title:window", "Nova Krita"), i18n("Please enter correct range. There are no panels in the range of frames provided."));
+             return;
+         }
+ 
+diff --git a/plugins/extensions/imagesplit/imagesplit.cpp b/plugins/extensions/imagesplit/imagesplit.cpp
+index ef5db45..ce4dfb3 100644
+--- a/plugins/extensions/imagesplit/imagesplit.cpp
++++ b/plugins/extensions/imagesplit/imagesplit.cpp
+@@ -71,9 +71,9 @@ bool Imagesplit::saveAsImage(const QRect &imgSize, const QString &mimeType, cons
+     document->setFileBatchMode(true);
+     if (!document->exportDocumentSync(url, mimeType.toLatin1())) {
+         if (document->errorMessage().isEmpty()) {
+-            QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"), i18n("Could not save\n%1", document->localFilePath()));
++            QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), i18n("Could not save\n%1", document->localFilePath()));
+         } else {
+-            QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"), i18n("Could not save %1\nReason: %2", document->localFilePath(), document->errorMessage()));
++            QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), i18n("Could not save %1\nReason: %2", document->localFilePath(), document->errorMessage()));
+         }
+         return false;
+     }
+diff --git a/plugins/extensions/qmic/QMic.cpp b/plugins/extensions/qmic/QMic.cpp
+index 83ec45e..729bf77 100644
+--- a/plugins/extensions/qmic/QMic.cpp
++++ b/plugins/extensions/qmic/QMic.cpp
+@@ -51,7 +51,7 @@ void QMic::slotQMic(bool again)
+     // find the krita-gmic-qt plugin
+     const QList<KoJsonTrader::Plugin> offers = KoJsonTrader::instance()->query("Krita/GMic", QString());
+     if (offers.isEmpty()) {
+-        QMessageBox::warning(qApp->activeWindow(), i18nc("@title:window", "Krita"), i18n("The GMic plugin is not installed or could not be loaded."));
++        QMessageBox::warning(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), i18n("The GMic plugin is not installed or could not be loaded."));
+         return;
+     }
+ 
+@@ -76,7 +76,7 @@ void QMic::slotQMic(bool again)
+     }
+ 
+     if (!plugin) {
+-        QMessageBox::warning(qApp->activeWindow(), i18nc("@title:window", "Krita"), i18n("Krita cannot launch the gmic-qt plugin. No bundled library found."));
++        QMessageBox::warning(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), i18n("Krita cannot launch the gmic-qt plugin. No bundled library found."));
+         return;
+     }
+ 
+diff --git a/plugins/extensions/resourcemanager/dlg_bundle_manager.cpp b/plugins/extensions/resourcemanager/dlg_bundle_manager.cpp
+index 6ccdb9d..1f8c65a 100644
+--- a/plugins/extensions/resourcemanager/dlg_bundle_manager.cpp
++++ b/plugins/extensions/resourcemanager/dlg_bundle_manager.cpp
+@@ -203,12 +203,12 @@ void DlgBundleManager::done(int res)
+ 
+         if (!mw->checkPaintOpAvailable()) {
+             warning += i18n("\nThere are no brush presets available. Please enable a bundle that has presets before continuing.\nIf there are no bundles, please import a bundle before continuing.");
+-            QMessageBox::critical(this, i18nc("@title:window", "Krita"), warning);
++            QMessageBox::critical(this, i18nc("@title:window", "Nova Krita"), warning);
+             return;
+         }
+ 
+         if (!mw->checkActiveBundlesAvailable()) {
+-            QMessageBox::warning(this, i18nc("@title:window", "Krita"), warning + i18n("\nOnly your local resources are available."));
++            QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), warning + i18n("\nOnly your local resources are available."));
+         }
+     }
+     KoDialog::done(res);
+@@ -235,7 +235,7 @@ void DlgBundleManager::addBundle()
+                     cursorLock.unlock();
+                     qWarning() << "Attempted to import an invalid bundle!" << filename;
+                     QMessageBox::warning(this,
+-                                         i18nc("@title:window", "Krita"),
++                                         i18nc("@title:window", "Nova Krita"),
+                                          i18n("Could not load bundle %1.", filename));
+                     continue;
+                 }
+@@ -301,7 +301,7 @@ void DlgBundleManager::editBundle()
+                     qApp->restoreOverrideCursor();
+                     qWarning() << "Attempted to edit an invalid bundle!" << filename;
+                     QMessageBox::warning(this,
+-                                         i18nc("@title:window", "Krita"),
++                                         i18nc("@title:window", "Nova Krita"),
+                                          i18n("Could not load bundle %1.", filename));
+                     qApp->setOverrideCursor(Qt::BusyCursor);
+                     continue;
+@@ -369,12 +369,12 @@ void DlgBundleManager::toggleBundle()
+             button(KoDialog::Close)->setEnabled(false);
+ 
+             warning += i18n("\nThere are no brush presets available. Please enable a bundle that has presets before continuing.\nIf there are no bundles, please import a bundle before continuing.");
+-            QMessageBox::critical(this, i18nc("@title:window", "Krita"), warning);
++            QMessageBox::critical(this, i18nc("@title:window", "Nova Krita"), warning);
+             return;
+         }
+ 
+         if (!mw->checkActiveBundlesAvailable()) {
+-            QMessageBox::warning(this, i18nc("@title:window", "Krita"), warning + i18n("\nOnly your local resources are available."));
++            QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), warning + i18n("\nOnly your local resources are available."));
+         }
+     }
+     button(KoDialog::Close)->setEnabled(true);
+diff --git a/plugins/extensions/resourcemanager/dlg_create_bundle.cpp b/plugins/extensions/resourcemanager/dlg_create_bundle.cpp
+index 17abc13..a8a5e99 100644
+--- a/plugins/extensions/resourcemanager/dlg_create_bundle.cpp
++++ b/plugins/extensions/resourcemanager/dlg_create_bundle.cpp
+@@ -214,7 +214,7 @@ bool DlgCreateBundle::putResourcesInTheBundle(KoResourceBundleSP bundle)
+         if (usedFilenames.value({res->resourceType().first, prettyFilename}, 0) > 0) {
+             QMessageBox::warning(
+                 this,
+-                i18nc("@title:window", "Krita"),
++                i18nc("@title:window", "Nova Krita"),
+                 i18nc("Warning message", "More than one resource share the same file name '%1'. Please export them in separate bundles.", prettyFilename));
+             return false;
+         }
+@@ -316,14 +316,14 @@ void DlgCreateBundle::accept()
+ 
+     if (name.isEmpty()) {
+         m_pageMetadataInfo->showWarning();
+-        QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("The resource bundle name cannot be empty."));
++        QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("The resource bundle name cannot be empty."));
+         return;
+     }
+     m_pageMetadataInfo->removeWarning();
+ 
+     if (m_pageBundleSaver->saveLocation().isEmpty() ){
+         m_pageBundleSaver->showWarning();
+-        QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("The save location cannot be empty."));
++        QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("The save location cannot be empty."));
+         return;
+     }
+     else {
+@@ -355,7 +355,7 @@ void DlgCreateBundle::accept()
+             if (!m_bundle->save()) {
+                 m_pageBundleSaver->showWarning();
+                 QMessageBox::critical(this,
+-                    i18nc("@title:window", "Krita"),
++                    i18nc("@title:window", "Nova Krita"),
+                     i18n("Could not open '%1' for saving.", filename));
+                 m_bundle.reset();
+                 return;
+@@ -371,7 +371,7 @@ void DlgCreateBundle::accept()
+             if (!m_bundle->save()) {
+                 m_pageBundleSaver->showWarning();
+                 QMessageBox::critical(this,
+-                    i18nc("@title:window", "Krita"),
++                    i18nc("@title:window", "Nova Krita"),
+                     i18n("Could not open '%1' for saving.", filename));
+                 m_bundle.reset();
+                 return;
+diff --git a/plugins/filters/colorsfilters/kis_multichannel_filter_base.cpp b/plugins/filters/colorsfilters/kis_multichannel_filter_base.cpp
+index d967b56..e6238a1 100644
+--- a/plugins/filters/colorsfilters/kis_multichannel_filter_base.cpp
++++ b/plugins/filters/colorsfilters/kis_multichannel_filter_base.cpp
+@@ -485,7 +485,7 @@ void KisMultiChannelConfigWidget::setConfiguration(const KisPropertiesConfigurat
+             return;
+         }
+     } else if (cfg->curves().size() > m_virtualChannels.size()) {
+-        QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("The current configuration was created for a different colorspace and cannot be used. All curves will be reset."));
++        QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("The current configuration was created for a different colorspace and cannot be used. All curves will be reset."));
+         warnKrita << "WARNING: trying to load a curve with invalid number of channels!";
+         warnKrita << "WARNING:   expected:" << m_virtualChannels.size();
+         warnKrita << "WARNING:        got:" << cfg->curves().size();
+diff --git a/plugins/filters/levelfilter/KisLevelsConfigWidget.cpp b/plugins/filters/levelfilter/KisLevelsConfigWidget.cpp
+index 2bf5aa5..0396b0e 100644
+--- a/plugins/filters/levelfilter/KisLevelsConfigWidget.cpp
++++ b/plugins/filters/levelfilter/KisLevelsConfigWidget.cpp
+@@ -160,7 +160,7 @@ void KisLevelsConfigWidget::setConfiguration(const KisPropertiesConfigurationSP
+             KIS_SAFE_ASSERT_RECOVER_RETURN(defaultFilterConfig);
+ 
+             if (filterConfig->levelsCurves().size() > m_virtualChannels.size()) {
+-                QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("The current configuration was created for a different colorspace and cannot be used.\nThe channels will be reset."));
++                QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("The current configuration was created for a different colorspace and cannot be used.\nThe channels will be reset."));
+                 warnKrita << "WARNING: trying to load levels info with invalid number of channels!";
+                 warnKrita << "WARNING:   expected:" << m_virtualChannels.size();
+                 warnKrita << "WARNING:        got:" << filterConfig->levelsCurves().size();
+diff --git a/plugins/tools/defaulttool/referenceimagestool/KisReferenceImageCollection.cpp b/plugins/tools/defaulttool/referenceimagestool/KisReferenceImageCollection.cpp
+index 70da1f4..b315e7f 100644
+--- a/plugins/tools/defaulttool/referenceimagestool/KisReferenceImageCollection.cpp
++++ b/plugins/tools/defaulttool/referenceimagestool/KisReferenceImageCollection.cpp
+@@ -92,7 +92,7 @@ bool KisReferenceImageCollection::load(QIODevice *io)
+     if (!failures.isEmpty()) {
+         QMessageBox::warning(
+                 0,
+-                i18nc("@title:window", "Krita"),
++                i18nc("@title:window", "Nova Krita"),
+                 i18n("The following reference images could not be loaded:\n%1", failures.join('\n')),
+                 QMessageBox::Ok, QMessageBox::Ok
+         );
+diff --git a/plugins/tools/defaulttool/referenceimagestool/ToolReferenceImages.cpp b/plugins/tools/defaulttool/referenceimagestool/ToolReferenceImages.cpp
+index 6e7d6c2..00ed3b8 100644
+--- a/plugins/tools/defaulttool/referenceimagestool/ToolReferenceImages.cpp
++++ b/plugins/tools/defaulttool/referenceimagestool/ToolReferenceImages.cpp
+@@ -149,7 +149,7 @@ void ToolReferenceImages::pasteReferenceImage()
+         canvas()->addCommand(KisReferenceImagesLayer::addReferenceImages(document(), {reference}));
+     } else {
+         if (canvas()->canvasWidget()) {
+-            QMessageBox::critical(canvas()->canvasWidget(), i18nc("@title:window", "Krita"), i18n("Could not load reference image from clipboard"));
++            QMessageBox::critical(canvas()->canvasWidget(), i18nc("@title:window", "Nova Krita"), i18n("Could not load reference image from clipboard"));
+         }
+     }
+ }
+@@ -192,7 +192,7 @@ void ToolReferenceImages::loadReferenceImages()
+ 
+     QFile file(filename);
+     if (!file.open(QIODevice::ReadOnly)) {
+-        QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"), i18n("Could not open '%1'.", filename));
++        QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), i18n("Could not open '%1'.", filename));
+         return;
+     }
+ 
+@@ -213,7 +213,7 @@ void ToolReferenceImages::loadReferenceImages()
+ 
+         canvas()->addCommand(KisReferenceImagesLayer::addReferenceImages(document(), shapes));
+     } else {
+-        QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"), i18n("Could not load reference images from '%1'.", filename));
++        QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), i18n("Could not load reference images from '%1'.", filename));
+     }
+     file.close();
+ }
+@@ -248,7 +248,7 @@ void ToolReferenceImages::saveReferenceImages()
+ 
+     QFile file(filename);
+     if (!file.open(QIODevice::WriteOnly)) {
+-        QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"), i18n("Could not open '%1' for saving.", filename));
++        QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), i18n("Could not open '%1' for saving.", filename));
+         return;
+     }
+ 
+@@ -257,7 +257,7 @@ void ToolReferenceImages::saveReferenceImages()
+     file.close();
+ 
+     if (!ok) {
+-        QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Krita"), i18n("Failed to save reference images."));
++        QMessageBox::critical(qApp->activeWindow(), i18nc("@title:window", "Nova Krita"), i18n("Failed to save reference images."));
+     }
+ }
+ 
+diff --git a/plugins/tools/karbonplugins/tools/CalligraphyTool/KarbonCalligraphyOptionWidget.cpp b/plugins/tools/karbonplugins/tools/CalligraphyTool/KarbonCalligraphyOptionWidget.cpp
+index b89dd76..6783245 100644
+--- a/plugins/tools/karbonplugins/tools/CalligraphyTool/KarbonCalligraphyOptionWidget.cpp
++++ b/plugins/tools/karbonplugins/tools/CalligraphyTool/KarbonCalligraphyOptionWidget.cpp
+@@ -224,7 +224,7 @@ void KarbonCalligraphyOptionWidget::saveProfileAs()
+ 
+         if (m_profiles.contains(name)) {
+             int ret = QMessageBox::warning(this,
+-                                           i18nc("@title:window", "Krita"),
++                                           i18nc("@title:window", "Nova Krita"),
+                                            i18n("A profile with that name already exists.\n"
+                                                 "Do you want to overwrite it?"),
+                     QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel, QMessageBox::Yes);
+diff --git a/plugins/tools/svgtexttool/SvgTextEditor.cpp b/plugins/tools/svgtexttool/SvgTextEditor.cpp
+index b717793..bff9236 100644
+--- a/plugins/tools/svgtexttool/SvgTextEditor.cpp
++++ b/plugins/tools/svgtexttool/SvgTextEditor.cpp
+@@ -385,7 +385,7 @@ void SvgTextEditor::setModified(bool modified)
+ void SvgTextEditor::dialogButtonClicked(QAbstractButton *button)
+ {
+     if (m_textEditorWidget.buttons->standardButton(button) == QDialogButtonBox::Discard) {
+-        if (QMessageBox::warning(this, i18nc("@title:window", "Krita"), i18n("You have modified the text. Discard changes?"), QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
++        if (QMessageBox::warning(this, i18nc("@title:window", "Nova Krita"), i18n("You have modified the text. Discard changes?"), QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
+             close();
+         }
+     }
+diff --git a/plugins/tools/tool_transform2/kis_free_transform_strategy_gsl_helpers.cpp b/plugins/tools/tool_transform2/kis_free_transform_strategy_gsl_helpers.cpp
+index c85d4be..67ff635 100644
+--- a/plugins/tools/tool_transform2/kis_free_transform_strategy_gsl_helpers.cpp
++++ b/plugins/tools/tool_transform2/kis_free_transform_strategy_gsl_helpers.cpp
+@@ -434,7 +434,7 @@ namespace GSL
+     void warnNoGSL()
+     {
+         QMessageBox::warning(qApp->activeWindow(),
+-                             i18nc("@title:window", "Krita"),
++                             i18nc("@title:window", "Nova Krita"),
+                              i18n("Krita was built without the support "
+                                   "of GNU Scientific Library, so you cannot scale "
+                                   "the selection with handles. Please compile "
