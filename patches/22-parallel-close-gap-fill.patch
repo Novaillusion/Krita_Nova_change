@@ -1,0 +1,366 @@
+Krita Nova 22 - multi-threaded "close gap" for the Fill tool
+
+A contiguous fill runs as one job on one CPU core (only "Fill similar
+regions" is split into parallel jobs). With "Close gap" on, most of the time
+goes into KisGapMap's gap distance search: for every opaque (line art) pixel
+near the fill it searches a half circle of radius "gap size" in four octants.
+That was computed lazily, tile by tile (64x64 px), as the scanline fill
+reached each tile.
+
+KisGapMap::lazyDistance() now computes the whole 3x3 tile neighborhood of a
+requested tile at once, the tiles in parallel on up to 8 threads (a fill
+that reaches a tile almost always continues into its neighbors). The per-tile
+state (accessor, tile position, tile data pointer) moved into a
+DistanceContext, one per thread; a tile computation writes distances only
+inside its own tile and only reads opacity, which is loaded (for 5x5 tiles)
+before the parallel part. TILE_DISTANCE_LOADED is set after all threads are
+done. Results are identical; the flood fill itself (KisScanlineFill) stays
+sequential.
+
+diff --git a/libs/image/floodfill/kis_gap_map.cpp b/libs/image/floodfill/kis_gap_map.cpp
+index 437ab8f..c8559ed 100644
+--- a/libs/image/floodfill/kis_gap_map.cpp
++++ b/libs/image/floodfill/kis_gap_map.cpp
+@@ -24,6 +24,9 @@
+ #include <QtMath>
+ #include <QMutex>
+ #include <QMutexLocker>
++#include <QThread>
++#include <thread>
++#include <vector>
+ #include <KoColor.h>
+ #include <KoColorSpaceRegistry.h>
+ 
+@@ -60,7 +63,7 @@ ALWAYS_INLINE QPoint TransformMirrorHorizontally(int x, int y, int xOffset, int
+ } // anonymous namespace
+ 
+ template<bool BoundsCheck>
+-bool KisGapMap::isOpaque(int x, int y)
++bool KisGapMap::isOpaque(DistanceContext &ctx, int x, int y)
+ {
+ #if KIS_GAP_MAP_DEBUG_LOGGING_AND_ASSERTS
+     const TileFlags flags = *tileFlagsPtr(x / TileSize, y / TileSize);
+@@ -71,19 +74,19 @@ bool KisGapMap::isOpaque(int x, int y)
+ #endif
+     if (BoundsCheck) {
+         if ((x >= 0) && (x < m_size.width()) && (y >= 0) && (y < m_size.height())) {
+-            return dataPtr(x, y)->opacity == MIN_SELECTED;
++            return dataPtr(ctx.accessor, x, y)->opacity == MIN_SELECTED;
+         } else {
+             return false;
+         }
+     } else {
+-        return dataPtr(x, y)->opacity == MIN_SELECTED;
++        return dataPtr(ctx.accessor, x, y)->opacity == MIN_SELECTED;
+     }
+ }
+ 
+ template<bool BoundsCheck>
+-bool KisGapMap::isOpaque(const QPoint& p)
++bool KisGapMap::isOpaque(DistanceContext &ctx, const QPoint& p)
+ {
+-    return isOpaque<BoundsCheck>(p.x(), p.y());
++    return isOpaque<BoundsCheck>(ctx, p.x(), p.y());
+ }
+ 
+ KisGapMap::KisGapMap(int gapSize,
+@@ -144,24 +147,24 @@ void KisGapMap::loadOpacityTiles(const QRect& tileRect)
+ }
+ 
+ /** This is a part of loadDistanceTile() implementation. */
+-void KisGapMap::distanceSearchRowInnerLoop(bool boundsCheck, int y, int x1, int x2)
++void KisGapMap::distanceSearchRowInnerLoop(DistanceContext &ctx, bool boundsCheck, int y, int x1, int x2)
+ {
+     if (boundsCheck) {
+         for (int x = x1; x <= x2; ++x) {
+-            if (isOpaque<true>(x, y)) {
+-                gapDistanceSearch<true>(x, y, TransformNone);
+-                gapDistanceSearch<true>(x, y, TransformRotateClockwiseMirrorHorizontally);
+-                gapDistanceSearch<true>(x, y, TransformRotateClockwise);
+-                gapDistanceSearch<true>(x, y, TransformMirrorHorizontally);
++            if (isOpaque<true>(ctx, x, y)) {
++                gapDistanceSearch<true>(ctx, x, y, TransformNone);
++                gapDistanceSearch<true>(ctx, x, y, TransformRotateClockwiseMirrorHorizontally);
++                gapDistanceSearch<true>(ctx, x, y, TransformRotateClockwise);
++                gapDistanceSearch<true>(ctx, x, y, TransformMirrorHorizontally);
+             }
+         }
+     } else {
+         for (int x = x1; x <= x2; ++x) {
+-            if (isOpaque<false>(x, y)) {
+-                gapDistanceSearch<false>(x, y, TransformNone);
+-                gapDistanceSearch<false>(x, y, TransformRotateClockwiseMirrorHorizontally);
+-                gapDistanceSearch<false>(x, y, TransformRotateClockwise);
+-                gapDistanceSearch<false>(x, y, TransformMirrorHorizontally);
++            if (isOpaque<false>(ctx, x, y)) {
++                gapDistanceSearch<false>(ctx, x, y, TransformNone);
++                gapDistanceSearch<false>(ctx, x, y, TransformRotateClockwiseMirrorHorizontally);
++                gapDistanceSearch<false>(ctx, x, y, TransformRotateClockwise);
++                gapDistanceSearch<false>(ctx, x, y, TransformMirrorHorizontally);
+             }
+         }
+     }
+@@ -177,28 +180,27 @@ void KisGapMap::distanceSearchRowInnerLoop(bool boundsCheck, int y, int x1, int
+  *  and must be at least equal to the gap size. We need to do calculations in
+  *  a larger region in order to compute correct distances within the requested rect.
+  */
+-void KisGapMap::loadDistanceTile(const QPoint& tile, const QRect& nearbyTilesRect, int guardBand)
++void KisGapMap::loadDistanceTile(DistanceContext &ctx, const QPoint& tile, const QRect& nearbyTilesRect, int guardBand)
+ {
+ #if KIS_GAP_MAP_MEASURE_ELAPSED_TIME
+     QElapsedTimer timer;
+     timer.start();
+ #endif
+ 
+-    TileFlags* const pFlags = tileFlagsPtr(tile.x(), tile.y());
+-
+-    // This tile is now considered loaded.
+-    *pFlags |= TILE_DISTANCE_LOADED;
++    // (TILE_DISTANCE_LOADED is set by the caller, lazyDistance(), once all
++    // the tiles computed in parallel are done.)
++    TileFlags* const pFlags = tileFlagsPtr(ctx.accessor, tile.x(), tile.y());
+ 
+     // Optimization: If a tile is completely transparent (TILE_HAS_OPAQUE_PIXELS == 0), then
+     // we can skip the distance calculation for it. Unfortunately, with the guard bands we need
+     // to check the flags of the neighboring tiles as well.
+ 
+     const bool tileOpaque           = (*pFlags & TILE_HAS_OPAQUE_PIXELS) != 0;
+-    const bool tileOpaqueLeft       = (nearbyTilesRect.left()   == tile.x()) ?                                           false : (*tileFlagsPtr(tile.x() - 1, tile.y())     & TILE_HAS_OPAQUE_PIXELS) != 0;
+-    const bool tileOpaqueTopLeft    = (nearbyTilesRect.left()   == tile.x()) || (nearbyTilesRect.top()    == tile.y()) ? false : (*tileFlagsPtr(tile.x() - 1, tile.y() - 1) & TILE_HAS_OPAQUE_PIXELS) != 0;
+-    const bool tileOpaqueBottomLeft = (nearbyTilesRect.left()   == tile.x()) || (nearbyTilesRect.bottom() == tile.y()) ? false : (*tileFlagsPtr(tile.x() - 1, tile.y() + 1) & TILE_HAS_OPAQUE_PIXELS) != 0;
+-    const bool tileOpaqueTop        = (nearbyTilesRect.top()    == tile.y()) ?                                           false : (*tileFlagsPtr(tile.x(),     tile.y() - 1) & TILE_HAS_OPAQUE_PIXELS) != 0;
+-    const bool tileOpaqueBottom     = (nearbyTilesRect.bottom() == tile.y()) ?                                           false : (*tileFlagsPtr(tile.x(),     tile.y() + 1) & TILE_HAS_OPAQUE_PIXELS) != 0;
++    const bool tileOpaqueLeft       = (nearbyTilesRect.left()   == tile.x()) ?                                           false : (*tileFlagsPtr(ctx.accessor, tile.x() - 1, tile.y())     & TILE_HAS_OPAQUE_PIXELS) != 0;
++    const bool tileOpaqueTopLeft    = (nearbyTilesRect.left()   == tile.x()) || (nearbyTilesRect.top()    == tile.y()) ? false : (*tileFlagsPtr(ctx.accessor, tile.x() - 1, tile.y() - 1) & TILE_HAS_OPAQUE_PIXELS) != 0;
++    const bool tileOpaqueBottomLeft = (nearbyTilesRect.left()   == tile.x()) || (nearbyTilesRect.bottom() == tile.y()) ? false : (*tileFlagsPtr(ctx.accessor, tile.x() - 1, tile.y() + 1) & TILE_HAS_OPAQUE_PIXELS) != 0;
++    const bool tileOpaqueTop        = (nearbyTilesRect.top()    == tile.y()) ?                                           false : (*tileFlagsPtr(ctx.accessor, tile.x(),     tile.y() - 1) & TILE_HAS_OPAQUE_PIXELS) != 0;
++    const bool tileOpaqueBottom     = (nearbyTilesRect.bottom() == tile.y()) ?                                           false : (*tileFlagsPtr(ctx.accessor, tile.x(),     tile.y() + 1) & TILE_HAS_OPAQUE_PIXELS) != 0;
+ 
+     if (! (tileOpaqueTopLeft || tileOpaqueTop || tileOpaqueLeft || tileOpaque || tileOpaqueBottomLeft || tileOpaqueBottom)) {
+         // This tile as well as its surroundings are transparent.
+@@ -235,21 +237,21 @@ void KisGapMap::loadDistanceTile(const QPoint& tile, const QRect& nearbyTilesRec
+         (rect.right() + (m_gapSize + 1) >= m_size.width()) ||  // no risk of accessing x<0
+         (y1 - (m_gapSize + 1) < 0) || (y2 + (m_gapSize + 1) >= m_size.height());
+ 
+-    m_tilePosition = rect.topLeft();
+-    m_tileDataPtr = reinterpret_cast<Data*>(m_accessor->tileRawData(tile.x(), tile.y()));
++    ctx.tilePosition = rect.topLeft();
++    ctx.tileDataPtr = reinterpret_cast<Data*>(ctx.accessor->tileRawData(tile.x(), tile.y()));
+ 
+     // Process the tile and its neighborhood in three passes:
+     // Top (the top guard bands)
+     for (int y = y1; y <= rect.top() - 1; ++y) {
+-        distanceSearchRowInnerLoop(boundsCheck, y, x1Top, x2Top);
++        distanceSearchRowInnerLoop(ctx, boundsCheck, y, x1Top, x2Top);
+     }
+     // Middle (the left guard band and the tile)
+     for (int y = rect.top(); y <= rect.bottom(); ++y) {
+-        distanceSearchRowInnerLoop(boundsCheck, y, x1Middle, x2Middle);
++        distanceSearchRowInnerLoop(ctx, boundsCheck, y, x1Middle, x2Middle);
+     }
+     // Bottom (the bottom guard bands)
+     for (int y = rect.bottom() + 1; y <= y2; ++y) {
+-        distanceSearchRowInnerLoop(boundsCheck, y, x1Bottom, x2Bottom);
++        distanceSearchRowInnerLoop(ctx, boundsCheck, y, x1Bottom, x2Bottom);
+     }
+ 
+ #if KIS_GAP_MAP_MEASURE_ELAPSED_TIME
+@@ -278,10 +280,10 @@ void KisGapMap::loadDistanceTile(const QPoint& tile, const QRect& nearbyTilesRec
+  * - Lastly, only some points in the half circle will be modified, it depends on the opacity checks.
+  */
+ template<bool BoundsCheck, typename CoordinateTransform>
+-void KisGapMap::gapDistanceSearch(int x, int y, CoordinateTransform op)
++void KisGapMap::gapDistanceSearch(DistanceContext &ctx, int x, int y, CoordinateTransform op)
+ {
+-    if (isOpaque<BoundsCheck>(op(x, y, 0, -1)) ||
+-        isOpaque<BoundsCheck>(op(x, y, 1, -1))) {
++    if (isOpaque<BoundsCheck>(ctx, op(x, y, 0, -1)) ||
++        isOpaque<BoundsCheck>(ctx, op(x, y, 1, -1))) {
+         return;
+     }
+ 
+@@ -295,36 +297,36 @@ void KisGapMap::gapDistanceSearch(int x, int y, CoordinateTransform op)
+                 break;
+             }
+ 
+-            if (isOpaque<BoundsCheck>(op(x, y, xoffs, -yoffs))) {
++            if (isOpaque<BoundsCheck>(ctx, op(x, y, xoffs, -yoffs))) {
+                 const float dx = static_cast<float>(xoffs) / (yoffs - 1);
+                 float tx = 0;
+                 int cx = 0;
+ 
+                 for (int cy = 1; cy < yoffs; ++cy) {
+-                    updateDistance(op(x, y, cx, -cy), offsetDistance);
++                    updateDistance(ctx, op(x, y, cx, -cy), offsetDistance);
+ 
+                     tx += dx;
+                     if (static_cast<int>(tx) > cx) {
+                         cx++;
+-                        updateDistance(op(x, y, cx, -cy), offsetDistance);
++                        updateDistance(ctx, op(x, y, cx, -cy), offsetDistance);
+                     }
+ 
+-                    updateDistance(op(x, y, cx + 1, -cy), offsetDistance);
++                    updateDistance(ctx, op(x, y, cx + 1, -cy), offsetDistance);
+                 }
+             }
+         }
+     }
+ }
+ 
+-void KisGapMap::updateDistance(const QPoint& globalPosition, quint16 newDistance)
++void KisGapMap::updateDistance(DistanceContext &ctx, const QPoint& globalPosition, quint16 newDistance)
+ {
+-    const QPoint p = globalPosition - m_tilePosition;
++    const QPoint p = globalPosition - ctx.tilePosition;
+ 
+     if ((p.x() < 0) || (p.x() >= TileSize) || (p.y() < 0) || (p.y() >= TileSize)) {
+         return;
+     }
+ 
+-    Data* ptr = m_tileDataPtr + p.x() + TileSize * p.y();
++    Data* ptr = ctx.tileDataPtr + p.x() + TileSize * p.y();
+     if (ptr->distance > newDistance) {
+         ptr->distance = newDistance;
+     }
+@@ -340,18 +342,66 @@ quint16 KisGapMap::lazyDistance(int x, int y)
+     const int tx = x / TileSize;
+     const int ty = y / TileSize;
+ 
+-    // Clamped tile neighborhood.
+-    const QPoint topLeft(qMax(0, tx - 1),
+-                         qMax(0, ty - 1));
+-    const QPoint bottomRight(qMin(tx + 1, m_numTiles.width() - 1),
+-                             qMin(ty + 1, m_numTiles.height() - 1));
+-    const QRect nearbyTiles = QRect(topLeft, bottomRight);
++    auto clampedNeighborhood = [this](int cx, int cy, int radius) {
++        const QPoint topLeft(qMax(0, cx - radius),
++                             qMax(0, cy - radius));
++        const QPoint bottomRight(qMin(cx + radius, m_numTiles.width() - 1),
++                                 qMin(cy + radius, m_numTiles.height() - 1));
++        return QRect(topLeft, bottomRight);
++    };
++
++    /**
++     * Krita Nova: the gap distance search is by far the most expensive part
++     * of a "close gap" fill, and it used to run tile by tile on one core as
++     * the fill reached each tile. A fill that reaches this tile very likely
++     * continues into its neighbors, so the distance data of the whole 3x3
++     * neighborhood is computed now, the tiles in parallel (each thread has its
++     * own accessor and writes distances only inside its own tile; opacity,
++     * which all of them read, is not modified at that point).
++     *
++     * Each distance tile needs the opacity of its own 3x3 neighborhood, so
++     * opacity is loaded (sequentially, through the fill's callback) for 5x5.
++     */
++    loadOpacityTiles(clampedNeighborhood(tx, ty, 2));
++
++    const QRect distanceTiles = clampedNeighborhood(tx, ty, 1);
++    std::vector<QPoint> pending;
++    for (int py = distanceTiles.top(); py <= distanceTiles.bottom(); ++py) {
++        for (int px = distanceTiles.left(); px <= distanceTiles.right(); ++px) {
++            if ((*tileFlagsPtr(px, py) & TILE_DISTANCE_LOADED) == 0) {
++                pending.push_back(QPoint(px, py));
++            }
++        }
++    }
++
++    const int threads = qMin<int>(int(pending.size()), qBound(1, QThread::idealThreadCount(), 8));
+ 
+-    // For opacity data, we always load all the adjacent tiles (up to 9 tiles in total).
+-    loadOpacityTiles(nearbyTiles);
++    if (threads <= 1) {
++        DistanceContext ctx {m_accessor.get(), QPoint(), nullptr};
++        for (const QPoint &tile : pending) {
++            loadDistanceTile(ctx, tile, clampedNeighborhood(tile.x(), tile.y(), 1), m_gapSize);
++        }
++    } else {
++        std::vector<std::thread> workers;
++        workers.reserve(threads);
++        for (int t = 0; t < threads; ++t) {
++            workers.emplace_back([this, t, threads, &pending, &clampedNeighborhood]() {
++                KisTileOptimizedAccessor accessor(m_deviceSp);
++                DistanceContext ctx {&accessor, QPoint(), nullptr};
++                for (size_t i = size_t(t); i < pending.size(); i += size_t(threads)) {
++                    const QPoint &tile = pending[i];
++                    loadDistanceTile(ctx, tile, clampedNeighborhood(tile.x(), tile.y(), 1), m_gapSize);
++                }
++            });
++        }
++        for (std::thread &worker : workers) {
++            worker.join();
++        }
++    }
+ 
+-    // For distance data, we always load a single tile.
+-    loadDistanceTile(QPoint(tx, ty), nearbyTiles, m_gapSize);
++    for (const QPoint &tile : pending) {
++        *tileFlagsPtr(tile.x(), tile.y()) |= TILE_DISTANCE_LOADED;
++    }
+ 
+     // The data is now ready to be returned.
+     return dataPtr(x, y)->distance;
+diff --git a/libs/image/floodfill/kis_gap_map.h b/libs/image/floodfill/kis_gap_map.h
+index 0d8b75d..ef60aa4 100644
+--- a/libs/image/floodfill/kis_gap_map.h
++++ b/libs/image/floodfill/kis_gap_map.h
+@@ -163,20 +163,43 @@ private:
+     };
+     static_assert(sizeof(Data) == sizeof(quint32));
+ 
++    /**
++     * Krita Nova: the state of one distance tile computation. Each thread that
++     * computes distance tiles has its own context (own accessor), so several
++     * tiles can be computed in parallel: a tile computation writes distances
++     * only inside its own tile and reads opacity, which is not modified then.
++     */
++    struct DistanceContext {
++        KisTileOptimizedAccessor *accessor;
++        QPoint tilePosition;   ///< The position of the currently computed tile compared to the whole region
++        Data *tileDataPtr;     ///< The pointer to the currently computed tile data
++    };
++
+     void loadOpacityTiles(const QRect& tileRect);
+-    void loadDistanceTile(const QPoint& tile, const QRect& nearbyTilesRect, int guardBand);
+-    void distanceSearchRowInnerLoop(bool boundsCheck, int y, int x1, int x2);
++    void loadDistanceTile(DistanceContext &ctx, const QPoint& tile, const QRect& nearbyTilesRect, int guardBand);
++    void distanceSearchRowInnerLoop(DistanceContext &ctx, bool boundsCheck, int y, int x1, int x2);
+     quint16 lazyDistance(int x, int y);
+ 
+     // Templates are used to generate optimized versions of the same function
+     // (i.e., the if conditions can be removed at compilation time).
+ 
+     template<bool BoundsCheck, typename CoordinateTransform>
+-    void gapDistanceSearch(int x, int y, CoordinateTransform op);
++    void gapDistanceSearch(DistanceContext &ctx, int x, int y, CoordinateTransform op);
+ 
+-    template<bool BoundsCheck> ALWAYS_INLINE bool isOpaque(int x, int y);
+-    template<bool BoundsCheck> ALWAYS_INLINE bool isOpaque(const QPoint& p);
+-    void updateDistance(const QPoint& globalPosition, quint16 newDistance);
++    template<bool BoundsCheck> ALWAYS_INLINE bool isOpaque(DistanceContext &ctx, int x, int y);
++    template<bool BoundsCheck> ALWAYS_INLINE bool isOpaque(DistanceContext &ctx, const QPoint& p);
++    void updateDistance(DistanceContext &ctx, const QPoint& globalPosition, quint16 newDistance);
++
++    ALWAYS_INLINE Data* dataPtr(KisTileOptimizedAccessor *accessor, int x, int y)
++    {
++        return reinterpret_cast<Data*>(accessor->rawData(x, y));
++    }
++
++    ALWAYS_INLINE TileFlags* tileFlagsPtr(KisTileOptimizedAccessor *accessor, int tileX, int tileY)
++    {
++        return reinterpret_cast<TileFlags*>(
++            accessor->tileRawData(tileX, tileY) + offsetof(Data, flags));
++    }
+ 
+     ALWAYS_INLINE bool isDistanceAvailable(int x, int y)
+     {
+@@ -199,9 +222,6 @@ private:
+     const QSize m_numTiles;                   ///< Map size in tiles
+     const FillOpacityFunc m_fillOpacityFunc;  ///< A callback to get the opacity data from the fill class
+ 
+-    QPoint m_tilePosition;                    ///< The position of the currently computed tile compared to the whole region
+-    Data* m_tileDataPtr;                      ///< The pointer to the currently computed tile data
+-
+     KisPaintDeviceSP m_deviceSp;                            ///< A 32-bit per pixel paint device that holds the distance and other data
+     std::unique_ptr<KisTileOptimizedAccessor> m_accessor;   ///< An accessor for the paint device
+ };
