@@ -54,7 +54,13 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
    RoundedPanelPainter (an event filter) instead of the widget's own
    background and frame. The popup is a frameless window (no white Android
    platform frame).
-5. mirror_actions, select_layout and workspaces are moved from the brush
+5. Top row: the main toolbar (mainToolBar) moves from the toolbar area into
+   a fixed, title-less dock in the top dock area ("KritaNovaTopBar"; same
+   keeper as the panel toolbars). Toolbar areas and dock areas never share a
+   row, dock widgets do: once after startup, a Toolbox docker docked at the
+   top is split onto the top bar's row (kritarc: androidToolboxRowArranged);
+   later the Toolbox can be dropped next to the top bar again.
+   mirror_actions, select_layout and workspaces are moved from the brush
    toolbar to the top bar (mainToolBar); the expanding spacer is hidden, so
    the vertical sliders get the panel's spare height. The image size,
    rotation and zoom items of patch 16 are added at the right end.
@@ -67,7 +73,7 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
 Desktop builds are unchanged.
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 2c48914..1db7ccd 100644
+index 2c48914..1651a17 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
 @@ -20,6 +20,26 @@
@@ -97,7 +103,7 @@ index 2c48914..1db7ccd 100644
  #include <QIcon>
  #include <QInputDialog>
  #include <QLayout>
-@@ -366,6 +386,729 @@ public:
+@@ -366,6 +386,810 @@ public:
      }
  };
  
@@ -412,10 +418,12 @@ index 2c48914..1db7ccd 100644
 +        m_busy = true;
 +        // undo/redo: top of the panel column; the rest of the brush toolbar:
 +        // the "more" (3 dots) popup, as a normal horizontal toolbar
-+        struct Target { const char *name; QWidget *parent; Qt::Orientation orientation; };
++        // and the main toolbar: the top bar dock (so the Toolbox docker can share its row)
++        struct Target { const char *name; QWidget *parent; Qt::Orientation orientation; bool stretch; };
 +        const Target targets[] = {
-+            {"editToolBar", m_container, Qt::Vertical},
-+            {"BrushesAndStuff", m_moreContainer ? m_moreContainer.data() : m_container.data(), Qt::Horizontal},
++            {"editToolBar", m_container, Qt::Vertical, false},
++            {"BrushesAndStuff", m_moreContainer ? m_moreContainer.data() : m_container.data(), Qt::Horizontal, false},
++            {"mainToolBar", m_topBarContainer, Qt::Horizontal, true},
 +        };
 +        for (const Target &target : targets) {
 +            KisToolBar *toolBar = m_mainWindow->findChild<KisToolBar *>(QLatin1String(target.name));
@@ -437,7 +445,11 @@ index 2c48914..1db7ccd 100644
 +                toolBar->setParent(target.parent);
 +            }
 +            if (layout->indexOf(toolBar) < 0) {
-+                layout->insertWidget(0, toolBar, 0, Qt::AlignCenter);
++                if (target.stretch) {
++                    layout->insertWidget(0, toolBar, 1);
++                } else {
++                    layout->insertWidget(0, toolBar, 0, Qt::AlignCenter);
++                }
 +            }
 +            toolBar->setOrientation(target.orientation);
 +            toolBar->setMovable(false);
@@ -479,12 +491,14 @@ index 2c48914..1db7ccd 100644
 +
 +    void setMoreContainer(QWidget *container) { m_moreContainer = container; }
 +    void setColorSlot(QWidget *slot) { m_colorSlot = slot; }
++    void setTopBarContainer(QWidget *container) { m_topBarContainer = container; }
 +
 +protected:
 +    bool eventFilter(QObject *watched, QEvent *event) override
 +    {
 +        const QEvent::Type type = event->type();
-+        if (type == QEvent::ShowToParent && !m_busy && onToolBarShown) {
++        if (type == QEvent::ShowToParent && !m_busy && onToolBarShown
++            && watched->objectName() != QLatin1String("mainToolBar")) {
 +            // "Show ... Toolbar" for a toolbar of a hidden panel: show the panel
 +            QWidget *dock = m_container ? m_container->parentWidget() : nullptr;
 +            if (dock && dock->isHidden()) {
@@ -508,6 +522,7 @@ index 2c48914..1db7ccd 100644
 +    QPointer<QWidget> m_container;
 +    QPointer<QWidget> m_moreContainer;
 +    QPointer<QWidget> m_colorSlot;
++    QPointer<QWidget> m_topBarContainer;
 +    QList<QPointer<KisToolBar>> m_watched;
 +    bool m_busy {false};
 +    bool m_pending {false};
@@ -711,8 +726,79 @@ index 2c48914..1db7ccd 100644
 +    }
 +};
 +
++/**
++ * The main toolbar (New/Open/Save, mirror/wrap, layouts, workspaces, image
++ * size/rotation/zoom) lives in a fixed, title-less dock in the top dock area
++ * instead of the toolbar area. Dock widgets can share a row, toolbar areas and
++ * dock areas can't: this lets the Toolbox docker sit on the same line.
++ */
++QDockWidget *createAndroidTopBarDock(QMainWindow *mainWindow)
++{
++    QDockWidget *dock = new QDockWidget(i18nc("@title:window", "Top Bar"), mainWindow);
++    dock->setObjectName(QStringLiteral("KritaNovaTopBar"));
++    KAcceleratorManager::setNoAccel(dock);
++    dock->setFeatures(QDockWidget::NoDockWidgetFeatures);
++    dock->setAllowedAreas(Qt::TopDockWidgetArea);
++    dock->setTitleBarWidget(new QWidget(dock)); // no title bar
++    QWidget *container = new QWidget(dock);
++    QHBoxLayout *layout = new QHBoxLayout(container);
++    layout->setContentsMargins(0, 0, 0, 0);
++    layout->setSpacing(0);
++    dock->setWidget(container);
++    mainWindow->addDockWidget(Qt::TopDockWidgetArea, dock);
++    dock->show();
++    return dock;
++}
++
++/**
++ * Once after startup: if the Toolbox docker is docked at the top, put it on
++ * the top bar's row (to its right). Later the user can move the Toolbox
++ * anywhere; dropping it on the left/right part of the top bar puts it on the
++ * same row again.
++ */
++class TopRowArranger : public QObject
++{
++public:
++    TopRowArranger(QMainWindow *mainWindow, QDockWidget *topBar)
++        : QObject(topBar), m_mainWindow(mainWindow), m_topBar(topBar)
++    {
++        mainWindow->installEventFilter(this);
++    }
++
++protected:
++    bool eventFilter(QObject *watched, QEvent *event) override
++    {
++        if (watched == m_mainWindow && event->type() == QEvent::Show && m_mainWindow) {
++            m_mainWindow->removeEventFilter(this);
++            QTimer::singleShot(600, this, [this]() { arrange(); });
++        }
++        return QObject::eventFilter(watched, event);
++    }
++
++private:
++    void arrange()
++    {
++        if (!m_mainWindow || !m_topBar) return;
++        m_topBar->show();
++        if (KisConfig(true).readEntry("androidToolboxRowArranged", false)) return;
++        QDockWidget *toolbox = m_mainWindow->findChild<QDockWidget *>(QStringLiteral("ToolBox"));
++        if (!toolbox || toolbox->isFloating()
++            || m_mainWindow->dockWidgetArea(toolbox) != Qt::TopDockWidgetArea) {
++            return;
++        }
++        m_mainWindow->splitDockWidget(m_topBar, toolbox, Qt::Horizontal);
++        KisConfig(false).writeEntry("androidToolboxRowArranged", true);
++    }
++
++    QPointer<QMainWindow> m_mainWindow;
++    QPointer<QDockWidget> m_topBar;
++};
++
 +QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *viewManager, QStackedWidget *mainStack)
 +{
++    QDockWidget *topBar = createAndroidTopBarDock(mainWindow);
++    new TopRowArranger(mainWindow, topBar);
++
 +    QDockWidget *dock = new QDockWidget(i18nc("@title:window", "Brush Panel"), mainWindow);
 +    dock->setObjectName(QStringLiteral("KritaNovaBrushPanel"));
 +    KAcceleratorManager::setNoAccel(dock); // no "&" in the title
@@ -785,6 +871,7 @@ index 2c48914..1db7ccd 100644
 +
 +    BrushPanelToolBarKeeper *keeper = new BrushPanelToolBarKeeper(mainWindow, container);
 +    keeper->setMoreContainer(moreContent);
++    keeper->setTopBarContainer(topBar->widget());
 +    keeper->relocate(); // undo/redo land above the "more" button
 +
 +    layout->addWidget(createBrushSliders(mainWindow, container), 1, Qt::AlignHCenter);
@@ -827,7 +914,7 @@ index 2c48914..1db7ccd 100644
  KisMainWindow::KisMainWindow(QUuid uuid)
      : KXmlGuiWindow()
      , d(new Private(this, uuid))
-@@ -608,6 +1351,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
+@@ -608,6 +1432,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
          }
      }
  
