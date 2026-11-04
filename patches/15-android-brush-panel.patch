@@ -19,6 +19,8 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
    title bar is a plain "Brush Panel" label + close button (Krita's docker
    title bar has float/dock and lock buttons, which could dock or lock it
    with no way back).
+   Like the dockers, the panel is hidden on the welcome page and shown once
+   an image is open (follows the main window's widget stack).
    Bringing it back after closing: Settings > Toolbars Shown > Brush Panel,
    or switching on "Edit" / "Brushes and Stuff" there, shows it floating and
    on screen again.
@@ -54,10 +56,10 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
 Desktop builds are unchanged.
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 2c48914..99bc1d9 100644
+index 2c48914..8601830 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
-@@ -20,6 +20,23 @@
+@@ -20,6 +20,25 @@
  #include <QScreen>
  #include <QDialog>
  #include <QDockWidget>
@@ -65,6 +67,8 @@ index 2c48914..99bc1d9 100644
 +#include <QTimer>
 +#include <functional>
 +#include <QWidgetAction>
++#include <QElapsedTimer>
++#include <QStackedWidget>
 +#include <QLabel>
 +#include <QToolButton>
 +#include <QLocale>
@@ -81,7 +85,7 @@ index 2c48914..99bc1d9 100644
  #include <QIcon>
  #include <QInputDialog>
  #include <QLayout>
-@@ -366,6 +383,540 @@ public:
+@@ -366,6 +385,593 @@ public:
      }
  };
  
@@ -479,9 +483,25 @@ index 2c48914..99bc1d9 100644
 +class BrushPanelShower : public QObject
 +{
 +public:
-+    BrushPanelShower(QMainWindow *mainWindow, QDockWidget *dock, BrushPanelToolBarKeeper *keeper)
-+        : QObject(dock), m_mainWindow(mainWindow), m_dock(dock), m_keeper(keeper)
++    BrushPanelShower(QMainWindow *mainWindow, QDockWidget *dock, BrushPanelToolBarKeeper *keeper,
++                     QStackedWidget *mainStack)
++        : QObject(dock), m_mainWindow(mainWindow), m_dock(dock), m_keeper(keeper), m_stack(mainStack)
 +    {
++        // Like the dockers: hidden on the welcome page (stack index 0), shown
++        // once an image is open.
++        if (mainStack) {
++            connect(mainStack, &QStackedWidget::currentChanged, this, [this](int index) {
++                m_stackChanged.start();
++                if (index == 0) {
++                    if (m_dock) m_dock->hide();
++                } else {
++                    // after Krita has restored the window layout for the canvas
++                    for (int delay : {0, 500}) {
++                        QTimer::singleShot(delay, this, [this]() { place(false); });
++                    }
++                }
++            });
++        }
 +        mainWindow->installEventFilter(this);
 +        if (mainWindow->isVisible()) schedule();
 +        // The panel is always floating: restoreState() may dock it again.
@@ -500,9 +520,26 @@ index 2c48914..99bc1d9 100644
 +    }
 +
 +public:
++    /// Closed with its × or unticked in Settings: stays hidden until asked for
++    void hideByUser()
++    {
++        m_userHidden = true;
++        if (m_dock) m_dock->hide();
++    }
++
++    /// One of the panel's toolbars was switched on while the panel is hidden.
++    /// Krita itself re-shows toolbars when it leaves the welcome page; that is
++    /// not a request from the user, so ignore it.
++    void toolBarShown()
++    {
++        if (m_stackChanged.isValid() && m_stackChanged.elapsed() < 1500) return;
++        showPanel();
++    }
++
 +    /// Bring the panel back: floating, on screen, in front
 +    void showPanel()
 +    {
++        m_userHidden = false;
 +        if (!m_dock || !m_mainWindow) return;
 +        if (m_keeper) m_keeper->relocate();
 +        place(false);
@@ -522,9 +559,18 @@ index 2c48914..99bc1d9 100644
 +        }
 +    }
 +
++    bool onWelcomePage() const
++    {
++        return m_stack && m_stack->currentIndex() == 0;
++    }
++
 +    void place(bool force)
 +    {
 +        if (!m_dock || !m_mainWindow) return;
++        if (m_userHidden || onWelcomePage()) {
++            m_dock->hide();
++            return;
++        }
 +        if (m_keeper) m_keeper->relocate();
 +        const QRect area = m_mainWindow->geometry();
 +        QScreen *screen = m_mainWindow->screen();
@@ -551,10 +597,13 @@ index 2c48914..99bc1d9 100644
 +    QPointer<QMainWindow> m_mainWindow;
 +    QPointer<QDockWidget> m_dock;
 +    QPointer<BrushPanelToolBarKeeper> m_keeper;
++    QPointer<QStackedWidget> m_stack;
++    bool m_userHidden {false};
 +    bool m_done {false};
++    QElapsedTimer m_stackChanged;
 +};
 +
-+QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *viewManager)
++QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *viewManager, QStackedWidget *mainStack)
 +{
 +    QDockWidget *dock = new QDockWidget(i18nc("@title:window", "Brush Panel"), mainWindow);
 +    dock->setObjectName(QStringLiteral("KritaNovaBrushPanel"));
@@ -580,7 +629,7 @@ index 2c48914..99bc1d9 100644
 +        closeButton->setIcon(KisIconUtils::loadIcon("window-close"));
 +        closeButton->setToolTip(i18nc("@info:tooltip", "Hide the Brush Panel (Settings > Toolbars Shown brings it back)"));
 +        closeButton->setFixedSize(26, 26);
-+        QObject::connect(closeButton, &QToolButton::clicked, dock, &QDockWidget::close);
++        closeButton->setObjectName(QStringLiteral("KritaNovaBrushPanelClose"));
 +        titleLayout->addWidget(title, 1);
 +        titleLayout->addWidget(closeButton);
 +    }
@@ -604,14 +653,22 @@ index 2c48914..99bc1d9 100644
 +    // Show it once the main window is on screen: a floating dock is a window
 +    // of its own and is not shown along with the main window, and the saved
 +    // window state / workspace restored during startup may hide or re-dock it.
-+    BrushPanelShower *shower = new BrushPanelShower(mainWindow, dock, keeper);
-+    keeper->onToolBarShown = [shower]() { shower->showPanel(); };
++    BrushPanelShower *shower = new BrushPanelShower(mainWindow, dock, keeper, mainStack);
++    keeper->onToolBarShown = [shower]() { shower->toolBarShown(); };
++
++    if (QToolButton *closeButton = titleBar->findChild<QToolButton *>(QStringLiteral("KritaNovaBrushPanelClose"))) {
++        QObject::connect(closeButton, &QToolButton::clicked, shower, [shower]() { shower->hideByUser(); });
++    }
 +
 +    // Settings > Toolbars Shown > Brush Panel: also put it back on screen
 +    QAction *toggle = dock->toggleViewAction();
 +    toggle->setText(i18n("Brush Panel"));
 +    QObject::connect(toggle, &QAction::triggered, shower, [shower](bool checked) {
-+        if (checked) QTimer::singleShot(0, shower, [shower]() { shower->showPanel(); });
++        if (checked) {
++            QTimer::singleShot(0, shower, [shower]() { shower->showPanel(); });
++        } else {
++            shower->hideByUser();
++        }
 +    });
 +    return dock;
 +}
@@ -622,7 +679,7 @@ index 2c48914..99bc1d9 100644
  KisMainWindow::KisMainWindow(QUuid uuid)
      : KXmlGuiWindow()
      , d(new Private(this, uuid))
-@@ -608,6 +1159,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
+@@ -608,6 +1214,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
          }
      }
  
@@ -630,7 +687,7 @@ index 2c48914..99bc1d9 100644
 +    // Krita Nova: undo/redo + brush toolbar in a floating vertical panel;
 +    // "Settings > Toolbars Shown" gets an entry to bring it back once closed.
 +    {
-+        QDockWidget *brushPanel = createAndroidBrushPanel(this, d->viewManager);
++        QDockWidget *brushPanel = createAndroidBrushPanel(this, d->viewManager, d->widgetStack);
 +        toolbarList.append(brushPanel->toggleViewAction());
 +    }
 +#endif
