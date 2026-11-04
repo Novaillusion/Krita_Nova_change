@@ -28,25 +28,29 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
    shown (a floating dock is a window of its own and is not shown along with
    the main window; startup's window state / workspace restore may also hide
    or re-dock it). The first time, or whenever it is off screen, it floats at
-   the left edge, tall (kritarc: androidBrushPanelPlaced2); otherwise it is
+   the left edge (kritarc: androidBrushPanelPlaced3); otherwise it is
    shown where it was. Closing it hides it for the session; Settings >
    Toolbars Shown has an entry to bring it back.
 3. KisToolBar::mainWindow() searches all ancestors for the main window, not
    just the direct parent; several code paths dereference it unchecked
    (context menu, saveState) and would crash for a toolbar in the panel.
 
-4. The panel is a narrow column: the toolbar's horizontal button groups
-   (brush editor/presets, blending mode/alpha lock/reload, mirror/wrap) are
-   turned vertical, and the blending mode box is as wide as the column (its
-   list keeps a readable width). The Opacity/Size sliders (brushslider1/2)
-   are hidden and replaced by two tall vertical sliders, Size above Opacity,
-   bound to the same KisDoubleSliderSpinBox objects: drag up/down to change
-   the value relative to where the drag started (Size uses the same cubic
-   curve as the horizontal slider); the value shows while dragging.
-
+4. Panel layout, centered: Undo, Redo (the "editToolBar"), a "more" button
+   (3 dots), tall vertical Size and Opacity sliders, the color sampler
+   button. The more button (KisPopupButton, "Brush Options" title bar) opens
+   the rest of the brush toolbar as a normal horizontal toolbar: gradient,
+   pattern, colors, brush editor, presets, blending mode, alpha lock, reload.
+   The sliders (NovaVerticalSlider, 45 px wide) are bound to the same
+   KisDoubleSliderSpinBox objects as the hidden horizontal sliders
+   (brushslider1/2): drag up/down to change the value relative to where the
+   drag started (Size uses the same cubic curve); the value shows while
+   dragging. First placement: 78 px wide, 60% of the window height, vertically
+   centered at the left edge (kritarc: androidBrushPanelPlaced3). Thinner
+   frame (PM_DockWidgetFrameWidth 3 for this panel, 1 px content margins).
 5. mirror_actions, select_layout and workspaces are moved from the brush
    toolbar to the top bar (mainToolBar); the expanding spacer is hidden, so
-   the vertical sliders get the panel's spare height (the panel starts tall).
+   the vertical sliders get the panel's spare height. The image size,
+   rotation and zoom items of patch 16 are added at the right end.
 6. A round button at the bottom of the panel shows the foreground color.
    Tapping it switches to the Color Sampler tool; after one sample on the
    canvas (release of pen/mouse/touch on the canvas widget) it switches back
@@ -56,10 +60,10 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
 Desktop builds are unchanged.
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 2c48914..8601830 100644
+index 2c48914..2e3b4fb 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
-@@ -20,6 +20,25 @@
+@@ -20,6 +20,26 @@
  #include <QScreen>
  #include <QDialog>
  #include <QDockWidget>
@@ -67,6 +71,7 @@ index 2c48914..8601830 100644
 +#include <QTimer>
 +#include <functional>
 +#include <QWidgetAction>
++#include <KisPopupButton.h>
 +#include <QElapsedTimer>
 +#include <QStackedWidget>
 +#include <QLabel>
@@ -85,7 +90,7 @@ index 2c48914..8601830 100644
  #include <QIcon>
  #include <QInputDialog>
  #include <QLayout>
-@@ -366,6 +385,593 @@ public:
+@@ -366,6 +386,616 @@ public:
      }
  };
  
@@ -116,7 +121,7 @@ index 2c48914..8601830 100644
 +        : QWidget(parent), m_spin(spin), m_name(name), m_exponent(exponent)
 +    {
 +        setToolTip(name);
-+        setMinimumSize(30, 160);
++        setMinimumSize(45, 110);
 +        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
 +        connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this]() { update(); });
 +        // the brush toolbar updates its sliders with signals blocked on preset
@@ -128,7 +133,7 @@ index 2c48914..8601830 100644
 +        m_poll.start();
 +    }
 +
-+    QSize sizeHint() const override { return QSize(32, 260); }
++    QSize sizeHint() const override { return QSize(45, 200); }
 +
 +protected:
 +    qreal toPos(qreal v) const
@@ -209,16 +214,10 @@ index 2c48914..8601830 100644
 +
 +/// Turn the brush toolbar's horizontal groups into a narrow column with
 +/// vertical size and opacity sliders (done once per toolbar).
-+void adaptBrushToolBarToColumn(KisToolBar *toolBar, QMainWindow *mainWindow)
++void adaptBrushToolBarForPanel(KisToolBar *toolBar, QMainWindow *mainWindow)
 +{
-+    Q_UNUSED(mainWindow);
-+    if (toolBar->property("_kritanova_column").toBool()) return;
-+    toolBar->setProperty("_kritanova_column", true);
-+
-+    const int column = qMax(36, toolBar->iconSize().width() + 12);
-+
-+    KisWidgetChooser *sliderChooser = nullptr;
-+    QAction *insertBefore = nullptr;
++    if (toolBar->property("_kritanova_panel").toBool()) return;
++    toolBar->setProperty("_kritanova_panel", true);
 +
 +    // Mirror/wrap, layouts and workspaces go to the top bar, next to New/Open/Save;
 +    // the spacer that pushed layouts/workspaces to the far end goes away.
@@ -238,57 +237,55 @@ index 2c48914..8601830 100644
 +                action->setVisible(false);
 +            }
 +        }
++
++        // Image size, canvas rotation and zoom from the status bar (KisStatusBar
++        // parks them in this widget on Android), at the right end of the top bar
++        if (QWidget *statusItems = mainWindow->findChild<QWidget *>(QStringLiteral("KritaNovaStatusItems"))) {
++            QWidget *spacer = new QWidget(topBar);
++            spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
++            topBar->addWidget(spacer);
++            topBar->addWidget(statusItems);
++            statusItems->show();
++        }
 +    }
 +
++    // Size and opacity are the panel's own vertical sliders
 +    Q_FOREACH (QAction *action, toolBar->actions()) {
-+        QWidgetAction *widgetAction = qobject_cast<QWidgetAction *>(action);
-+        QWidget *widget = widgetAction ? widgetAction->defaultWidget() : nullptr;
-+        if (!widget) continue;
-+
 +        if (action->objectName() == QLatin1String("brushslider1") ||
 +            action->objectName() == QLatin1String("brushslider2")) {
-+            if (!sliderChooser) sliderChooser = qobject_cast<KisWidgetChooser *>(widget);
 +            action->setVisible(false);
-+            continue;
 +        }
++    }
++}
 +
-+        // horizontal button groups -> vertical
-+        QList<QBoxLayout *> layouts = widget->findChildren<QBoxLayout *>();
-+        if (QBoxLayout *own = qobject_cast<QBoxLayout *>(widget->layout())) layouts << own;
-+        Q_FOREACH (QBoxLayout *layout, layouts) {
-+            if (layout->direction() == QBoxLayout::LeftToRight) {
-+                layout->setDirection(QBoxLayout::TopToBottom);
-+                layout->setAlignment(Qt::AlignHCenter);
++/// Size (top) and opacity (bottom) as tall vertical sliders, bound to the
++/// brush toolbar's first slider chooser
++QWidget *createBrushSliders(QMainWindow *mainWindow, QWidget *parent)
++{
++    KisWidgetChooser *sliderChooser = nullptr;
++    if (KisToolBar *toolBar = mainWindow->findChild<KisToolBar *>(QStringLiteral("BrushesAndStuff"))) {
++        Q_FOREACH (QAction *action, toolBar->actions()) {
++            if (action->objectName() == QLatin1String("brushslider1")) {
++                if (QWidgetAction *widgetAction = qobject_cast<QWidgetAction *>(action)) {
++                    sliderChooser = qobject_cast<KisWidgetChooser *>(widgetAction->defaultWidget());
++                }
 +            }
 +        }
-+        // the blending mode box: as wide as the column; its list keeps a readable width
-+        Q_FOREACH (KisCompositeOpComboBox *combo, widget->findChildren<KisCompositeOpComboBox *>()) {
-+            combo->setFixedWidth(column);
-+            combo->view()->setMinimumWidth(240);
-+        }
 +    }
 +
-+    if (!sliderChooser) return;
-+
-+    KisDoubleSliderSpinBox *size = sliderChooser->getWidget<KisDoubleSliderSpinBox>("size");
-+    KisDoubleSliderSpinBox *opacity = sliderChooser->getWidget<KisDoubleSliderSpinBox>("opacity");
-+
-+    QWidget *sliders = new QWidget(toolBar);
++    QWidget *sliders = new QWidget(parent);
 +    sliders->setObjectName(QStringLiteral("KritaNovaVerticalSliders"));
 +    QVBoxLayout *layout = new QVBoxLayout(sliders);
-+    layout->setContentsMargins(0, 4, 0, 4);
-+    layout->setSpacing(10);
-+    if (size) layout->addWidget(new NovaVerticalSlider(size, i18n("Size"), 3.0, sliders), 1, Qt::AlignHCenter);
-+    if (opacity) layout->addWidget(new NovaVerticalSlider(opacity, i18n("Opacity"), 1.0, sliders), 1, Qt::AlignHCenter);
-+    sliders->setMinimumHeight(340);
-+    // a vertical QToolBar hands spare height to vertically expanding widgets
-+    sliders->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
-+
-+    if (insertBefore) {
-+        toolBar->insertWidget(insertBefore, sliders);
-+    } else {
-+        toolBar->addWidget(sliders);
++    layout->setContentsMargins(0, 2, 0, 2);
++    layout->setSpacing(8);
++    if (sliderChooser) {
++        KisDoubleSliderSpinBox *size = sliderChooser->getWidget<KisDoubleSliderSpinBox>("size");
++        KisDoubleSliderSpinBox *opacity = sliderChooser->getWidget<KisDoubleSliderSpinBox>("opacity");
++        if (size) layout->addWidget(new NovaVerticalSlider(size, i18n("Size"), 3.0, sliders), 1, Qt::AlignHCenter);
++        if (opacity) layout->addWidget(new NovaVerticalSlider(opacity, i18n("Opacity"), 1.0, sliders), 1, Qt::AlignHCenter);
 +    }
++    sliders->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
++    return sliders;
 +}
 +
 +/**
@@ -406,11 +403,16 @@ index 2c48914..8601830 100644
 +    {
 +        if (!m_mainWindow || !m_container) return;
 +        m_busy = true;
-+        QVBoxLayout *layout = static_cast<QVBoxLayout *>(m_container->layout());
-+        int index = 0;
-+        for (const char *name : {"editToolBar", "BrushesAndStuff"}) {
-+            KisToolBar *toolBar = m_mainWindow->findChild<KisToolBar *>(QLatin1String(name));
-+            if (!toolBar) continue;
++        // undo/redo: top of the panel column; the rest of the brush toolbar:
++        // the "more" (3 dots) popup, as a normal horizontal toolbar
++        struct Target { const char *name; QWidget *parent; Qt::Orientation orientation; };
++        const Target targets[] = {
++            {"editToolBar", m_container, Qt::Vertical},
++            {"BrushesAndStuff", m_moreContainer ? m_moreContainer.data() : m_container.data(), Qt::Horizontal},
++        };
++        for (const Target &target : targets) {
++            KisToolBar *toolBar = m_mainWindow->findChild<KisToolBar *>(QLatin1String(target.name));
++            if (!toolBar || !target.parent) continue;
 +            if (!m_watched.contains(toolBar)) {
 +                toolBar->installEventFilter(this);
 +                m_watched.append(toolBar);
@@ -423,24 +425,25 @@ index 2c48914..8601830 100644
 +            if (m_mainWindow->toolBarArea(toolBar) != Qt::NoToolBarArea) {
 +                m_mainWindow->removeToolBar(toolBar);
 +            }
-+            if (toolBar->parentWidget() != m_container) {
-+                toolBar->setParent(m_container);
-+                layout->insertWidget(index, toolBar);
++            QBoxLayout *layout = static_cast<QBoxLayout *>(target.parent->layout());
++            if (toolBar->parentWidget() != target.parent) {
++                toolBar->setParent(target.parent);
 +            }
-+            toolBar->setOrientation(Qt::Vertical);
++            if (layout->indexOf(toolBar) < 0) {
++                layout->insertWidget(0, toolBar, 0, Qt::AlignHCenter);
++            }
++            toolBar->setOrientation(target.orientation);
 +            toolBar->setMovable(false);
 +            toolBar->setFloatable(false);
 +            if (toolBar->objectName() == QLatin1String("BrushesAndStuff")) {
-+                adaptBrushToolBarToColumn(toolBar, m_mainWindow);
-+            }
-+            if (layout->indexOf(toolBar) < 0) {
-+                layout->insertWidget(index, toolBar);
++                adaptBrushToolBarForPanel(toolBar, m_mainWindow);
 +            }
 +            toolBar->show();
-+            index++;
 +        }
 +        m_busy = false;
 +    }
++
++    void setMoreContainer(QWidget *container) { m_moreContainer = container; }
 +
 +protected:
 +    bool eventFilter(QObject *watched, QEvent *event) override
@@ -468,6 +471,7 @@ index 2c48914..8601830 100644
 +private:
 +    QPointer<QMainWindow> m_mainWindow;
 +    QPointer<QWidget> m_container;
++    QPointer<QWidget> m_moreContainer;
 +    QList<QPointer<KisToolBar>> m_watched;
 +    bool m_busy {false};
 +    bool m_pending {false};
@@ -577,18 +581,18 @@ index 2c48914..8601830 100644
 +        const QRect available = screen ? screen->availableGeometry() : area;
 +
 +        KisConfig cfg(true);
-+        const bool placedBefore = cfg.readEntry("androidBrushPanelPlaced2", false);
++        const bool placedBefore = cfg.readEntry("androidBrushPanelPlaced3", false);
 +        const bool onScreen = m_dock->isFloating() && m_dock->width() > 20 && m_dock->height() > 100
 +                              && available.intersects(m_dock->frameGeometry());
 +
 +        if (force || !placedBefore || !onScreen) {
 +            m_dock->setFloating(true);
 +            m_dock->adjustSize();
-+            const int top = area.top() + area.height() / 10;
-+            const int width = qMax(m_dock->sizeHint().width(), 48);
-+            const int height = qMax(300, area.bottom() - top - area.height() / 20);
++            const int width = qMax(m_dock->sizeHint().width(), 78);
++            const int height = qMax(300, int(area.height() * 0.85 * 0.7));
++            const int top = area.top() + (area.height() - height) / 2;
 +            m_dock->setGeometry(area.left() + 8, top, width, height);
-+            KisConfig(false).writeEntry("androidBrushPanelPlaced2", true);
++            KisConfig(false).writeEntry("androidBrushPanelPlaced3", true);
 +        }
 +        m_dock->show();
 +        m_dock->raise();
@@ -635,19 +639,43 @@ index 2c48914..8601830 100644
 +    }
 +    dock->setTitleBarWidget(titleBar);
 +
++    // Column, everything centered: undo, redo | more (3 dots) | size | opacity | color sampler
 +    QWidget *container = new QWidget(dock);
 +    QVBoxLayout *layout = new QVBoxLayout(container);
-+    layout->setContentsMargins(2, 2, 2, 2);
++    layout->setContentsMargins(1, 1, 1, 1);
 +    layout->setSpacing(4);
 +    dock->setWidget(container);
++
++    // "More": everything else of the brush toolbar (gradient, pattern, colors,
++    // brush editor, presets, blending mode, alpha lock, reload) in a popup
++    QWidget *moreContent = new QWidget();
++    QVBoxLayout *moreLayout = new QVBoxLayout(moreContent);
++    moreLayout->setContentsMargins(6, 6, 6, 6);
++    KisPopupButton *moreButton = new KisPopupButton(container);
++    moreButton->setObjectName(QStringLiteral("KritaNovaBrushPanelMore"));
++    moreButton->setIcon(KisIconUtils::loadIcon("hamburger_menu_dots"));
++    moreButton->setToolTip(i18n("More brush options"));
++    moreButton->setAutoRaise(true);
++    moreButton->setArrowVisible(false);
++    moreButton->setFixedSize(36, 36);
++    moreButton->setIconSize(QSize(22, 22));
++    moreButton->setPopupTitleBar(i18n("Brush Options"));
++    moreButton->setPopupWidget(moreContent);
++    // the popup is sized from its content: lay the toolbar out before it is placed
++    QObject::connect(moreButton, &KisPopupButton::sigPopupWidgetShown, moreContent, [moreContent]() {
++        moreContent->adjustSize();
++    });
++    layout->addWidget(moreButton, 0, Qt::AlignHCenter);
 +
 +    mainWindow->addDockWidget(Qt::LeftDockWidgetArea, dock);
 +
 +    BrushPanelToolBarKeeper *keeper = new BrushPanelToolBarKeeper(mainWindow, container);
-+    keeper->relocate();
++    keeper->setMoreContainer(moreContent);
++    keeper->relocate(); // undo/redo land above the "more" button
++
++    layout->addWidget(createBrushSliders(mainWindow, container), 1, Qt::AlignHCenter);
 +
 +    // colour sampler button at the bottom of the panel
-+    layout->addSpacing(6);
 +    layout->addWidget(new NovaColorSamplerButton(viewManager, container), 0, Qt::AlignHCenter);
 +
 +    // Show it once the main window is on screen: a floating dock is a window
@@ -679,7 +707,7 @@ index 2c48914..8601830 100644
  KisMainWindow::KisMainWindow(QUuid uuid)
      : KXmlGuiWindow()
      , d(new Private(this, uuid))
-@@ -608,6 +1214,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
+@@ -608,6 +1238,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
          }
      }
  
@@ -695,6 +723,23 @@ index 2c48914..8601830 100644
      plugActionList("toolbarlist", toolbarList);
      d->toolbarList = toolbarList;
  
+diff --git a/libs/ui/KisTouchFriendlyStyle.cpp b/libs/ui/KisTouchFriendlyStyle.cpp
+index 5f08e41..ce54c82 100644
+--- a/libs/ui/KisTouchFriendlyStyle.cpp
++++ b/libs/ui/KisTouchFriendlyStyle.cpp
+@@ -214,7 +214,11 @@ int KisTouchFriendlyStyle::pixelMetric(PixelMetric metric, const QStyleOption *o
+     case PM_SplitterWidth:
+         return qMax(value, TOUCH_HANDLE_EXTENT);
+     case PM_DockWidgetFrameWidth:
+-        // only used for floating dockers with a custom title bar (Krita's)
++        // only used for floating dockers with a custom title bar (Krita's);
++        // the Brush Panel (patch 15) has a thinner one
++        if (widget && widget->objectName() == QLatin1String("KritaNovaBrushPanel")) {
++            return qMax(value, FLOATING_DOCK_FRAME / 2);
++        }
+         return qMax(value, FLOATING_DOCK_FRAME);
+     default:
+         return value;
 diff --git a/libs/widgetutils/xmlgui/ktoolbar.cpp b/libs/widgetutils/xmlgui/ktoolbar.cpp
 index 8f35b65..aa1881f 100644
 --- a/libs/widgetutils/xmlgui/ktoolbar.cpp

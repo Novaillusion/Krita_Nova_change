@@ -10,32 +10,11 @@ layouts and workspaces (patch 15).
    removeStatusBarItem() takes them out of it again (the zoom widget belongs
    to the view and is swapped on every view change). They stay in
    m_statusBarItems, so canvas-only mode still hides/shows them.
-2. KisMainWindow (patch 15's Android top bar setup) adds an expanding spacer
-   and that container to the top bar.
+2. Patch 15's Android top bar setup adds an expanding spacer and that
+   container (found by its object name) to the top bar.
 
 Desktop builds are unchanged.
 
-diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 8601830..08936c5 100644
---- a/libs/ui/KisMainWindow.cpp
-+++ b/libs/ui/KisMainWindow.cpp
-@@ -534,6 +534,16 @@ void adaptBrushToolBarToColumn(KisToolBar *toolBar, QMainWindow *mainWindow)
-                 action->setVisible(false);
-             }
-         }
-+
-+        // Image size, canvas rotation and zoom from the status bar (KisStatusBar
-+        // parks them in this widget on Android), at the right end of the top bar
-+        if (QWidget *statusItems = mainWindow->findChild<QWidget *>(QStringLiteral("KritaNovaStatusItems"))) {
-+            QWidget *spacer = new QWidget(topBar);
-+            spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-+            topBar->addWidget(spacer);
-+            topBar->addWidget(statusItems);
-+            statusItems->show();
-+        }
-     }
- 
-     Q_FOREACH (QAction *action, toolBar->actions()) {
 diff --git a/libs/ui/kis_statusbar.cc b/libs/ui/kis_statusbar.cc
 index 7ecc1f1..3fca168 100644
 --- a/libs/ui/kis_statusbar.cc
