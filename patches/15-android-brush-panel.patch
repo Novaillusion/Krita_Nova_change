@@ -37,7 +37,8 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
 4. Panel layout, centered: a grip to drag it by (no title, no close
    button), Undo, Redo (the "editToolBar"), a "more" button (3 dots), tall
    vertical Size and Opacity sliders, the foreground/background color squares
-   (the "dual" action, taken out of the brush toolbar), the color sampler
+   (the "dual" action, taken out of the brush toolbar; the foreground square
+   now overlaps a quarter of the background square), the color sampler
    button. The more button (KisPopupButton, no title bar, no box border)
    opens one row: the rest of the brush toolbar as a normal horizontal
    toolbar (gradient, pattern, brush editor, presets, blending mode, alpha
@@ -77,10 +78,10 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
 Desktop builds are unchanged.
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 2c48914..086424b 100644
+index 2c48914..e0ff99b 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
-@@ -20,6 +20,26 @@
+@@ -20,6 +20,27 @@
  #include <QScreen>
  #include <QDialog>
  #include <QDockWidget>
@@ -104,10 +105,11 @@ index 2c48914..086424b 100644
 +#include <kis_slider_spin_box.h>
 +#include "widgets/kis_widget_chooser.h"
 +#include "widgets/kis_cmb_composite.h"
++#include "widgets/KoDualColorButton.h"
  #include <QIcon>
  #include <QInputDialog>
  #include <QLayout>
-@@ -366,6 +386,878 @@ public:
+@@ -366,6 +387,887 @@ public:
      }
  };
  
@@ -476,6 +478,15 @@ index 2c48914..086424b 100644
 +            QWidgetAction *widgetAction = qobject_cast<QWidgetAction *>(action);
 +            QWidget *colors = widgetAction ? widgetAction->defaultWidget() : nullptr;
 +            toolBar->removeAction(action); // releases the widget
++            if (KoDualColorButton *dual = qobject_cast<KoDualColorButton *>(colors)) {
++                // foreground square on top of the background square, covering
++                // a quarter of it (they only touched at a corner before)
++                const int side = 24;
++                dual->foregroundRect = QRect(0, 0, side, side);
++                dual->backgroundRect = QRect(side / 2, side / 2, side, side);
++                dual->setFixedSize(side + side / 2 + 2, side + side / 2 + 2);
++                dual->update();
++            }
 +            if (colors) {
 +                m_colorSlot->layout()->addWidget(colors);
 +                m_colorSlot->layout()->setAlignment(colors, Qt::AlignHCenter);
@@ -986,7 +997,7 @@ index 2c48914..086424b 100644
  KisMainWindow::KisMainWindow(QUuid uuid)
      : KXmlGuiWindow()
      , d(new Private(this, uuid))
-@@ -608,6 +1500,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
+@@ -608,6 +1510,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
          }
      }
  
