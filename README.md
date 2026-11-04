@@ -21,6 +21,7 @@ prebuilt Android dependencies (Qt5, KF5, …) itself.
 | `12-preset-preview-quick-brush.patch` | Live stroke preview and round tip icon for Quick Brush presets (e.g. "b) Basic-1"); cleaner thumbnail fallback |
 | `13-line-tool-shortcut-scope.patch` | The Line tool shortcut only works while the Brush, Eraser, Multibrush or Dynamic Brush tool is active (toolbox button unchanged) |
 | `14-floating-docker-resize.patch` | Android: resize undocked dockers by dragging a wide band along their edges (taps there still reach buttons) |
+| `15-android-brush-panel.patch` | Android: top bar = New/Open/Save + mirror/wrap, layouts, workspaces; Undo/Redo and the brush toolbar move into a floating narrow Brush Panel with tall vertical Size and Opacity sliders and a one-shot color sampler button (left edge on first run) |
 
 ## Get an APK
 
