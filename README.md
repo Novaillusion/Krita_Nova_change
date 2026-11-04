@@ -23,6 +23,7 @@ prebuilt Android dependencies (Qt5, KF5, …) itself.
 | `14-floating-docker-resize.patch` | Android: resize undocked dockers by dragging a wide band along their edges (taps there still reach buttons) |
 | `15-android-brush-panel.patch` | Android: top bar = New/Open/Save + mirror/wrap, layouts, workspaces; Undo/Redo and the brush toolbar move into a floating narrow Brush Panel with tall vertical Size and Opacity sliders and a one-shot color sampler button (left edge on first run) |
 | `16-status-items-in-top-bar.patch` | Android: image size, canvas rotation and zoom move from the bottom-right status bar to the right end of the top bar |
+| `17-nova-splash-screen.patch` | Krita Nova loading screen (artwork by novaillusion); no Krita logo/banner, version and loading text at the bottom right |
 
 ## Get an APK
 
