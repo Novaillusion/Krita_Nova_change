@@ -9,7 +9,11 @@ the panel had a white border.
    finger-sized close button (icon window-close) on the right that hides the
    popup. A frame with a title bar has no box border. adjustPosition() adds the
    bar's height to the popup size.
-2. KisPaintopBox: on Android, the brush editor uses the title "Brush Settings".
+2. On Android, a frame with a title bar is a frameless window: Krita's
+   Android Qt draws its own white frame (with a thicker top edge to drag by)
+   around decorated windows, which was the remaining white border. Dragging
+   the title bar moves the window instead.
+3. KisPaintopBox: on Android, the brush editor uses the title "Brush Settings".
    Desktop builds are unchanged.
 
 diff --git a/libs/ui/kis_paintop_box.cc b/libs/ui/kis_paintop_box.cc
@@ -28,10 +32,10 @@ index a848db3..def7065 100644
      m_brushEditorPopupButton->setPopupWidgetDetached(cfg.paintopPopupDetached());
  
 diff --git a/libs/widgetutils/KisPopupButton.cpp b/libs/widgetutils/KisPopupButton.cpp
-index f653607..8a0745d 100644
+index f653607..f1aa1c0 100644
 --- a/libs/widgetutils/KisPopupButton.cpp
 +++ b/libs/widgetutils/KisPopupButton.cpp
-@@ -11,6 +11,11 @@
+@@ -11,7 +11,13 @@
  #include <QApplication>
  #include <QFrame>
  #include <QHBoxLayout>
@@ -41,9 +45,11 @@ index f653607..8a0745d 100644
 +#include <klocalizedstring.h>
 +#include <kis_icon_utils.h>
  #include <QKeyEvent>
++#include <QMouseEvent>
  #include <QScreen>
  #include <QStyleOption>
-@@ -24,7 +29,11 @@
+ #include <QStylePainter>
+@@ -24,7 +30,13 @@
  
  class KisPopupButtonFrame : public QFrame
  {
@@ -53,10 +59,12 @@ index f653607..8a0745d 100644
 +    QLabel *titleLabel {nullptr};
 +    bool isMenu {false};
 +    bool detached {false};
++    bool m_dragging {false};
++    QPoint m_dragOffset;
  
  public:
      KisPopupButtonFrame(QWidget *parent, bool detach, bool popupIsMenu)
-@@ -32,14 +41,62 @@ public:
+@@ -32,14 +44,70 @@ public:
      {
          setObjectName("KisPopupButtonFrame");
          setProperty("_kis_excludeFromLayoutThumbnail", true);
@@ -108,6 +116,14 @@ index f653607..8a0745d 100644
 +                barLayout->addWidget(closeButton);
 +
 +                frameLayout->insertWidget(0, titleBar);
++                titleBar->installEventFilter(this); // drag to move
++#ifdef Q_OS_ANDROID
++                if (!(windowFlags() & Qt::FramelessWindowHint)) {
++                    const bool wasVisible = isVisible();
++                    setDetached(detached, isMenu); // re-create without the platform frame
++                    if (wasVisible) show();
++                }
++#endif
 +            }
 +            titleLabel->setText(title);
 +        }
@@ -120,7 +136,7 @@ index f653607..8a0745d 100644
  #if defined Q_OS_ANDROID || defined Q_OS_MACOS
          // for some reason when calling destroy() the platform window isn't
          // hidden first, this corrupts state of the window stack
-@@ -52,23 +109,30 @@ public:
+@@ -52,24 +120,70 @@ public:
          // shadows.
          destroy();
  
@@ -137,7 +153,14 @@ index f653607..8a0745d 100644
 -                setFrameStyle(QFrame::Box | QFrame::Plain);
 -            }
 -        }
-+        setWindowFlags(detach ? Qt::Dialog : Qt::Popup);
++        Qt::WindowFlags flags = detach ? Qt::Dialog : Qt::Popup;
++#ifdef Q_OS_ANDROID
++        // Krita Nova: Krita's Android Qt draws a white frame (with a thicker
++        // top edge to drag by) around decorated windows. A popup with our own
++        // title bar doesn't need it: the title bar moves the window instead.
++        if (titleBar) flags |= Qt::FramelessWindowHint;
++#endif
++        setWindowFlags(flags);
 +        detached = detach;
 +        updateFrameStyle();
  
@@ -162,9 +185,42 @@ index f653607..8a0745d 100644
 +    }
 +
  protected:
++    bool eventFilter(QObject *watched, QEvent *event) override
++    {
++        if (watched == titleBar) {
++            switch (event->type()) {
++            case QEvent::MouseButtonPress: {
++                QMouseEvent *e = static_cast<QMouseEvent *>(event);
++                if (e->button() == Qt::LeftButton) {
++                    m_dragOffset = e->globalPos() - frameGeometry().topLeft();
++                    m_dragging = true;
++                    return true;
++                }
++                break;
++            }
++            case QEvent::MouseMove:
++                if (m_dragging) {
++                    move(static_cast<QMouseEvent *>(event)->globalPos() - m_dragOffset);
++                    return true;
++                }
++                break;
++            case QEvent::MouseButtonRelease:
++                if (m_dragging) {
++                    m_dragging = false;
++                    return true;
++                }
++                break;
++            default:
++                break;
++            }
++        }
++        return QFrame::eventFilter(watched, event);
++    }
++
      void keyPressEvent(QKeyEvent *event) override
      {
-@@ -101,6 +165,7 @@ struct KisPopupButton::Private {
+         if (event->matches(QKeySequence::Cancel)) {
+@@ -101,6 +215,7 @@ struct KisPopupButton::Private {
      bool arrowVisible { true };
      bool isPopupDetached { false };
      bool isDetachedGeometrySet { false };
@@ -172,7 +228,7 @@ index f653607..8a0745d 100644
  };
  
  KisPopupButton::KisPopupButton(QWidget* parent)
-@@ -148,6 +213,9 @@ void KisPopupButton::setPopupWidget(QWidget* widget)
+@@ -148,6 +263,9 @@ void KisPopupButton::setPopupWidget(QWidget* widget)
          m_d->popupWidget = widget;
  
          m_d->frame->layout()->addWidget(m_d->popupWidget);
@@ -182,7 +238,7 @@ index f653607..8a0745d 100644
  
          if (menu) {
              // The menu may decide to hide itself in response to user input.
-@@ -160,6 +228,14 @@ void KisPopupButton::setPopupWidget(QWidget* widget)
+@@ -160,6 +278,14 @@ void KisPopupButton::setPopupWidget(QWidget* widget)
      }
  }
  
@@ -197,7 +253,7 @@ index f653607..8a0745d 100644
  void KisPopupButton::setPopupWidgetWidth(int w)
  {
      m_d->frame->resize(w, m_d->frame->height());
-@@ -255,6 +331,7 @@ void KisPopupButton::adjustPosition()
+@@ -255,6 +381,7 @@ void KisPopupButton::adjustPosition()
      // Attach to the button if it's visible, else attach to the cursor.
      QPoint pos = this->isVisible() ? this->mapToGlobal(QPoint(0, this->size().height())) : QCursor().pos();
      QSize popSize = m_d->popupWidget->size();

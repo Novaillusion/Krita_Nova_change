@@ -52,7 +52,8 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
    The panel and the "more" popup have rounded corners (8 px) and a grey
    1.5 px outline: translucent window background, painted by
    RoundedPanelPainter (an event filter) instead of the widget's own
-   background and frame.
+   background and frame. The popup is a frameless window (no white Android
+   platform frame).
 5. mirror_actions, select_layout and workspaces are moved from the brush
    toolbar to the top bar (mainToolBar); the expanding spacer is hidden, so
    the vertical sliders get the panel's spare height. The image size,
@@ -66,7 +67,7 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
 Desktop builds are unchanged.
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 2c48914..86c6cb2 100644
+index 2c48914..1db7ccd 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
 @@ -20,6 +20,26 @@
@@ -96,7 +97,7 @@ index 2c48914..86c6cb2 100644
  #include <QIcon>
  #include <QInputDialog>
  #include <QLayout>
-@@ -366,6 +386,726 @@ public:
+@@ -366,6 +386,729 @@ public:
      }
  };
  
@@ -755,6 +756,9 @@ index 2c48914..86c6cb2 100644
 +    // is one row, "brush toolbar | x"
 +    if (QFrame *frame = qobject_cast<QFrame *>(moreContent->parentWidget())) {
 +        frame->setFrameStyle(QFrame::NoFrame);
++        // no white platform frame around it either (Krita's Android Qt adds one
++        // to decorated windows)
++        frame->setWindowFlag(Qt::FramelessWindowHint, true);
 +        RoundedPanelPainter::install(frame);
 +    }
 +    {
@@ -823,7 +827,7 @@ index 2c48914..86c6cb2 100644
  KisMainWindow::KisMainWindow(QUuid uuid)
      : KXmlGuiWindow()
      , d(new Private(this, uuid))
-@@ -608,6 +1348,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
+@@ -608,6 +1351,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
          }
      }
  
