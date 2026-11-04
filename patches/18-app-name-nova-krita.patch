@@ -157,7 +157,7 @@ index a8f4ed6..48509a7 100644
                              warningMessage().split("\n", Qt::SkipEmptyParts));
  
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index e0ff99b..af62937 100644
+index 66d4294..b10b010 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
 @@ -1962,7 +1962,7 @@ void KisMainWindow::setCanvasDetached(bool detach)

@@ -69,7 +69,8 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
    toolbar to the top bar (mainToolBar); the expanding spacer is hidden, so
    the vertical sliders get the panel's spare height. The image size,
    rotation and zoom items of patch 16 are added at the right end.
-6. A round button at the bottom of the panel shows the foreground color.
+6. A round grey button (the sliders' fill color, no outline) at the bottom of
+   the panel; a highlight ring shows while it waits for a sample.
    Tapping it switches to the Color Sampler tool; after one sample on the
    canvas (release of pen/mouse/touch on the canvas widget) it switches back
    to the previously active tool. Tapping it again cancels; choosing another
@@ -78,7 +79,7 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
 Desktop builds are unchanged.
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 2c48914..e0ff99b 100644
+index 2c48914..66d4294 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
 @@ -20,6 +20,27 @@
@@ -323,9 +324,6 @@ index 2c48914..e0ff99b 100644
 +        setFixedSize(34, 34);
 +        setCursor(Qt::PointingHandCursor);
 +        connect(this, &QAbstractButton::clicked, this, [this]() { toggleArmed(); });
-+        if (KisCanvasResourceProvider *resources = m_viewManager->canvasResourceProvider()) {
-+            connect(resources, &KisCanvasResourceProvider::sigFGColorChanged, this, [this]() { update(); });
-+        }
 +        if (toolManager()) connect(toolManager(), &KoToolManager::changedTool, this, [this]() {
 +            // the user picked another tool by hand: nothing to switch back from
 +            if (m_armed && toolManager() && toolManager()->activeToolId() != samplerId()) {
@@ -391,15 +389,18 @@ index 2c48914..e0ff99b 100644
 +    {
 +        QPainter p(this);
 +        p.setRenderHint(QPainter::Antialiasing, true);
-+        QColor color = palette().color(QPalette::WindowText);
-+        if (m_viewManager && m_viewManager->canvasResourceProvider()) {
-+            color = m_viewManager->canvasResourceProvider()->fgColor().toQColor();
-+        }
++        // the same grey as the Size/Opacity slider fill, no outline; while
++        // armed (waiting for a sample on the canvas) a highlight ring shows it
++        const QColor grey = palette().color(QPalette::WindowText).darker(120);
 +        const QRectF r = QRectF(rect()).adjusted(4, 4, -4, -4);
-+        p.setBrush(color);
-+        p.setPen(QPen(m_armed ? palette().color(QPalette::Highlight) : palette().color(QPalette::WindowText),
-+                      m_armed ? 3.0 : 1.5));
++        p.setPen(Qt::NoPen);
++        p.setBrush(grey);
 +        p.drawEllipse(r);
++        if (m_armed) {
++            p.setBrush(Qt::NoBrush);
++            p.setPen(QPen(palette().color(QPalette::Highlight), 3.0));
++            p.drawEllipse(r.adjusted(-1.5, -1.5, 1.5, 1.5));
++        }
 +    }
 +
 +private:
