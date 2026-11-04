@@ -1,0 +1,225 @@
+Krita Nova 11 - "Brush Settings" title bar on the brush editor panel (Android)
+
+The brush editor popup (KisPopupButtonFrame, Qt::Popup) was drawn with a
+QFrame::Box | Plain frame. A plain box uses the text color, so on dark themes
+the panel had a white border.
+
+1. KisPopupButton::setPopupTitleBar(title): the frame gets a bar on top in the
+   panel's own color (QPalette::Window), with the title centered and a
+   finger-sized close button (icon window-close) on the right that hides the
+   popup. A frame with a title bar has no box border. adjustPosition() adds the
+   bar's height to the popup size.
+2. KisPaintopBox: on Android, the brush editor uses the title "Brush Settings".
+   Desktop builds are unchanged.
+
+diff --git a/libs/ui/kis_paintop_box.cc b/libs/ui/kis_paintop_box.cc
+index a848db3..def7065 100644
+--- a/libs/ui/kis_paintop_box.cc
++++ b/libs/ui/kis_paintop_box.cc
+@@ -484,6 +484,10 @@ KisPaintopBox::KisPaintopBox(KisViewManager *viewManager, QWidget *parent, const
+ 
+     m_presetsEditor = new KisPaintOpPresetsEditor(m_resourceProvider, m_favoriteResourceManager, m_savePresetWidget, m_brushEditorPopupButton);
+     m_presetsEditor->setWindowTitle(i18n("Brush Editor"));
++#ifdef Q_OS_ANDROID
++    // Krita Nova: a "Brush Settings  [x]" bar instead of the white box frame
++    m_brushEditorPopupButton->setPopupTitleBar(i18n("Brush Settings"));
++#endif
+     m_brushEditorPopupButton->setPopupWidget(m_presetsEditor);
+     m_brushEditorPopupButton->setPopupWidgetDetached(cfg.paintopPopupDetached());
+ 
+diff --git a/libs/widgetutils/KisPopupButton.cpp b/libs/widgetutils/KisPopupButton.cpp
+index f653607..8a0745d 100644
+--- a/libs/widgetutils/KisPopupButton.cpp
++++ b/libs/widgetutils/KisPopupButton.cpp
+@@ -11,6 +11,11 @@
+ #include <QApplication>
+ #include <QFrame>
+ #include <QHBoxLayout>
++#include <QVBoxLayout>
++#include <QLabel>
++#include <QToolButton>
++#include <klocalizedstring.h>
++#include <kis_icon_utils.h>
+ #include <QKeyEvent>
+ #include <QScreen>
+ #include <QStyleOption>
+@@ -24,7 +29,11 @@
+ 
+ class KisPopupButtonFrame : public QFrame
+ {
+-    QHBoxLayout* frameLayout {0};
++    QVBoxLayout* frameLayout {0};
++    QWidget *titleBar {nullptr};
++    QLabel *titleLabel {nullptr};
++    bool isMenu {false};
++    bool detached {false};
+ 
+ public:
+     KisPopupButtonFrame(QWidget *parent, bool detach, bool popupIsMenu)
+@@ -32,14 +41,62 @@ public:
+     {
+         setObjectName("KisPopupButtonFrame");
+         setProperty("_kis_excludeFromLayoutThumbnail", true);
+-        frameLayout = new QHBoxLayout(this);
++        frameLayout = new QVBoxLayout(this);
+         frameLayout->setContentsMargins(0, 0, 0, 0);
++        frameLayout->setSpacing(0);
+ 
+         setDetached(detach, popupIsMenu);
+     }
+ 
++    // Krita Nova: "<title>  [x]" bar above the popup widget, same color as the panel
++    void setTitleBar(const QString &title)
++    {
++        if (title.isEmpty()) {
++            delete titleBar;
++            titleBar = nullptr;
++            titleLabel = nullptr;
++        } else {
++            if (!titleBar) {
++                titleBar = new QWidget(this);
++                titleBar->setObjectName("KisPopupButtonTitleBar");
++                titleBar->setAutoFillBackground(true);
++                titleBar->setBackgroundRole(QPalette::Window);
++
++                QHBoxLayout *barLayout = new QHBoxLayout(titleBar);
++                barLayout->setContentsMargins(6, 2, 4, 2);
++                barLayout->setSpacing(4);
++
++                titleLabel = new QLabel(titleBar);
++                titleLabel->setAlignment(Qt::AlignCenter);
++                QFont font = titleLabel->font();
++                font.setBold(true);
++                titleLabel->setFont(font);
++
++                QToolButton *closeButton = new QToolButton(titleBar);
++                closeButton->setObjectName("KisPopupButtonCloseButton");
++                closeButton->setAutoRaise(true);
++                closeButton->setIcon(KisIconUtils::loadIcon("window-close"));
++                closeButton->setToolTip(i18nc("@info:tooltip", "Close"));
++                // big enough for a finger
++                const int side = qMax(32, titleLabel->fontMetrics().height() * 2);
++                closeButton->setFixedSize(side, side);
++                closeButton->setIconSize(QSize(side * 5 / 8, side * 5 / 8));
++                connect(closeButton, &QToolButton::clicked, this, &QWidget::hide);
++
++                barLayout->addSpacing(side); // keeps the title centered over the panel
++                barLayout->addWidget(titleLabel, 1);
++                barLayout->addWidget(closeButton);
++
++                frameLayout->insertWidget(0, titleBar);
++            }
++            titleLabel->setText(title);
++        }
++        updateFrameStyle();
++    }
++
+     void setDetached(bool detach, bool popupIsMenu)
+     {
++        isMenu = popupIsMenu;
+ #if defined Q_OS_ANDROID || defined Q_OS_MACOS
+         // for some reason when calling destroy() the platform window isn't
+         // hidden first, this corrupts state of the window stack
+@@ -52,23 +109,30 @@ public:
+         // shadows.
+         destroy();
+ 
+-        if (detach) {
+-            setWindowFlags(Qt::Dialog);
+-            setFrameStyle(QFrame::NoFrame);        
+-        }
+-        else {
+-            setWindowFlags(Qt::Popup);
+-            // Menus already have a frame, don't need another.
+-            if (popupIsMenu) {
+-                setFrameStyle(QFrame::NoFrame);
+-            } else {
+-                setFrameStyle(QFrame::Box | QFrame::Plain);
+-            }
+-        }
++        setWindowFlags(detach ? Qt::Dialog : Qt::Popup);
++        detached = detach;
++        updateFrameStyle();
+ 
+         updateGeometry();
+     }
+ 
++    int titleBarHeight() const
++    {
++        return titleBar ? titleBar->sizeHint().height() : 0;
++    }
++
++    void updateFrameStyle()
++    {
++        // Menus already have a frame, don't need another; a popup with a
++        // title bar has no box frame either (it was drawn in the light text
++        // color, i.e. a white border on dark themes).
++        if (detached || isMenu || titleBar) {
++            setFrameStyle(QFrame::NoFrame);
++        } else {
++            setFrameStyle(QFrame::Box | QFrame::Plain);
++        }
++    }
++
+ protected:
+     void keyPressEvent(QKeyEvent *event) override
+     {
+@@ -101,6 +165,7 @@ struct KisPopupButton::Private {
+     bool arrowVisible { true };
+     bool isPopupDetached { false };
+     bool isDetachedGeometrySet { false };
++    QString popupTitle;
+ };
+ 
+ KisPopupButton::KisPopupButton(QWidget* parent)
+@@ -148,6 +213,9 @@ void KisPopupButton::setPopupWidget(QWidget* widget)
+         m_d->popupWidget = widget;
+ 
+         m_d->frame->layout()->addWidget(m_d->popupWidget);
++        if (!m_d->popupTitle.isEmpty()) {
++            m_d->frame->setTitleBar(m_d->popupTitle);
++        }
+ 
+         if (menu) {
+             // The menu may decide to hide itself in response to user input.
+@@ -160,6 +228,14 @@ void KisPopupButton::setPopupWidget(QWidget* widget)
+     }
+ }
+ 
++void KisPopupButton::setPopupTitleBar(const QString &title)
++{
++    m_d->popupTitle = title;
++    if (m_d->frame) {
++        m_d->frame->setTitleBar(title);
++    }
++}
++
+ void KisPopupButton::setPopupWidgetWidth(int w)
+ {
+     m_d->frame->resize(w, m_d->frame->height());
+@@ -255,6 +331,7 @@ void KisPopupButton::adjustPosition()
+     // Attach to the button if it's visible, else attach to the cursor.
+     QPoint pos = this->isVisible() ? this->mapToGlobal(QPoint(0, this->size().height())) : QCursor().pos();
+     QSize popSize = m_d->popupWidget->size();
++    popSize.rheight() += m_d->frame->titleBarHeight(); // Krita Nova
+     QRect popupRect(pos, popSize);
+ 
+     // Get the available geometry of the screen which contains the popup.
+diff --git a/libs/widgetutils/KisPopupButton.h b/libs/widgetutils/KisPopupButton.h
+index 8bd4860..02c9aa4 100644
+--- a/libs/widgetutils/KisPopupButton.h
++++ b/libs/widgetutils/KisPopupButton.h
+@@ -50,6 +50,13 @@ public:
+      */
+     void setArrowVisible(bool v);
+ 
++    /**
++     * Krita Nova: shows a bar above the popup with @p title centered and a
++     * close button on the right, in the panel's own color, instead of the
++     * plain box frame. Pass an empty title to remove the bar again.
++     */
++    void setPopupTitleBar(const QString &title);
++
+     bool isPopupWidgetVisible();
+ 
+ Q_SIGNALS:
