@@ -15,7 +15,13 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
    the top bar from stretching; an event filter (ParentChange, Move, explicit
    Hide) and the panel's start-up checks take them out of the main window's
    layout again. The dock has no allowed dock areas, is re-floated when
-   something docks it, and has no keyboard accelerator in its title.
+   something docks it, and has no keyboard accelerator in its title. Its
+   title bar is a plain "Brush Panel" label + close button (Krita's docker
+   title bar has float/dock and lock buttons, which could dock or lock it
+   with no way back).
+   Bringing it back after closing: Settings > Toolbars Shown > Brush Panel,
+   or switching on "Edit" / "Brushes and Stuff" there, shows it floating and
+   on screen again.
 2. BrushPanelShower shows the panel 400 ms after the main window is first
    shown (a floating dock is a window of its own and is not shown along with
    the main window; startup's window state / workspace restore may also hide
@@ -48,10 +54,10 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
 Desktop builds are unchanged.
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 2c48914..1fda919 100644
+index 2c48914..99bc1d9 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
-@@ -20,6 +20,21 @@
+@@ -20,6 +20,23 @@
  #include <QScreen>
  #include <QDialog>
  #include <QDockWidget>
@@ -59,6 +65,8 @@ index 2c48914..1fda919 100644
 +#include <QTimer>
 +#include <functional>
 +#include <QWidgetAction>
++#include <QLabel>
++#include <QToolButton>
 +#include <QLocale>
 +#include <QAbstractButton>
 +#include <QBoxLayout>
@@ -73,7 +81,7 @@ index 2c48914..1fda919 100644
  #include <QIcon>
  #include <QInputDialog>
  #include <QLayout>
-@@ -366,6 +381,493 @@ public:
+@@ -366,6 +383,540 @@ public:
      }
  };
  
@@ -388,6 +396,8 @@ index 2c48914..1fda919 100644
 +    {
 +    }
 +
++    std::function<void()> onToolBarShown;
++
 +    void relocate()
 +    {
 +        if (!m_mainWindow || !m_container) return;
@@ -432,6 +442,13 @@ index 2c48914..1fda919 100644
 +    bool eventFilter(QObject *watched, QEvent *event) override
 +    {
 +        const QEvent::Type type = event->type();
++        if (type == QEvent::ShowToParent && !m_busy && onToolBarShown) {
++            // "Show ... Toolbar" for a toolbar of a hidden panel: show the panel
++            QWidget *dock = m_container ? m_container->parentWidget() : nullptr;
++            if (dock && dock->isHidden()) {
++                QTimer::singleShot(0, this, [this]() { if (onToolBarShown) onToolBarShown(); });
++            }
++        }
 +        const bool suspicious = type == QEvent::ParentChange || type == QEvent::Move
 +            || (type == QEvent::Hide && static_cast<QWidget *>(watched)->isHidden());
 +        if (suspicious && !m_busy && !m_pending) {
@@ -480,6 +497,16 @@ index 2c48914..1fda919 100644
 +            schedule();
 +        }
 +        return QObject::eventFilter(watched, event);
++    }
++
++public:
++    /// Bring the panel back: floating, on screen, in front
++    void showPanel()
++    {
++        if (!m_dock || !m_mainWindow) return;
++        if (m_keeper) m_keeper->relocate();
++        place(false);
++        m_dock->activateWindow();
 +    }
 +
 +private:
@@ -535,8 +562,28 @@ index 2c48914..1fda919 100644
 +    dock->setAllowedAreas(Qt::NoDockWidgetArea); // floating only
 +    dock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable
 +                      | QDockWidget::DockWidgetClosable);
-+    KoDockWidgetTitleBar *titleBar = new KoDockWidgetTitleBar(dock);
-+    titleBar->setFont(KisUiFont::dockFont());
++    // Title + close button only: Krita's docker title bar adds float/dock and
++    // lock buttons, which on this always-floating panel could dock or lock it
++    // with no way back. Dragging the title bar still moves the panel.
++    QWidget *titleBar = new QWidget(dock);
++    titleBar->setObjectName(QStringLiteral("KritaNovaBrushPanelTitle"));
++    {
++        QHBoxLayout *titleLayout = new QHBoxLayout(titleBar);
++        titleLayout->setContentsMargins(4, 2, 2, 2);
++        titleLayout->setSpacing(2);
++        QLabel *title = new QLabel(i18nc("@title:window", "Brush Panel"), titleBar);
++        title->setFont(KisUiFont::dockFont());
++        title->setAlignment(Qt::AlignCenter);
++        title->setAttribute(Qt::WA_TransparentForMouseEvents); // drags reach the dock
++        QToolButton *closeButton = new QToolButton(titleBar);
++        closeButton->setAutoRaise(true);
++        closeButton->setIcon(KisIconUtils::loadIcon("window-close"));
++        closeButton->setToolTip(i18nc("@info:tooltip", "Hide the Brush Panel (Settings > Toolbars Shown brings it back)"));
++        closeButton->setFixedSize(26, 26);
++        QObject::connect(closeButton, &QToolButton::clicked, dock, &QDockWidget::close);
++        titleLayout->addWidget(title, 1);
++        titleLayout->addWidget(closeButton);
++    }
 +    dock->setTitleBarWidget(titleBar);
 +
 +    QWidget *container = new QWidget(dock);
@@ -557,7 +604,15 @@ index 2c48914..1fda919 100644
 +    // Show it once the main window is on screen: a floating dock is a window
 +    // of its own and is not shown along with the main window, and the saved
 +    // window state / workspace restored during startup may hide or re-dock it.
-+    new BrushPanelShower(mainWindow, dock, keeper);
++    BrushPanelShower *shower = new BrushPanelShower(mainWindow, dock, keeper);
++    keeper->onToolBarShown = [shower]() { shower->showPanel(); };
++
++    // Settings > Toolbars Shown > Brush Panel: also put it back on screen
++    QAction *toggle = dock->toggleViewAction();
++    toggle->setText(i18n("Brush Panel"));
++    QObject::connect(toggle, &QAction::triggered, shower, [shower](bool checked) {
++        if (checked) QTimer::singleShot(0, shower, [shower]() { shower->showPanel(); });
++    });
 +    return dock;
 +}
 +
@@ -567,7 +622,7 @@ index 2c48914..1fda919 100644
  KisMainWindow::KisMainWindow(QUuid uuid)
      : KXmlGuiWindow()
      , d(new Private(this, uuid))
-@@ -608,6 +1110,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
+@@ -608,6 +1159,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
          }
      }
  
