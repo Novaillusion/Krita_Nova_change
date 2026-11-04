@@ -1,0 +1,51 @@
+Krita Nova 13 - Line tool shortcut only from the painting tools
+
+The Line tool's activation shortcut (V by default, or whatever the user
+assigned) switched to the Line tool from any tool, e.g. while selecting,
+typing text or moving a layer.
+
+KoToolManager::CanvasData::activateToolActions() enables the tool-switch
+actions on every tool change. The "KritaShape/KisToolLine" action is now only
+enabled while the active tool is the Freehand Brush, the Eraser (patch 01),
+the Multibrush, the Dynamic Brush or
+the Line tool itself, so the shortcut does nothing elsewhere. The toolbox
+button goes through KoToolAction, not this QAction, and still always works.
+
+diff --git a/libs/flake/KoToolManager.cpp b/libs/flake/KoToolManager.cpp
+index acaafb0..023ea10 100644
+--- a/libs/flake/KoToolManager.cpp
++++ b/libs/flake/KoToolManager.cpp
+@@ -66,6 +66,16 @@ public:
+         delete dummyToolWidget;
+     }
+ 
++    static bool isToolShortcutAllowed(const QString &toolId, const QString &activeToolId)
++    {
++        if (toolId != QLatin1String("KritaShape/KisToolLine")) return true;
++        return activeToolId == QLatin1String("KritaShape/KisToolBrush")
++            || activeToolId == QLatin1String("KritaShape/KisToolEraser")
++            || activeToolId == QLatin1String("KritaShape/KisToolMultiBrush")
++            || activeToolId == QLatin1String("KritaShape/KisToolDyna")
++            || activeToolId == QLatin1String("KritaShape/KisToolLine");
++    }
++
+     void activateToolActions()
+     {
+         toolActions.clear();
+@@ -91,8 +101,14 @@ public:
+ 
+                 if (KoToolRegistry::instance()->keys().contains(action->objectName())) {
+                     //qDebug() << "This action needs to be enabled!";
+-                    action->setEnabled(true);
+-                    toolActions << action->objectName();
++                    // Krita Nova: the Line tool's shortcut only works from the painting
++                    // tools (Brush, Eraser, Multibrush, Dynamic Brush) (the toolbox button is a separate KoToolAction and
++                    // always works).
++                    const bool enabled = isToolShortcutAllowed(action->objectName(), activeToolId);
++                    action->setEnabled(enabled);
++                    if (enabled) {
++                        toolActions << action->objectName();
++                    }
+                 }
+                 else {
+                     if (tools.contains(activeToolId) || action->property("always_enabled").toBool()) {

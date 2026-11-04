@@ -19,6 +19,7 @@ prebuilt Android dependencies (Qt5, KF5, …) itself.
 | `10-editor-stroke-previews.patch` | Live stroke previews (patch 02) also in the Brush Editor and the toolbar preset popup; preset lists default to Details view |
 | `11-brush-settings-title-bar.patch` | Android: brush editor panel without the white border, with a "Brush Settings" bar and a close (×) button on top |
 | `12-preset-preview-quick-brush.patch` | Live stroke preview and round tip icon for Quick Brush presets (e.g. "b) Basic-1"); cleaner thumbnail fallback |
+| `13-line-tool-shortcut-scope.patch` | The Line tool shortcut only works while the Brush, Eraser, Multibrush or Dynamic Brush tool is active (toolbox button unchanged) |
 
 ## Get an APK
 
