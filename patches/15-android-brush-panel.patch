@@ -46,9 +46,13 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
    KisDoubleSliderSpinBox objects as the hidden horizontal sliders
    (brushslider1/2): drag up/down to change the value relative to where the
    drag started (Size uses the same cubic curve); the value shows while
-   dragging. First placement: 78 px wide, 60% of the window height, vertically
-   centered at the left edge (kritarc: androidBrushPanelPlaced3). Thinner
-   frame (PM_DockWidgetFrameWidth 3 for this panel, 1 px content margins).
+   dragging. First placement: as narrow as the sliders allow (~52 px), 66% of
+   the window height, vertically centered at the left edge (kritarc:
+   androidBrushPanelPlaced4). Thin frame (PM_DockWidgetFrameWidth 3 for this
+   panel, 3 px side margins, extra room around the color squares/sampler).
+   The "more" popup closes on any press outside it, including pen/touch on
+   the canvas (Qt only does that for mouse presses), and the 3-dot button's
+   pressed/hover highlight is cleared when it closes (MorePopupCloser).
    The panel and the "more" popup have rounded corners (8 px) and a grey
    1.5 px outline: translucent window background, painted by
    RoundedPanelPainter (an event filter) instead of the widget's own
@@ -73,7 +77,7 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
 Desktop builds are unchanged.
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 2c48914..1651a17 100644
+index 2c48914..086424b 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
 @@ -20,6 +20,26 @@
@@ -103,7 +107,7 @@ index 2c48914..1651a17 100644
  #include <QIcon>
  #include <QInputDialog>
  #include <QLayout>
-@@ -366,6 +386,810 @@ public:
+@@ -366,6 +386,878 @@ public:
      }
  };
  
@@ -632,18 +636,20 @@ index 2c48914..1651a17 100644
 +        const QRect available = screen ? screen->availableGeometry() : area;
 +
 +        KisConfig cfg(true);
-+        const bool placedBefore = cfg.readEntry("androidBrushPanelPlaced3", false);
++        const bool placedBefore = cfg.readEntry("androidBrushPanelPlaced4", false);
 +        const bool onScreen = m_dock->isFloating() && m_dock->width() > 20 && m_dock->height() > 100
 +                              && available.intersects(m_dock->frameGeometry());
 +
 +        if (force || !placedBefore || !onScreen) {
 +            m_dock->setFloating(true);
 +            m_dock->adjustSize();
-+            const int width = qMax(m_dock->sizeHint().width(), 78);
-+            const int height = qMax(300, int(area.height() * 0.85 * 0.7));
++            // as narrow as the sliders allow; a bit taller so the color squares
++            // and the sampler button have room at the bottom
++            const int width = qMax(m_dock->sizeHint().width(), 52);
++            const int height = qMax(320, int(area.height() * 0.66));
 +            const int top = area.top() + (area.height() - height) / 2;
 +            m_dock->setGeometry(area.left() + 8, top, width, height);
-+            KisConfig(false).writeEntry("androidBrushPanelPlaced3", true);
++            KisConfig(false).writeEntry("androidBrushPanelPlaced4", true);
 +        }
 +        m_dock->show();
 +        m_dock->raise();
@@ -698,6 +704,71 @@ index 2c48914..1651a17 100644
 +private:
 +    RoundedPanelPainter(QObject *parent, qreal radius) : QObject(parent), m_radius(radius) {}
 +    qreal m_radius {8.0};
++};
++
++/**
++ * Closes the "more" popup on any press outside it. Qt closes popups on mouse
++ * presses only; on the canvas (which takes touch and tablet events itself)
++ * a tap with a finger or the pen did not close it. Also clears the 3-dot
++ * button's pressed/hover highlight when the popup goes away (touch input
++ * never sends the "leave" event that would clear it).
++ */
++class MorePopupCloser : public QObject
++{
++public:
++    MorePopupCloser(QWidget *popup, KisPopupButton *button)
++        : QObject(popup), m_popup(popup), m_button(button)
++    {
++        popup->installEventFilter(this);
++    }
++
++protected:
++    bool eventFilter(QObject *watched, QEvent *event) override
++    {
++        if (watched == m_popup) {
++            if (event->type() == QEvent::Show) {
++                qApp->installEventFilter(this);
++            } else if (event->type() == QEvent::Hide) {
++                qApp->removeEventFilter(this);
++                QTimer::singleShot(0, this, [this]() { clearButtonHighlight(); });
++            }
++            return false;
++        }
++
++        const QEvent::Type type = event->type();
++        if (type != QEvent::MouseButtonPress && type != QEvent::TabletPress
++            && type != QEvent::TouchBegin) {
++            return false;
++        }
++        QWidget *target = qobject_cast<QWidget *>(watched);
++        if (!target || !m_popup || !m_popup->isVisible()) return false;
++
++        // inside the popup, or one of its own popups (blending mode list,
++        // brush editor, presets...): keep it open
++        if (target->window() == m_popup || m_popup->isAncestorOf(target)) return false;
++        for (QWidget *w = target->window()->parentWidget(); w; w = w->parentWidget()) {
++            if (w == m_popup) return false;
++        }
++        // the 3-dot button toggles the popup itself
++        if (m_button && (target == m_button || m_button->isAncestorOf(target))) return false;
++
++        m_popup->hide();
++        return false; // the press still reaches what was tapped
++    }
++
++private:
++    void clearButtonHighlight()
++    {
++        if (!m_button) return;
++        m_button->setDown(false);
++        QEvent leave(QEvent::Leave);
++        QApplication::sendEvent(m_button, &leave);
++        m_button->setAttribute(Qt::WA_UnderMouse, false);
++        m_button->update();
++    }
++
++    QPointer<QWidget> m_popup;
++    QPointer<KisPopupButton> m_button;
 +};
 +
 +/// Title bar of the Brush Panel: an empty strip with a small grip mark.
@@ -819,7 +890,7 @@ index 2c48914..1651a17 100644
 +    // Column, everything centered: undo, redo | more (3 dots) | size | opacity | color sampler
 +    QWidget *container = new QWidget(dock);
 +    QVBoxLayout *layout = new QVBoxLayout(container);
-+    layout->setContentsMargins(1, 1, 1, 1);
++    layout->setContentsMargins(3, 2, 3, 8); // thin sides, room at the bottom
 +    layout->setSpacing(4);
 +    dock->setWidget(container);
 +
@@ -846,6 +917,7 @@ index 2c48914..1651a17 100644
 +        // to decorated windows)
 +        frame->setWindowFlag(Qt::FramelessWindowHint, true);
 +        RoundedPanelPainter::install(frame);
++        new MorePopupCloser(frame, moreButton);
 +    }
 +    {
 +        QFrame *separator = new QFrame(moreContent);
@@ -880,7 +952,7 @@ index 2c48914..1651a17 100644
 +    QWidget *colorSlot = new QWidget(container);
 +    colorSlot->setObjectName(QStringLiteral("KritaNovaBrushPanelColors"));
 +    QVBoxLayout *colorLayout = new QVBoxLayout(colorSlot);
-+    colorLayout->setContentsMargins(0, 2, 0, 0);
++    colorLayout->setContentsMargins(0, 8, 0, 4);
 +    layout->addWidget(colorSlot, 0, Qt::AlignHCenter);
 +    keeper->setColorSlot(colorSlot);
 +    keeper->relocate();
@@ -914,7 +986,7 @@ index 2c48914..1651a17 100644
  KisMainWindow::KisMainWindow(QUuid uuid)
      : KXmlGuiWindow()
      , d(new Private(this, uuid))
-@@ -608,6 +1432,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
+@@ -608,6 +1500,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
          }
      }
  
