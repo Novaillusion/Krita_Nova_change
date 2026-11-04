@@ -1,0 +1,85 @@
+Krita Nova 21 - preset previews update only after a slider drag ends
+
+Changing the current preset (dragging the Size/Opacity slider, editing it in
+the brush editor) reports a change of that preset many times a second. Each
+change invalidated its live stroke preview (patch 02), and every re-render
+is a whole brush stroke rendered in the background, which made Krita lag
+while dragging.
+
+KisPresetChooser collects the changed presets and invalidates their previews
+400 ms after the last change, and not while a mouse button / pen / finger is
+still down. Until then the previous stroke stays on screen.
+
+diff --git a/libs/ui/widgets/kis_preset_chooser.cpp b/libs/ui/widgets/kis_preset_chooser.cpp
+index a99f049..382f62d 100644
+--- a/libs/ui/widgets/kis_preset_chooser.cpp
++++ b/libs/ui/widgets/kis_preset_chooser.cpp
+@@ -245,6 +245,10 @@ KisPresetChooser::KisPresetChooser(QWidget *parent)
+     // Any preset whose thumbnail/settings changed gets its stroke regenerated.
+     connect(m_chooser->tagFilterModel(), &QAbstractItemModel::dataChanged,
+             this, &KisPresetChooser::slotModelDataChanged);
++
++    m_invalidateCompressor.setSingleShot(true);
++    m_invalidateCompressor.setInterval(400);
++    connect(&m_invalidateCompressor, &QTimer::timeout, this, [this]() { flushPendingInvalidations(); });
+     connect(m_renderer, &KisPresetStrokeRenderer::sigPreviewReady,
+             this, &KisPresetChooser::slotStrokePreviewReady);
+ 
+@@ -320,11 +324,32 @@ void KisPresetChooser::slotModelDataChanged(const QModelIndex &topLeft, const QM
+     // slotCurrentPresetChanged() and resource saves report Thumbnail; an empty list means "everything".
+     if (!roles.isEmpty() && !roles.contains(Qt::UserRole + KisAbstractResourceModel::Thumbnail)) return;
+ 
++    // Don't re-render on every change: while a slider is dragged the current
++    // preset changes many times a second, and each render is a whole brush
++    // stroke. Keep showing the old stroke and render once things settle.
+     QAbstractItemModel *model = m_chooser->tagFilterModel();
+     for (int row = topLeft.row(); row <= bottomRight.row(); row++) {
+         const int id = model->index(row, 0).data(Qt::UserRole + KisAbstractResourceModel::Id).toInt();
++        m_pendingInvalidations.insert(id);
++    }
++    m_invalidateCompressor.start(); // restarts while changes keep coming
++}
++
++void KisPresetChooser::flushPendingInvalidations()
++{
++    // still dragging something (pen/finger/mouse down): wait for the release
++    if (QApplication::mouseButtons() != Qt::NoButton) {
++        m_invalidateCompressor.start();
++        return;
++    }
++    const QSet<int> ids = m_pendingInvalidations;
++    m_pendingInvalidations.clear();
++    for (int id : ids) {
+         m_renderer->invalidate(id);
+     }
++    if (!ids.isEmpty()) {
++        m_chooser->itemView()->viewport()->update(); // paint() queues the new renders
++    }
+ }
+ 
+ void KisPresetChooser::slotStrokePreviewReady(int resourceId)
+diff --git a/libs/ui/widgets/kis_preset_chooser.h b/libs/ui/widgets/kis_preset_chooser.h
+index 083ca6f..d3396a7 100644
+--- a/libs/ui/widgets/kis_preset_chooser.h
++++ b/libs/ui/widgets/kis_preset_chooser.h
+@@ -10,6 +10,8 @@
+ 
+ #include <QWidget>
+ #include <QPointer>
++#include <QTimer>
++#include <QSet>
+ 
+ #include <KoResource.h>
+ #include <KoID.h>
+@@ -98,6 +100,11 @@ protected:
+ private:
+     KisPresetStrokeRenderer *m_renderer {nullptr};
+     bool m_updatingFromRenderer {false};
++    // Krita Nova: live stroke previews are re-rendered only once changes to a
++    // preset (e.g. dragging the size/opacity slider) have settled
++    QTimer m_invalidateCompressor;
++    QSet<int> m_pendingInvalidations;
++    void flushPendingInvalidations();
+     KisResourceItemChooser *m_chooser {0};
+     KisPresetDelegate* m_delegate {0};
+     ViewMode m_mode;
