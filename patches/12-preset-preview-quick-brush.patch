@@ -1,0 +1,81 @@
+Krita Nova 12 - preset previews: Quick Brush (Basic-1) and a cleaner fallback
+
+"b) Basic-1" uses the Quick Brush engine (roundmarker). Patch 02's stroke
+renderer skipped that engine, and its fallback cut a wide strip out of the
+square thumbnail and stretched it over the row: a light background with a
+huge dark blob, which looked broken.
+
+1. KisPresetStrokeRenderer renders roundmarker presets live like any other
+   engine (only clone and experiment presets are still skipped).
+2. Quick Brush has no brush tip resource: its tip icon is a round dab in the
+   theme's text color.
+3. Fallback (while a stroke renders, and for clone/experiment presets): the
+   whole thumbnail at row height on the panel background, no stretched strip.
+
+diff --git a/libs/ui/widgets/kis_preset_chooser.cpp b/libs/ui/widgets/kis_preset_chooser.cpp
+index d51e6a6..a99f049 100644
+--- a/libs/ui/widgets/kis_preset_chooser.cpp
++++ b/libs/ui/widgets/kis_preset_chooser.cpp
+@@ -150,15 +150,19 @@ void KisPresetDelegate::paint(QPainter * painter, const QStyleOptionViewItem & o
+         if (!stroke.isNull()) {
+             painter->drawImage(strokeRect.topLeft(), stroke);
+         } else {
+-            // 2) Fallback while the stroke is rendering, or for engines without a live preview:
+-            //    cut a full-width strip out of the stored square thumbnail.
+-            const qreal strokeCenterY = 0.72; // 0 = top of thumbnail, 1 = bottom
+-            const qreal rowAspect = qreal(strokeRect.height()) / qreal(qMax(1, strokeRect.width()));
+-            const qreal srcW = preview.width();
+-            const qreal srcH = qMin(qreal(preview.height()), srcW * rowAspect);
+-            const qreal srcY = qBound(0.0, preview.height() * strokeCenterY - srcH / 2.0,
+-                                      preview.height() - srcH);
+-            painter->drawImage(QRectF(strokeRect), preview, QRectF(0.0, srcY, srcW, srcH));
++            // 2) Fallback while the stroke is rendering, or for engines without a live preview
++            //    (clone, experiment): the stored thumbnail, whole and at row height, on the panel
++            //    background. (Krita Nova: it used to be a stretched strip cut out of the
++            //    thumbnail, which looked like a broken, light-on-dark preview.)
++            painter->fillRect(strokeRect, option.palette.window());
++            QImage thumb = KisResourceThumbnailCache::instance()->getImage(
++                index, QSize(strokeRect.height(), strokeRect.height()) * devicePixelRatioF,
++                Qt::KeepAspectRatio, Qt::SmoothTransformation);
++            thumb.setDevicePixelRatio(devicePixelRatioF);
++            const QSizeF thumbSize = thumb.size() / devicePixelRatioF;
++            painter->drawImage(QPointF(strokeRect.right() - thumbSize.width() - 4,
++                                       strokeRect.y() + (strokeRect.height() - thumbSize.height()) / 2.0),
++                               thumb);
+         }
+ 
+         QString dirtyPresetIndicator;
+diff --git a/libs/ui/widgets/kis_preset_stroke_renderer.cpp b/libs/ui/widgets/kis_preset_stroke_renderer.cpp
+index 8f354b0..a23e783 100644
+--- a/libs/ui/widgets/kis_preset_stroke_renderer.cpp
++++ b/libs/ui/widgets/kis_preset_stroke_renderer.cpp
+@@ -54,7 +54,9 @@ Q_SIGNALS:
+ 
+ bool engineHasNoPreview(const QString &id)
+ {
+-    return id == "roundmarker" || id == "experimentbrush" || id == "duplicate";
++    // Krita Nova: "roundmarker" (Quick Brush, e.g. "b) Basic-1") renders fine with the
++    // freehand stroke strategy, it used to fall back to a cropped thumbnail.
++    return id == "experimentbrush" || id == "duplicate";
+ }
+ 
+ } // namespace
+@@ -157,6 +159,18 @@ QImage KisPresetStrokeRenderer::buildTipImage(KisPaintOpPresetSP preset)
+     // Presets store their brush tip as XML in the "brush_definition" property.
+     // Engines without that property (e.g. MyPaint) simply have no tip here.
+     const QString definition = preset->settings()->getString("brush_definition");
++    if (definition.isEmpty() && preset->paintOp().id() == "roundmarker") {
++        // Quick Brush has no brush tip resource: its tip is always a hard round dab
++        const int S = 128;
++        result = QImage(S, S, QImage::Format_ARGB32_Premultiplied);
++        result.fill(Qt::transparent);
++        QPainter p(&result);
++        p.setRenderHint(QPainter::Antialiasing, true);
++        p.setPen(Qt::NoPen);
++        p.setBrush(QGuiApplication::palette().color(QPalette::Text));
++        p.drawEllipse(QRectF(S * 0.1, S * 0.1, S * 0.8, S * 0.8));
++        return result;
++    }
+     if (!definition.isEmpty()) {
+         QDomDocument doc;
+         doc.setContent(definition);

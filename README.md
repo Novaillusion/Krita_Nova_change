@@ -18,6 +18,7 @@ prebuilt Android dependencies (Qt5, KF5, …) itself.
 | `09-palm-rejection.patch` | Palm rejection: touch on the canvas is ignored while the pen is down/hovering and shortly after, plus touches larger than a fingertip (Configure Krita → General → Tools) |
 | `10-editor-stroke-previews.patch` | Live stroke previews (patch 02) also in the Brush Editor and the toolbar preset popup; preset lists default to Details view |
 | `11-brush-settings-title-bar.patch` | Android: brush editor panel without the white border, with a "Brush Settings" bar and a close (×) button on top |
+| `12-preset-preview-quick-brush.patch` | Live stroke preview and round tip icon for Quick Brush presets (e.g. "b) Basic-1"); cleaner thumbnail fallback |
 
 ## Get an APK
 
