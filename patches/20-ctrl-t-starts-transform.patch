@@ -1,0 +1,55 @@
+Krita Nova 20 - Ctrl+T starts a transform right away
+
+After a transform was applied (Enter) or cancelled (Esc), the Transform tool
+stays active without a running transform, and pressing Ctrl+T again did
+nothing: the transform only restarted after another click/tap on the canvas
+(upstream bugs 343565, 375977). Switching to the tool from another tool
+already started it immediately.
+
+KisToolTransform::activate() now also listens to its own tool action
+("KisToolTransform", Ctrl+T by default): when it is triggered while the tool
+is active and no transform is running, a new transform starts at once, in the
+last used mode - exactly what the click on the canvas did.
+
+diff --git a/plugins/tools/tool_transform2/kis_tool_transform.cc b/plugins/tools/tool_transform2/kis_tool_transform.cc
+index dbe9957..940c1fa 100644
+--- a/plugins/tools/tool_transform2/kis_tool_transform.cc
++++ b/plugins/tools/tool_transform2/kis_tool_transform.cc
+@@ -838,6 +838,11 @@ void KisToolTransform::activate(const QSet<KoShape*> &shapes)
+                                       this, SLOT(slotMoveDiscreteRight()));
+     m_actionConnections.addConnection(action("movetool-move-right-more"), SIGNAL(triggered(bool)),
+                                       this, SLOT(slotMoveDiscreteRightMore()));
++    // Krita Nova: Ctrl+T while the Transform tool is already active (e.g.
++    // after applying or cancelling a transform) starts a new transform right
++    // away, instead of waiting for a click/tap on the canvas.
++    m_actionConnections.addConnection(action("KisToolTransform"), SIGNAL(triggered(bool)),
++                                      this, SLOT(slotToolActionRetriggered()));
+     m_actionConnections.addConnection(action("increase_brush_size"),
+                                       SIGNAL(triggered()),
+                                       this,
+@@ -855,6 +860,13 @@ void KisToolTransform::activate(const QSet<KoShape*> &shapes)
+     nextActivationTransformMode = KisToolTransform::FreeTransformMode;
+ }
+ 
++void KisToolTransform::slotToolActionRetriggered()
++{
++    if (m_strokeId || !image() || !currentNode()) return;
++    // same as clicking on the canvas with no transform running
++    startStroke(m_currentArgs.mode(), false);
++}
++
+ void KisToolTransform::deactivate()
+ {
+     endStroke();
+diff --git a/plugins/tools/tool_transform2/kis_tool_transform.h b/plugins/tools/tool_transform2/kis_tool_transform.h
+index f7d93c6..eacfce3 100644
+--- a/plugins/tools/tool_transform2/kis_tool_transform.h
++++ b/plugins/tools/tool_transform2/kis_tool_transform.h
+@@ -331,6 +331,7 @@ private Q_SLOTS:
+     void slotCancelTransform();
+     void slotRestartTransform();
+     void slotRestartAndContinueTransform();
++    void slotToolActionRetriggered();
+     void slotEditingFinished();
+ 
+     void slotMoveDiscreteUp();

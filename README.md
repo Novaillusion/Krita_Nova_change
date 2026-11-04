@@ -26,6 +26,7 @@ prebuilt Android dependencies (Qt5, KF5, …) itself.
 | `17-nova-splash-screen.patch` | Krita Nova loading screen (artwork by novaillusion); no Krita logo/banner, version and loading text at the bottom right |
 | `18-app-name-nova-krita.patch` | App name shown as "Nova Krita" (Android launcher, window titles, dialogs); settings and package id unchanged |
 | `19-faster-transform-tool.patch` | Faster Transform tool: multi-threaded resampling passes, bilinear filter for the low-resolution live preview (final result unchanged) |
+| `20-ctrl-t-starts-transform.patch` | Ctrl+T with the Transform tool already active starts a new transform at once (no extra tap on the canvas) |
 
 ## Get an APK
 
