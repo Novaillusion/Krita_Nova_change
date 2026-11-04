@@ -16,12 +16,11 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
    Hide) and the panel's start-up checks take them out of the main window's
    layout again. The dock has no allowed dock areas, is re-floated when
    something docks it, and has no keyboard accelerator in its title. Its
-   title bar is a plain "Brush Panel" label + close button (Krita's docker
-   title bar has float/dock and lock buttons, which could dock or lock it
-   with no way back).
+   title bar is a plain grip (Krita's docker title bar has float/dock and
+   lock buttons, which could dock or lock it with no way back).
    Like the dockers, the panel is hidden on the welcome page and shown once
    an image is open (follows the main window's widget stack).
-   Bringing it back after closing: Settings > Toolbars Shown > Brush Panel,
+   Bringing it back after hiding it: Settings > Toolbars Shown > Brush Panel,
    or switching on "Edit" / "Brushes and Stuff" there, shows it floating and
    on screen again.
 2. BrushPanelShower shows the panel 400 ms after the main window is first
@@ -29,17 +28,20 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
    the main window; startup's window state / workspace restore may also hide
    or re-dock it). The first time, or whenever it is off screen, it floats at
    the left edge (kritarc: androidBrushPanelPlaced3); otherwise it is
-   shown where it was. Closing it hides it for the session; Settings >
-   Toolbars Shown has an entry to bring it back.
+   shown where it was. Settings > Toolbars Shown > Brush Panel hides it for
+   the session and brings it back.
 3. KisToolBar::mainWindow() searches all ancestors for the main window, not
    just the direct parent; several code paths dereference it unchecked
    (context menu, saveState) and would crash for a toolbar in the panel.
 
-4. Panel layout, centered: Undo, Redo (the "editToolBar"), a "more" button
-   (3 dots), tall vertical Size and Opacity sliders, the color sampler
-   button. The more button (KisPopupButton, "Brush Options" title bar) opens
-   the rest of the brush toolbar as a normal horizontal toolbar: gradient,
-   pattern, colors, brush editor, presets, blending mode, alpha lock, reload.
+4. Panel layout, centered: a grip to drag it by (no title, no close
+   button), Undo, Redo (the "editToolBar"), a "more" button (3 dots), tall
+   vertical Size and Opacity sliders, the foreground/background color squares
+   (the "dual" action, taken out of the brush toolbar), the color sampler
+   button. The more button (KisPopupButton, no title bar, no box border)
+   opens one row: the rest of the brush toolbar as a normal horizontal
+   toolbar (gradient, pattern, brush editor, presets, blending mode, alpha
+   lock, reload), a separator and a close button.
    The sliders (NovaVerticalSlider, 45 px wide) are bound to the same
    KisDoubleSliderSpinBox objects as the hidden horizontal sliders
    (brushslider1/2): drag up/down to change the value relative to where the
@@ -60,7 +62,7 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
 Desktop builds are unchanged.
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 2c48914..2e3b4fb 100644
+index 2c48914..94e43a5 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
 @@ -20,6 +20,26 @@
@@ -90,7 +92,7 @@ index 2c48914..2e3b4fb 100644
  #include <QIcon>
  #include <QInputDialog>
  #include <QLayout>
-@@ -366,6 +386,616 @@ public:
+@@ -366,6 +386,682 @@ public:
      }
  };
  
@@ -430,20 +432,48 @@ index 2c48914..2e3b4fb 100644
 +                toolBar->setParent(target.parent);
 +            }
 +            if (layout->indexOf(toolBar) < 0) {
-+                layout->insertWidget(0, toolBar, 0, Qt::AlignHCenter);
++                layout->insertWidget(0, toolBar, 0, Qt::AlignCenter);
 +            }
 +            toolBar->setOrientation(target.orientation);
 +            toolBar->setMovable(false);
 +            toolBar->setFloatable(false);
 +            if (toolBar->objectName() == QLatin1String("BrushesAndStuff")) {
 +                adaptBrushToolBarForPanel(toolBar, m_mainWindow);
++                moveColorsToPanel(toolBar);
 +            }
 +            toolBar->show();
 +        }
 +        m_busy = false;
 +    }
 +
++    /// the foreground/background color squares ("dual") go to the panel itself
++    void moveColorsToPanel(KisToolBar *toolBar)
++    {
++        if (!m_colorSlot) return;
++        Q_FOREACH (QAction *action, toolBar->actions()) {
++            if (action->objectName() != QLatin1String("dual")) continue;
++            QWidgetAction *widgetAction = qobject_cast<QWidgetAction *>(action);
++            QWidget *colors = widgetAction ? widgetAction->defaultWidget() : nullptr;
++            toolBar->removeAction(action); // releases the widget
++            if (colors) {
++                m_colorSlot->layout()->addWidget(colors);
++                m_colorSlot->layout()->setAlignment(colors, Qt::AlignHCenter);
++                colors->show();
++            }
++        }
++        // the separators that framed it in the toolbar are no longer needed
++        QAction *previous = nullptr;
++        Q_FOREACH (QAction *action, toolBar->actions()) {
++            if (action->isSeparator() && previous && previous->isSeparator()) {
++                toolBar->removeAction(action);
++                continue;
++            }
++            previous = action;
++        }
++    }
++
 +    void setMoreContainer(QWidget *container) { m_moreContainer = container; }
++    void setColorSlot(QWidget *slot) { m_colorSlot = slot; }
 +
 +protected:
 +    bool eventFilter(QObject *watched, QEvent *event) override
@@ -472,6 +502,7 @@ index 2c48914..2e3b4fb 100644
 +    QPointer<QMainWindow> m_mainWindow;
 +    QPointer<QWidget> m_container;
 +    QPointer<QWidget> m_moreContainer;
++    QPointer<QWidget> m_colorSlot;
 +    QList<QPointer<KisToolBar>> m_watched;
 +    bool m_busy {false};
 +    bool m_pending {false};
@@ -607,6 +638,32 @@ index 2c48914..2e3b4fb 100644
 +    QElapsedTimer m_stackChanged;
 +};
 +
++/// Title bar of the Brush Panel: an empty strip with a small grip mark.
++/// Mouse events are not accepted, so QDockWidget moves the panel.
++class NovaPanelGrip : public QWidget
++{
++public:
++    explicit NovaPanelGrip(QWidget *parent) : QWidget(parent)
++    {
++        setFixedHeight(20);
++        setToolTip(i18n("Drag to move"));
++    }
++    QSize sizeHint() const override { return QSize(40, 20); }
++
++protected:
++    void paintEvent(QPaintEvent *) override
++    {
++        QPainter p(this);
++        p.setRenderHint(QPainter::Antialiasing, true);
++        QColor c = palette().color(QPalette::WindowText);
++        c.setAlpha(110);
++        p.setPen(Qt::NoPen);
++        p.setBrush(c);
++        const QRectF grip(width() / 2.0 - 12, height() / 2.0 - 1.5, 24, 3);
++        p.drawRoundedRect(grip, 1.5, 1.5);
++    }
++};
++
 +QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *viewManager, QStackedWidget *mainStack)
 +{
 +    QDockWidget *dock = new QDockWidget(i18nc("@title:window", "Brush Panel"), mainWindow);
@@ -618,25 +675,11 @@ index 2c48914..2e3b4fb 100644
 +    // Title + close button only: Krita's docker title bar adds float/dock and
 +    // lock buttons, which on this always-floating panel could dock or lock it
 +    // with no way back. Dragging the title bar still moves the panel.
-+    QWidget *titleBar = new QWidget(dock);
-+    titleBar->setObjectName(QStringLiteral("KritaNovaBrushPanelTitle"));
-+    {
-+        QHBoxLayout *titleLayout = new QHBoxLayout(titleBar);
-+        titleLayout->setContentsMargins(4, 2, 2, 2);
-+        titleLayout->setSpacing(2);
-+        QLabel *title = new QLabel(i18nc("@title:window", "Brush Panel"), titleBar);
-+        title->setFont(KisUiFont::dockFont());
-+        title->setAlignment(Qt::AlignCenter);
-+        title->setAttribute(Qt::WA_TransparentForMouseEvents); // drags reach the dock
-+        QToolButton *closeButton = new QToolButton(titleBar);
-+        closeButton->setAutoRaise(true);
-+        closeButton->setIcon(KisIconUtils::loadIcon("window-close"));
-+        closeButton->setToolTip(i18nc("@info:tooltip", "Hide the Brush Panel (Settings > Toolbars Shown brings it back)"));
-+        closeButton->setFixedSize(26, 26);
-+        closeButton->setObjectName(QStringLiteral("KritaNovaBrushPanelClose"));
-+        titleLayout->addWidget(title, 1);
-+        titleLayout->addWidget(closeButton);
-+    }
++    // No title and no close button, just a grip to drag the panel by (hide it
++    // with Settings > Toolbars Shown > Brush Panel). The top few pixels of a
++    // floating panel resize it (patch 14), so the grip is tall enough to have
++    // room to move it below that.
++    QWidget *titleBar = new NovaPanelGrip(dock);
 +    dock->setTitleBarWidget(titleBar);
 +
 +    // Column, everything centered: undo, redo | more (3 dots) | size | opacity | color sampler
@@ -649,8 +692,9 @@ index 2c48914..2e3b4fb 100644
 +    // "More": everything else of the brush toolbar (gradient, pattern, colors,
 +    // brush editor, presets, blending mode, alpha lock, reload) in a popup
 +    QWidget *moreContent = new QWidget();
-+    QVBoxLayout *moreLayout = new QVBoxLayout(moreContent);
-+    moreLayout->setContentsMargins(6, 6, 6, 6);
++    QHBoxLayout *moreLayout = new QHBoxLayout(moreContent);
++    moreLayout->setContentsMargins(6, 4, 4, 4);
++    moreLayout->setSpacing(6);
 +    KisPopupButton *moreButton = new KisPopupButton(container);
 +    moreButton->setObjectName(QStringLiteral("KritaNovaBrushPanelMore"));
 +    moreButton->setIcon(KisIconUtils::loadIcon("hamburger_menu_dots"));
@@ -659,8 +703,26 @@ index 2c48914..2e3b4fb 100644
 +    moreButton->setArrowVisible(false);
 +    moreButton->setFixedSize(36, 36);
 +    moreButton->setIconSize(QSize(22, 22));
-+    moreButton->setPopupTitleBar(i18n("Brush Options"));
 +    moreButton->setPopupWidget(moreContent);
++    // no title bar and no box border (drawn white on dark themes): the popup
++    // is one row, "brush toolbar | x"
++    if (QFrame *frame = qobject_cast<QFrame *>(moreContent->parentWidget())) {
++        frame->setFrameStyle(QFrame::NoFrame);
++    }
++    {
++        QFrame *separator = new QFrame(moreContent);
++        separator->setFrameShape(QFrame::VLine);
++        separator->setFrameShadow(QFrame::Plain);
++        separator->setFixedHeight(24);
++        QToolButton *closeMore = new QToolButton(moreContent);
++        closeMore->setAutoRaise(true);
++        closeMore->setIcon(KisIconUtils::loadIcon("window-close"));
++        closeMore->setToolTip(i18nc("@info:tooltip", "Close"));
++        closeMore->setFixedSize(30, 30);
++        QObject::connect(closeMore, &QToolButton::clicked, moreButton, &KisPopupButton::hidePopupWidget);
++        moreLayout->addWidget(separator, 0, Qt::AlignVCenter);
++        moreLayout->addWidget(closeMore, 0, Qt::AlignVCenter);
++    }
 +    // the popup is sized from its content: lay the toolbar out before it is placed
 +    QObject::connect(moreButton, &KisPopupButton::sigPopupWidgetShown, moreContent, [moreContent]() {
 +        moreContent->adjustSize();
@@ -675,6 +737,15 @@ index 2c48914..2e3b4fb 100644
 +
 +    layout->addWidget(createBrushSliders(mainWindow, container), 1, Qt::AlignHCenter);
 +
++    // foreground/background colors, taken out of the brush toolbar
++    QWidget *colorSlot = new QWidget(container);
++    colorSlot->setObjectName(QStringLiteral("KritaNovaBrushPanelColors"));
++    QVBoxLayout *colorLayout = new QVBoxLayout(colorSlot);
++    colorLayout->setContentsMargins(0, 2, 0, 0);
++    layout->addWidget(colorSlot, 0, Qt::AlignHCenter);
++    keeper->setColorSlot(colorSlot);
++    keeper->relocate();
++
 +    // colour sampler button at the bottom of the panel
 +    layout->addWidget(new NovaColorSamplerButton(viewManager, container), 0, Qt::AlignHCenter);
 +
@@ -684,9 +755,6 @@ index 2c48914..2e3b4fb 100644
 +    BrushPanelShower *shower = new BrushPanelShower(mainWindow, dock, keeper, mainStack);
 +    keeper->onToolBarShown = [shower]() { shower->toolBarShown(); };
 +
-+    if (QToolButton *closeButton = titleBar->findChild<QToolButton *>(QStringLiteral("KritaNovaBrushPanelClose"))) {
-+        QObject::connect(closeButton, &QToolButton::clicked, shower, [shower]() { shower->hideByUser(); });
-+    }
 +
 +    // Settings > Toolbars Shown > Brush Panel: also put it back on screen
 +    QAction *toggle = dock->toggleViewAction();
@@ -707,7 +775,7 @@ index 2c48914..2e3b4fb 100644
  KisMainWindow::KisMainWindow(QUuid uuid)
      : KXmlGuiWindow()
      , d(new Private(this, uuid))
-@@ -608,6 +1238,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
+@@ -608,6 +1304,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
          }
      }
  
