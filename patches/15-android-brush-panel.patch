@@ -12,10 +12,13 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
    Configure Toolbars keeps working. QMainWindow::restoreState() (window
    settings, workspaces) puts known toolbars back into the toolbar areas; an
    event filter catches the ParentChange and moves them into the panel again.
-2. First run: the panel floats at the left edge of the window. Its position
-   and size are then saved/restored with the window state like any docker
-   (kritarc: androidBrushPanelPlaced). Settings > Toolbars Shown has an entry
-   to bring the panel back after closing it.
+2. BrushPanelShower shows the panel 400 ms after the main window is first
+   shown (a floating dock is a window of its own and is not shown along with
+   the main window; startup's window state / workspace restore may also hide
+   or re-dock it). The first time, or whenever it is off screen, it floats at
+   the left edge, tall (kritarc: androidBrushPanelPlaced2); otherwise it is
+   shown where it was. Closing it hides it for the session; Settings >
+   Toolbars Shown has an entry to bring it back.
 3. KisToolBar::mainWindow() searches all ancestors for the main window, not
    just the direct parent; several code paths dereference it unchecked
    (context menu, saveState) and would crash for a toolbar in the panel.
@@ -41,7 +44,7 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
 Desktop builds are unchanged.
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 2c48914..fc6dfbd 100644
+index 2c48914..27f9093 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
 @@ -20,6 +20,21 @@
@@ -66,7 +69,7 @@ index 2c48914..fc6dfbd 100644
  #include <QIcon>
  #include <QInputDialog>
  #include <QLayout>
-@@ -366,6 +381,415 @@ public:
+@@ -366,6 +381,471 @@ public:
      }
  };
  
@@ -434,6 +437,72 @@ index 2c48914..fc6dfbd 100644
 +    bool m_pending {false};
 +};
 +
++/**
++ * Puts the Brush Panel on screen after the main window has been shown (and
++ * startup has restored the window state): floating, at the left edge, tall,
++ * the first time or whenever it ended up off screen; afterwards just shown
++ * where it was. Closing it with its title bar button hides it for the
++ * session; Settings > Toolbars Shown brings it back.
++ */
++class BrushPanelShower : public QObject
++{
++public:
++    BrushPanelShower(QMainWindow *mainWindow, QDockWidget *dock)
++        : QObject(dock), m_mainWindow(mainWindow), m_dock(dock)
++    {
++        mainWindow->installEventFilter(this);
++        if (mainWindow->isVisible()) schedule();
++    }
++
++protected:
++    bool eventFilter(QObject *watched, QEvent *event) override
++    {
++        if (watched == m_mainWindow && event->type() == QEvent::Show) {
++            schedule();
++        }
++        return QObject::eventFilter(watched, event);
++    }
++
++private:
++    void schedule()
++    {
++        if (m_done || !m_mainWindow) return;
++        m_done = true;
++        m_mainWindow->removeEventFilter(this);
++        // after the rest of startup (workspace restore, first view) has run
++        QTimer::singleShot(400, this, [this]() { place(); });
++    }
++
++    void place()
++    {
++        if (!m_dock || !m_mainWindow) return;
++        const QRect area = m_mainWindow->geometry();
++        QScreen *screen = m_mainWindow->screen();
++        const QRect available = screen ? screen->availableGeometry() : area;
++
++        KisConfig cfg(true);
++        const bool placedBefore = cfg.readEntry("androidBrushPanelPlaced2", false);
++        const bool onScreen = m_dock->isFloating() && m_dock->width() > 20 && m_dock->height() > 100
++                              && available.intersects(m_dock->frameGeometry());
++
++        if (!placedBefore || !onScreen) {
++            m_dock->setFloating(true);
++            m_dock->adjustSize();
++            const int top = area.top() + area.height() / 10;
++            const int width = qMax(m_dock->sizeHint().width(), 48);
++            const int height = qMax(300, area.bottom() - top - area.height() / 20);
++            m_dock->setGeometry(area.left() + 8, top, width, height);
++            KisConfig(false).writeEntry("androidBrushPanelPlaced2", true);
++        }
++        m_dock->show();
++        m_dock->raise();
++    }
++
++    QPointer<QMainWindow> m_mainWindow;
++    QPointer<QDockWidget> m_dock;
++    bool m_done {false};
++};
++
 +QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *viewManager)
 +{
 +    QDockWidget *dock = new QDockWidget(i18nc("@title:window", "Brush Panel"), mainWindow);
@@ -459,20 +528,10 @@ index 2c48914..fc6dfbd 100644
 +    layout->addSpacing(6);
 +    layout->addWidget(new NovaColorSamplerButton(viewManager, container), 0, Qt::AlignHCenter);
 +
-+    // First run: float it at the left edge. Later runs restore the saved place.
-+    KisConfig cfg(true);
-+    if (!cfg.readEntry("androidBrushPanelPlaced", false)) {
-+        dock->setFloating(true);
-+        QTimer::singleShot(0, dock, [dock, mainWindow]() {
-+            dock->adjustSize();
-+            const QRect area = mainWindow->geometry();
-+            const int top = area.top() + area.height() / 10;
-+            dock->move(area.left() + 8, top);
-+            // tall: the spare height goes to the Size and Opacity sliders
-+            dock->resize(dock->width(), area.bottom() - top - area.height() / 20);
-+            KisConfig(false).writeEntry("androidBrushPanelPlaced", true);
-+        });
-+    }
++    // Show it once the main window is on screen: a floating dock is a window
++    // of its own and is not shown along with the main window, and the saved
++    // window state / workspace restored during startup may hide or re-dock it.
++    new BrushPanelShower(mainWindow, dock);
 +    return dock;
 +}
 +
@@ -482,7 +541,7 @@ index 2c48914..fc6dfbd 100644
  KisMainWindow::KisMainWindow(QUuid uuid)
      : KXmlGuiWindow()
      , d(new Private(this, uuid))
-@@ -608,6 +1032,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
+@@ -608,6 +1088,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
          }
      }
  
