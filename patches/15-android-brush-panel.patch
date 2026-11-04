@@ -46,8 +46,9 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
    The sliders (NovaVerticalSlider, 45 px wide) are bound to the same
    KisDoubleSliderSpinBox objects as the hidden horizontal sliders
    (brushslider1/2): drag up/down to change the value relative to where the
-   drag started (Size uses the same cubic curve); the value shows while
-   dragging. First placement: as narrow as the sliders allow (~52 px), 66% of
+   drag started (Size uses the same cubic curve). A small white "S" / "O"
+   sits at the bottom of each; while dragging, the value shows as just the
+   number and unit ("40 px", "75%"). First placement: as narrow as the sliders allow (~52 px), 66% of
    the window height, vertically centered at the left edge (kritarc:
    androidBrushPanelPlaced4). Thin frame (PM_DockWidgetFrameWidth 3 for this
    panel, 3 px side margins, extra room around the color squares/sampler).
@@ -79,7 +80,7 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
 Desktop builds are unchanged.
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 2c48914..66d4294 100644
+index 2c48914..c856d6b 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
 @@ -20,6 +20,27 @@
@@ -110,7 +111,7 @@ index 2c48914..66d4294 100644
  #include <QIcon>
  #include <QInputDialog>
  #include <QLayout>
-@@ -366,6 +387,887 @@ public:
+@@ -366,6 +387,910 @@ public:
      }
  };
  
@@ -137,8 +138,9 @@ index 2c48914..66d4294 100644
 +class NovaVerticalSlider : public QWidget
 +{
 +public:
-+    NovaVerticalSlider(KisDoubleSliderSpinBox *spin, const QString &name, qreal exponent, QWidget *parent)
-+        : QWidget(parent), m_spin(spin), m_name(name), m_exponent(exponent)
++    NovaVerticalSlider(KisDoubleSliderSpinBox *spin, const QString &name, const QString &letter,
++                       const QString &unit, qreal exponent, QWidget *parent)
++        : QWidget(parent), m_spin(spin), m_name(name), m_letter(letter), m_unit(unit), m_exponent(exponent)
 +    {
 +        setToolTip(name);
 +        setMinimumSize(45, 110);
@@ -187,15 +189,35 @@ index 2c48914..66d4294 100644
 +        p.fillRect(fill, isEnabled() ? palette().color(QPalette::WindowText).darker(120)
 +                                     : palette().color(QPalette::Mid));
 +        p.restore();
++        // small white letter at the bottom: "S" (size), "O" (opacity)
++        {
++            QFont f = font();
++            f.setPointSizeF(qMax(6.0, f.pointSizeF() * 0.85));
++            f.setBold(true);
++            p.setFont(f);
++            const QRectF letterRect(track.left(), track.bottom() - QFontMetricsF(f).height() - 4,
++                                    track.width(), QFontMetricsF(f).height());
++            p.setPen(QColor(0, 0, 0, 110));
++            p.drawText(letterRect.translated(0.8, 0.8), Qt::AlignCenter, m_letter);
++            p.setPen(Qt::white);
++            p.drawText(letterRect, Qt::AlignCenter, m_letter);
++        }
++
++        // while dragging: just the number and its unit ("40 px", "75%")
 +        if (m_dragging) {
-+            const QString text = QString(m_spin->prefix() + QLocale().toString(m_painted, 'f', m_spin->decimals())
-+                                         + m_spin->suffix()).trimmed();
++            QString text;
++            if (m_unit == QLatin1String("%")) {
++                text = QString::number(qRound(m_painted)) + m_unit;
++            } else {
++                const int decimals = m_painted < 10.0 ? 1 : 0;
++                text = QLocale().toString(m_painted, 'f', decimals) + QLatin1Char(' ') + m_unit;
++            }
 +            QFont f = font();
 +            f.setPointSizeF(qMax(6.0, f.pointSizeF() * 0.8));
 +            p.setFont(f);
-+            const QRectF label(track.left(), track.top() + 4, track.width(), QFontMetricsF(f).height() * 2.2);
-+            p.setPen(pos > 0.85 ? palette().color(QPalette::Window) : palette().color(QPalette::WindowText));
-+            p.drawText(label, Qt::AlignHCenter | Qt::AlignTop | Qt::TextWrapAnywhere, text);
++            const QRectF label(track.left(), track.top() + 4, track.width(), QFontMetricsF(f).height() * 1.2);
++            p.setPen(pos > 0.9 ? palette().color(QPalette::Window) : palette().color(QPalette::WindowText));
++            p.drawText(label, Qt::AlignHCenter | Qt::AlignTop, text);
 +        }
 +    }
 +
@@ -224,6 +246,8 @@ index 2c48914..66d4294 100644
 +private:
 +    QPointer<KisDoubleSliderSpinBox> m_spin;
 +    QString m_name;
++    QString m_letter;
++    QString m_unit;
 +    qreal m_exponent {1.0};
 +    QTimer m_poll;
 +    qreal m_painted {0.0};
@@ -301,8 +325,8 @@ index 2c48914..66d4294 100644
 +    if (sliderChooser) {
 +        KisDoubleSliderSpinBox *size = sliderChooser->getWidget<KisDoubleSliderSpinBox>("size");
 +        KisDoubleSliderSpinBox *opacity = sliderChooser->getWidget<KisDoubleSliderSpinBox>("opacity");
-+        if (size) layout->addWidget(new NovaVerticalSlider(size, i18n("Size"), 3.0, sliders), 1, Qt::AlignHCenter);
-+        if (opacity) layout->addWidget(new NovaVerticalSlider(opacity, i18n("Opacity"), 1.0, sliders), 1, Qt::AlignHCenter);
++        if (size) layout->addWidget(new NovaVerticalSlider(size, i18n("Size"), i18nc("one-letter label of the brush size slider", "S"), i18nc("unit: pixels", "px"), 3.0, sliders), 1, Qt::AlignHCenter);
++        if (opacity) layout->addWidget(new NovaVerticalSlider(opacity, i18n("Opacity"), i18nc("one-letter label of the brush opacity slider", "O"), QStringLiteral("%"), 1.0, sliders), 1, Qt::AlignHCenter);
 +    }
 +    sliders->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
 +    return sliders;
@@ -998,7 +1022,7 @@ index 2c48914..66d4294 100644
  KisMainWindow::KisMainWindow(QUuid uuid)
      : KXmlGuiWindow()
      , d(new Private(this, uuid))
-@@ -608,6 +1510,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
+@@ -608,6 +1533,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
          }
      }
  
