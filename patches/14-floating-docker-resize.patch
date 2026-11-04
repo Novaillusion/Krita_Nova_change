@@ -1,0 +1,252 @@
+Krita Nova 14 - resize floating dockers by touch/pen (Android)
+
+A floating (undocked) docker could only be resized within 4 px of its edge:
+QDockWidget's QWidgetResizeHandler uses max(4, frameWidth) as its grab range,
+and QDockWidget isn't a QFrame. That is nearly impossible to hit with a finger
+or a stylus.
+
+1. KisTouchFriendlyStyle (patch 03, Android only) installs an application
+   event filter, FloatingDockResizer. A press in a 22 px band along the left,
+   right and bottom edges of a floating docker (8 px at the top, where the
+   title bar moves the docker) is held; once the pointer moves it resizes the
+   docker (corners resize both ways), clamped to the minimum/maximum size and
+   the screen. A tap without movement is handed on to the widget underneath,
+   so buttons near the edge keep working.
+2. PM_DockWidgetFrameWidth is at least 6 px, so floating dockers get a visible
+   border to aim at.
+
+diff --git a/libs/ui/KisTouchFriendlyStyle.cpp b/libs/ui/KisTouchFriendlyStyle.cpp
+index 11986c7..5f08e41 100644
+--- a/libs/ui/KisTouchFriendlyStyle.cpp
++++ b/libs/ui/KisTouchFriendlyStyle.cpp
+@@ -7,7 +7,193 @@
+ #include "KisTouchFriendlyStyle.h"
+ 
+ #include <QApplication>
++#include <QDockWidget>
++#include <QMouseEvent>
++#include <QPointer>
++#include <QScreen>
+ #include <QStyleFactory>
++#include <QWindow>
++
++namespace {
++
++/**
++ * Resizes floating (undocked) dockers by dragging anywhere in a wide band
++ * along their edges. Qt's own QWidgetResizeHandler only reacts within 4 px of
++ * the edge, which a finger or a stylus can hardly hit. Being an application
++ * event filter, it sees presses before the docker's child widgets do.
++ */
++class FloatingDockResizer : public QObject
++{
++public:
++    enum Edge { None = 0, Left = 1, Right = 2, Top = 4, Bottom = 8 };
++
++    static void install()
++    {
++        static FloatingDockResizer *s_instance = nullptr;
++        if (!s_instance && qApp) {
++            s_instance = new FloatingDockResizer(qApp);
++            qApp->installEventFilter(s_instance);
++        }
++    }
++
++protected:
++    bool eventFilter(QObject *watched, QEvent *event) override
++    {
++        if (m_replaying) return false;
++
++        switch (event->type()) {
++        case QEvent::MouseButtonPress: {
++            if (m_dock) return true; // already resizing; swallow extra presses
++            QMouseEvent *e = static_cast<QMouseEvent *>(event);
++            if (e->button() != Qt::LeftButton || !watched->isWidgetType()) break;
++            QDockWidget *dock = floatingDockFor(static_cast<QWidget *>(watched));
++            if (!dock) break;
++            const int edges = edgesAt(dock, e->globalPos());
++            if (edges == None) break;
++            // Hold the press: it becomes a resize once the pointer moves, and is
++            // handed to the widget underneath if it turns out to be a tap.
++            m_dock = dock;
++            m_edges = edges;
++            m_resizing = false;
++            m_target = static_cast<QWidget *>(watched);
++            m_pressPos = e->globalPos();
++            m_startGeometry = dock->geometry();
++            return true;
++        }
++        case QEvent::MouseMove:
++            if (m_dock) {
++                QMouseEvent *e = static_cast<QMouseEvent *>(event);
++                if (!(e->buttons() & Qt::LeftButton)) {
++                    reset(); // release got lost
++                    break;
++                }
++                if (!m_resizing &&
++                    (e->globalPos() - m_pressPos).manhattanLength() >= QApplication::startDragDistance()) {
++                    m_resizing = true;
++                }
++                if (m_resizing) resizeTo(e->globalPos());
++                return true;
++            }
++            break;
++        case QEvent::MouseButtonRelease:
++            if (m_dock && static_cast<QMouseEvent *>(event)->button() == Qt::LeftButton) {
++                if (!m_resizing && m_target) {
++                    replayTap(m_target, m_pressPos);
++                }
++                reset();
++                return true;
++            }
++            break;
++        default:
++            break;
++        }
++        return QObject::eventFilter(watched, event);
++    }
++
++private:
++    explicit FloatingDockResizer(QObject *parent) : QObject(parent) {}
++
++    static QDockWidget *floatingDockFor(QWidget *widget)
++    {
++        for (QWidget *w = widget; w; w = w->parentWidget()) {
++            if (QDockWidget *dock = qobject_cast<QDockWidget *>(w)) {
++                return (dock->isFloating() && dock->isWindow()) ? dock : nullptr;
++            }
++            if (w->isWindow()) break; // a popup/dialog above a docker is not the docker
++        }
++        return nullptr;
++    }
++
++    static int edgesAt(QDockWidget *dock, const QPoint &globalPos)
++    {
++        const QPoint p = dock->mapFromGlobal(globalPos);
++        const int w = dock->width();
++        const int h = dock->height();
++        const int band = qMin(KisTouchFriendlyStyle::FLOATING_DOCK_GRAB_EXTENT, qMin(w, h) / 4);
++        // the title bar moves the docker: only its outermost few pixels resize
++        const int topBand = qMin(band, KisTouchFriendlyStyle::FLOATING_DOCK_FRAME + 2);
++
++        if (p.x() < 0 || p.y() < 0 || p.x() >= w || p.y() >= h) return None;
++
++        int edges = None;
++        if (p.x() < band) edges |= Left;
++        else if (p.x() >= w - band) edges |= Right;
++        if (p.y() < topBand) edges |= Top;
++        else if (p.y() >= h - band) edges |= Bottom;
++        return edges;
++    }
++
++    void resizeTo(const QPoint &globalPos)
++    {
++        const QPoint d = globalPos - m_pressPos;
++        QRect r = m_startGeometry;
++        const QSize minSize = m_dock->minimumSizeHint().expandedTo(m_dock->minimumSize())
++                                  .expandedTo(QSize(80, 60));
++        const QSize maxSize = m_dock->maximumSize();
++
++        if (m_edges & Left) {
++            r.setLeft(qMin(r.left() + d.x(), r.right() - minSize.width() + 1));
++        } else if (m_edges & Right) {
++            r.setRight(qMax(r.right() + d.x(), r.left() + minSize.width() - 1));
++        }
++        if (m_edges & Top) {
++            r.setTop(qMin(r.top() + d.y(), r.bottom() - minSize.height() + 1));
++        } else if (m_edges & Bottom) {
++            r.setBottom(qMax(r.bottom() + d.y(), r.top() + minSize.height() - 1));
++        }
++        if (r.width() > maxSize.width()) {
++            if (m_edges & Left) r.setLeft(r.right() - maxSize.width() + 1);
++            else r.setWidth(maxSize.width());
++        }
++        if (r.height() > maxSize.height()) {
++            if (m_edges & Top) r.setTop(r.bottom() - maxSize.height() + 1);
++            else r.setHeight(maxSize.height());
++        }
++
++        // keep it on the screen
++        if (QScreen *screen = m_dock->screen()) {
++            r = r.intersected(screen->availableGeometry());
++        }
++        if (r.width() >= minSize.width() && r.height() >= minSize.height()) {
++            m_dock->setGeometry(r);
++        }
++    }
++
++    void reset()
++    {
++        m_dock.clear();
++        m_target.clear();
++        m_edges = None;
++        m_resizing = false;
++    }
++
++    /// A tap near the edge: deliver it to the widget that would have got it
++    void replayTap(QWidget *target, const QPoint &globalPos)
++    {
++        QPointer<QWidget> guard(target);
++        m_replaying = true;
++        const QPointF local = target->mapFromGlobal(globalPos);
++        QMouseEvent press(QEvent::MouseButtonPress, local, globalPos, Qt::LeftButton,
++                          Qt::LeftButton, QGuiApplication::keyboardModifiers());
++        QApplication::sendEvent(target, &press);
++        if (guard) {
++            QMouseEvent release(QEvent::MouseButtonRelease, local, globalPos, Qt::LeftButton,
++                                Qt::NoButton, QGuiApplication::keyboardModifiers());
++            QApplication::sendEvent(guard, &release);
++        }
++        m_replaying = false;
++    }
++
++    QPointer<QDockWidget> m_dock;
++    QPointer<QWidget> m_target;
++    bool m_resizing {false};
++    bool m_replaying {false};
++    int m_edges {None};
++    QPoint m_pressPos;
++    QRect m_startGeometry;
++};
++
++} // namespace
+ 
+ KisTouchFriendlyStyle::KisTouchFriendlyStyle(const QString &baseStyleName)
+     : QProxyStyle(baseStyleName)
+@@ -27,6 +213,9 @@ int KisTouchFriendlyStyle::pixelMetric(PixelMetric metric, const QStyleOption *o
+     case PM_DockWidgetSeparatorExtent:
+     case PM_SplitterWidth:
+         return qMax(value, TOUCH_HANDLE_EXTENT);
++    case PM_DockWidgetFrameWidth:
++        // only used for floating dockers with a custom title bar (Krita's)
++        return qMax(value, FLOATING_DOCK_FRAME);
+     default:
+         return value;
+     }
+@@ -55,4 +244,5 @@ void KisTouchFriendlyStyle::applyStyle(const QString &styleName)
+     }
+ 
+     qApp->setStyle(new KisTouchFriendlyStyle(styleName));
++    FloatingDockResizer::install();
+ }
+diff --git a/libs/ui/KisTouchFriendlyStyle.h b/libs/ui/KisTouchFriendlyStyle.h
+index 180e99b..4c20feb 100644
+--- a/libs/ui/KisTouchFriendlyStyle.h
++++ b/libs/ui/KisTouchFriendlyStyle.h
+@@ -40,6 +40,16 @@ public:
+ 
+     /// Width (in device-independent pixels) of docker separators and splitter handles.
+     static constexpr int TOUCH_HANDLE_EXTENT = 14;
++
++    /// Visible border around floating (undocked) dockers.
++    static constexpr int FLOATING_DOCK_FRAME = 6;
++
++    /**
++     * Depth of the band along the edges of a floating docker that resizes it
++     * when dragged (border + a strip over the docker's content). A tap in that
++     * band (no movement) still reaches the widget underneath.
++     */
++    static constexpr int FLOATING_DOCK_GRAB_EXTENT = 22;
+ };
+ 
+ #endif // KIS_TOUCH_FRIENDLY_STYLE_H
