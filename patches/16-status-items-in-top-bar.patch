@@ -1,0 +1,118 @@
+Krita Nova 16 - status bar items in the top bar (Android)
+
+The image size / memory button, the canvas rotation selector and the zoom
+widget (zoom %, slider, ...) move from the bottom-right of the status bar to
+the right end of the top bar (mainToolBar), after New/Open/Save, mirror/wrap,
+layouts and workspaces (patch 15).
+
+1. KisStatusBar: on Android, addStatusBarItem() puts these three into a
+   container widget ("KritaNovaStatusItems") instead of the QStatusBar, and
+   removeStatusBarItem() takes them out of it again (the zoom widget belongs
+   to the view and is swapped on every view change). They stay in
+   m_statusBarItems, so canvas-only mode still hides/shows them.
+2. KisMainWindow (patch 15's Android top bar setup) adds an expanding spacer
+   and that container to the top bar.
+
+Desktop builds are unchanged.
+
+diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
+index ed777bd..b20225d 100644
+--- a/libs/ui/KisMainWindow.cpp
++++ b/libs/ui/KisMainWindow.cpp
+@@ -528,6 +528,16 @@ void adaptBrushToolBarToColumn(KisToolBar *toolBar, QMainWindow *mainWindow)
+                 action->setVisible(false);
+             }
+         }
++
++        // Image size, canvas rotation and zoom from the status bar (KisStatusBar
++        // parks them in this widget on Android), at the right end of the top bar
++        if (QWidget *statusItems = mainWindow->findChild<QWidget *>(QStringLiteral("KritaNovaStatusItems"))) {
++            QWidget *spacer = new QWidget(topBar);
++            spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
++            topBar->addWidget(spacer);
++            topBar->addWidget(statusItems);
++            statusItems->show();
++        }
+     }
+ 
+     Q_FOREACH (QAction *action, toolBar->actions()) {
+diff --git a/libs/ui/kis_statusbar.cc b/libs/ui/kis_statusbar.cc
+index 7ecc1f1..3fca168 100644
+--- a/libs/ui/kis_statusbar.cc
++++ b/libs/ui/kis_statusbar.cc
+@@ -175,9 +175,44 @@ void KisStatusBar::setView(QPointer<KisView> imageView)
+     imageSizeChanged();
+ }
+ 
++QWidget *KisStatusBar::topBarItemsWidget()
++{
++    if (!m_topBarItems) {
++        // Parked under the main window until KisMainWindow (Android) puts it at
++        // the right end of the top bar, found by this object name.
++        m_topBarItems = new QWidget(m_viewManager->mainWindow());
++        m_topBarItems->setObjectName(QStringLiteral("KritaNovaStatusItems"));
++        QHBoxLayout *layout = new QHBoxLayout(m_topBarItems);
++        layout->setContentsMargins(0, 0, 4, 0);
++        layout->setSpacing(6);
++        m_topBarItems->hide();
++    }
++    return m_topBarItems;
++}
++
++bool KisStatusBar::isTopBarItem(QWidget *widget) const
++{
++#ifdef Q_OS_ANDROID
++    return widget
++        && (widget == m_memoryReportBox
++            || widget == m_canvasAngleSelector
++            || (m_imageView && m_imageView->zoomManager()
++                && widget == m_imageView->zoomManager()->zoomActionWidget()));
++#else
++    Q_UNUSED(widget);
++    return false;
++#endif
++}
++
+ void KisStatusBar::addStatusBarItem(QWidget *widget, int stretch, bool permanent)
+ {
+     StatusBarItem sbItem(widget);
++    if (isTopBarItem(widget)) {
++        topBarItemsWidget()->layout()->addWidget(widget);
++        widget->setVisible(true);
++        m_statusBarItems.append(sbItem);
++        return;
++    }
+     if (permanent) {
+         m_statusBar->addPermanentWidget(widget, stretch);
+     }
+@@ -199,7 +234,13 @@ void KisStatusBar::removeStatusBarItem(QWidget *widget)
+     }
+ 
+     if (i < m_statusBarItems.count()) {
+-        m_statusBar->removeWidget(m_statusBarItems[i].widget());
++        QWidget *item = m_statusBarItems[i].widget();
++        if (m_topBarItems && item && item->parentWidget() == m_topBarItems) {
++            m_topBarItems->layout()->removeWidget(item);
++            item->hide();
++        } else {
++            m_statusBar->removeWidget(item);
++        }
+         m_statusBarItems.remove(i);
+     }
+ }
+diff --git a/libs/ui/kis_statusbar.h b/libs/ui/kis_statusbar.h
+index 76dfc61..ce972c4 100644
+--- a/libs/ui/kis_statusbar.h
++++ b/libs/ui/kis_statusbar.h
+@@ -115,6 +115,11 @@ private:
+     QBoxLayout *m_extraWidgetsLayout {nullptr};
+     KisAngleSelector *m_canvasAngleSelector {nullptr};
+ 
++    // Krita Nova (Android): image size, rotation and zoom live in the top bar
++    QPointer<QWidget> m_topBarItems;
++    QWidget *topBarItemsWidget();
++    bool isTopBarItem(QWidget *widget) const;
++
+     KSqueezedTextLabel *m_statusBarStatusLabel {nullptr};
+     KSqueezedTextLabel *m_statusBarProfileLabel {nullptr};
+ 
