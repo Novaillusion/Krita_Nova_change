@@ -1,0 +1,464 @@
+Krita Nova 27 - the Brush Panel works with a finger while the pen is in use (Android)
+
+While the pen hovers over or touches the screen, Krita's Android Qt does not
+deliver finger touches to Qt as touch events (a finger that comes with the
+pen's own motion events is lost in its tablet event). So the floating Brush
+Panel could not be used with a finger while the pen was in use, whatever
+palm rejection (patch 09) does.
+
+1. MainActivity.java tracks the pen (touch and hover events) and, while it is
+   in use (down, hovering, or used within the last second), reports finger
+   touches to Krita through JNIWrappers.onPenTimeFinger (down / move / up /
+   cancel, in pixels of the Qt view).
+2. KisMainWindow.cpp, PanelFingerRouter: a reported finger that lands on the
+   Brush Panel, its "more" popup or a popup opened from it is handed to the
+   widget under it as mouse press / move / release. If the panel gets a press
+   of its own within 80 ms (Qt delivered the touch after all, or patch 24
+   forwarded it), the reported finger is dropped, so nothing is pressed
+   twice. Fingers elsewhere are not used: the canvas keeps ignoring touches
+   while the pen is in use.
+3. The panel lookup shared with patch 24 (brushPanelWindowAt,
+   belongsToBrushPanel) is now a pair of free functions.
+diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
+index 22efca3..876300e 100644
+--- a/libs/ui/KisMainWindow.cpp
++++ b/libs/ui/KisMainWindow.cpp
+@@ -126,6 +126,7 @@
+ #include "dialogs/KisDonationManagementDialog.h"
+ #include <QtAndroid>
+ #include <KisAndroidUtils.h>
++#include <jni.h>
+ #endif
+ 
+ #include <KisScopedPerformanceLogger.h>
+@@ -1215,6 +1216,37 @@ private:
+     QPointer<QDockWidget> m_topBar;
+ };
+ 
++/// true for the floating Brush Panel and for windows opened from it (the
++/// "more" popup and the popups of its buttons)
++bool belongsToBrushPanel(const QDockWidget *panel, const QWidget *window)
++{
++    if (!panel || !window) return false;
++    if (window == panel) return panel->isFloating();
++    for (const QWidget *w = window->parentWidget(); w; w = w->parentWidget()) {
++        if (w == panel) return true;
++    }
++    return false;
++}
++
++/// the Brush Panel, or a window opened from it, under a screen position
++QWidget *brushPanelWindowAt(QDockWidget *panel, const QPoint &globalPos)
++{
++    if (!panel || !panel->isVisible()) return nullptr;
++
++    QWidget *top = QApplication::topLevelAt(globalPos);
++    if (top && belongsToBrushPanel(panel, top)) return top;
++
++    // topLevelAt may not know about the stacking order: popups first
++    QWidget *found = nullptr;
++    Q_FOREACH (QWidget *w, QApplication::topLevelWidgets()) {
++        if (!w->isVisible() || !w->frameGeometry().contains(globalPos)) continue;
++        if (!belongsToBrushPanel(panel, w)) continue;
++        if (w != panel) return w;
++        found = w;
++    }
++    return found;
++}
++
+ /// Palm rejection must not stop the Brush Panel. On Android a touch sequence
+ /// goes to the window under its first finger, so with a palm resting on the
+ /// canvas, a finger on the panel arrives at the canvas as part of the palm's
+@@ -1276,59 +1308,187 @@ protected:
+     }
+ 
+ private:
+-    /// the panel, or a window opened from it (the "more" popup and the popups
+-    /// of its buttons), under a screen position
+     QWidget *panelWindowAt(const QPoint &globalPos) const
+     {
+-        if (!m_panel || !m_panel->isVisible()) return nullptr;
++        return brushPanelWindowAt(m_panel, globalPos);
++    }
+ 
+-        QWidget *top = QApplication::topLevelAt(globalPos);
+-        if (top && belongsToPanel(top)) return top;
++    void send(QEvent::Type type, const QPoint &globalPos, Qt::MouseButtons buttons)
++    {
++        m_lastPos = globalPos;
++        if (!m_target) return;
++        const Qt::MouseButton button = type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton;
++        QMouseEvent mouse(type, m_target->mapFromGlobal(globalPos), globalPos, button,
++                          buttons, QGuiApplication::keyboardModifiers());
++        QApplication::sendEvent(m_target, &mouse);
++    }
+ 
+-        // topLevelAt may not know about the stacking order: popups first
+-        QWidget *found = nullptr;
+-        Q_FOREACH (QWidget *w, QApplication::topLevelWidgets()) {
+-            if (!w->isVisible() || !w->frameGeometry().contains(globalPos)) continue;
+-            if (!belongsToPanel(w)) continue;
+-            if (w != m_panel) return w;
+-            found = w;
++    void finish(const QPoint &globalPos)
++    {
++        if (!m_target) return;
++        send(QEvent::MouseButtonRelease, globalPos, Qt::NoButton);
++        m_target.clear();
++        m_pointId = -1;
++    }
++
++    QPointer<QDockWidget> m_panel;
++    QPointer<QWidget> m_target;
++    int m_pointId {-1};
++    QPoint m_lastPos;
++};
++
++/**
++ * Fingers on the Brush Panel while the pen is in use (patch 27).
++ *
++ * While the pen hovers over or touches the screen, Krita's Android Qt does not
++ * deliver finger touches as touch events (a finger that comes with the pen's
++ * own motion events is lost in its tablet event). MainActivity therefore also
++ * reports finger touches made while the pen is in use (JNIWrappers.onPenTimeFinger),
++ * and this hands a finger that lands on the Brush Panel, or on a popup opened
++ * from it, to the widget under it as mouse press / move / release.
++ *
++ * If Qt does deliver the touch (or patch 24 forwards it), the panel gets a press
++ * of its own within a moment; the finger reported by Java is then dropped, so
++ * nothing is pressed twice. The canvas is not involved: it keeps ignoring
++ * touches while the pen is in use (palm rejection).
++ */
++class PanelFingerRouter : public QObject
++{
++public:
++    enum Action { Down = 0, Move = 1, Up = 2, Cancel = 3 };
++
++    explicit PanelFingerRouter(QDockWidget *panel)
++        : QObject(panel), m_panel(panel)
++    {
++        s_instance = this;
++        m_decideTimer.setSingleShot(true);
++        m_decideTimer.setInterval(DECIDE_DELAY_MS);
++        QObject::connect(&m_decideTimer, &QTimer::timeout, this, [this]() { decide(); });
++        m_sinceLastPanelPress.invalidate();
++        qApp->installEventFilter(this);
++    }
++
++    static PanelFingerRouter *instance() { return s_instance.data(); }
++
++    /// position in physical pixels of the Qt view
++    void fingerEvent(int id, int action, const QPointF &physicalPos)
++    {
++        const QPoint globalPos = toGlobal(physicalPos);
++        switch (action) {
++        case Down: {
++            if (m_state != Idle) return; // one finger at a time
++            QWidget *top = brushPanelWindowAt(m_panel, globalPos);
++            if (!top) return;
++            QWidget *target = top->childAt(top->mapFromGlobal(globalPos));
++            m_target = target ? target : top;
++            m_id = id;
++            m_pressPos = m_lastPos = globalPos;
++            m_state = Pending;
++            m_decideTimer.start();
++            break;
++        }
++        case Move:
++            if (m_state == Idle || id != m_id) return;
++            m_lastPos = globalPos;
++            if (m_state == Forwarding) send(QEvent::MouseMove, globalPos, Qt::LeftButton);
++            break;
++        case Up:
++        case Cancel:
++            if (m_state == Idle || id != m_id) return;
++            if (action == Up) m_lastPos = globalPos;
++            if (m_state == Pending) {
++                m_decideTimer.stop();
++                decide();
++            }
++            if (m_state == Forwarding) send(QEvent::MouseButtonRelease, m_lastPos, Qt::NoButton);
++            reset();
++            break;
++        default:
++            break;
+         }
+-        return found;
+     }
+ 
+-    bool belongsToPanel(QWidget *window) const
++protected:
++    bool eventFilter(QObject *watched, QEvent *event) override
+     {
+-        if (window == m_panel) return m_panel->isFloating();
+-        for (QWidget *w = window->parentWidget(); w; w = w->parentWidget()) {
+-            if (w == m_panel) return true;
++        const QEvent::Type type = event->type();
++        if (m_sending || (type != QEvent::MouseButtonPress && type != QEvent::TouchBegin
++                          && type != QEvent::TabletPress)) {
++            return false;
++        }
++        QWidget *widget = qobject_cast<QWidget *>(watched);
++        if (widget && belongsToBrushPanel(m_panel, widget->window())) {
++            // Qt (or patch 24) delivered a press to the panel itself
++            m_sinceLastPanelPress.start();
+         }
+         return false;
+     }
+ 
++private:
++    static constexpr int DECIDE_DELAY_MS = 80;
++
++    enum State { Idle, Pending, Forwarding, Ignored };
++
++    QPoint toGlobal(const QPointF &physicalPos) const
++    {
++        qreal ratio = 1.0;
++        if (m_panel && m_panel->window()->windowHandle()) {
++            ratio = m_panel->window()->windowHandle()->devicePixelRatio();
++        } else if (QScreen *screen = QGuiApplication::primaryScreen()) {
++            ratio = screen->devicePixelRatio();
++        }
++        if (ratio <= 0.0) ratio = 1.0;
++        return (physicalPos / ratio).toPoint();
++    }
++
++    void decide()
++    {
++        if (m_state != Pending) return;
++        const bool qtDelivered = m_sinceLastPanelPress.isValid()
++            && m_sinceLastPanelPress.elapsed() < DECIDE_DELAY_MS + 120;
++        if (qtDelivered || !m_target) {
++            m_state = Ignored;
++            return;
++        }
++        m_state = Forwarding;
++        send(QEvent::MouseButtonPress, m_pressPos, Qt::LeftButton);
++        if (m_lastPos != m_pressPos) send(QEvent::MouseMove, m_lastPos, Qt::LeftButton);
++    }
++
+     void send(QEvent::Type type, const QPoint &globalPos, Qt::MouseButtons buttons)
+     {
+-        m_lastPos = globalPos;
+         if (!m_target) return;
+         const Qt::MouseButton button = type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton;
+         QMouseEvent mouse(type, m_target->mapFromGlobal(globalPos), globalPos, button,
+                           buttons, QGuiApplication::keyboardModifiers());
++        m_sending = true;
+         QApplication::sendEvent(m_target, &mouse);
++        m_sending = false;
+     }
+ 
+-    void finish(const QPoint &globalPos)
++    void reset()
+     {
+-        if (!m_target) return;
+-        send(QEvent::MouseButtonRelease, globalPos, Qt::NoButton);
++        m_decideTimer.stop();
++        m_state = Idle;
+         m_target.clear();
+-        m_pointId = -1;
++        m_id = -1;
+     }
+ 
++    static QPointer<PanelFingerRouter> s_instance;
++
+     QPointer<QDockWidget> m_panel;
+     QPointer<QWidget> m_target;
+-    int m_pointId {-1};
++    QTimer m_decideTimer;
++    QElapsedTimer m_sinceLastPanelPress;
++    State m_state {Idle};
++    int m_id {-1};
++    QPoint m_pressPos;
+     QPoint m_lastPos;
++    bool m_sending {false};
+ };
+ 
++QPointer<PanelFingerRouter> PanelFingerRouter::s_instance;
++
+ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *viewManager, QStackedWidget *mainStack)
+ {
+     QDockWidget *topBar = createAndroidTopBarDock(mainWindow);
+@@ -1429,6 +1589,8 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+     // window state / workspace restored during startup may hide or re-dock it.
+     // fingers on the panel work while a palm rests on the canvas
+     new PanelTouchRouter(dock);
++    // ... and while the pen is in use
++    new PanelFingerRouter(dock);
+ 
+     BrushPanelShower *shower = new BrushPanelShower(mainWindow, dock, keeper, mainStack);
+     keeper->onToolBarShown = [shower]() { shower->toolBarShown(); };
+@@ -1448,6 +1610,26 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+ }
+ 
+ } // namespace
++
++/// Krita Nova (patch 27): a finger touch made while the pen is in use, reported
++/// by MainActivity. Called on the Android UI thread.
++extern "C" JNIEXPORT void JNICALL Java_org_krita_android_JNIWrappers_onPenTimeFinger(JNIEnv * /*env*/,
++                                                                                   jobject /*obj*/,
++                                                                                   jint id,
++                                                                                   jint action,
++                                                                                   jfloat x,
++                                                                                   jfloat y)
++{
++    if (!qApp) return;
++    const int pointerId = id;
++    const int fingerAction = action;
++    const QPointF pos(x, y);
++    QMetaObject::invokeMethod(qApp, [pointerId, fingerAction, pos]() {
++        if (PanelFingerRouter *router = PanelFingerRouter::instance()) {
++            router->fingerEvent(pointerId, fingerAction, pos);
++        }
++    }, Qt::QueuedConnection);
++}
+ #endif
+ 
+ KisMainWindow::KisMainWindow(QUuid uuid)
+diff --git a/packaging/android/apk/src/org/krita/android/JNIWrappers.java b/packaging/android/apk/src/org/krita/android/JNIWrappers.java
+index 2c41c47..5fd06f9 100644
+--- a/packaging/android/apk/src/org/krita/android/JNIWrappers.java
++++ b/packaging/android/apk/src/org/krita/android/JNIWrappers.java
+@@ -18,5 +18,8 @@ class JNIWrappers {
+     public static native void onSplashDialogDismissed();
+     public static native void onScalingDialogShown();
+     public static native void onScalingDialogDismissed();
++    // Krita Nova: a finger touch made while the pen is in use
++    // (action: 0 down, 1 move, 2 up, 3 cancel; position in pixels of the Qt view)
++    public static native void onPenTimeFinger(int id, int action, float x, float y);
+ }
+ 
+diff --git a/packaging/android/apk/src/org/krita/android/MainActivity.java b/packaging/android/apk/src/org/krita/android/MainActivity.java
+index 093be86..ffad6c0 100644
+--- a/packaging/android/apk/src/org/krita/android/MainActivity.java
++++ b/packaging/android/apk/src/org/krita/android/MainActivity.java
+@@ -182,6 +182,128 @@ public class MainActivity extends QtActivity {
+         return super.onKeyUp(keyCode, event);
+     }
+ 
++    // Krita Nova: Qt does not deliver finger touches while the pen is in use,
++    // so the Brush Panel stays usable with a finger (see KisMainWindow.cpp,
++    // PanelFingerRouter): such fingers are also reported to Krita, which only
++    // uses those that land on the panel.
++    private static final long PEN_ACTIVE_MS = 1000;
++    private boolean m_penDown = false;
++    private boolean m_penHovering = false;
++    private long m_lastPenEvent = -PEN_ACTIVE_MS;
++    private final android.util.SparseBooleanArray m_reportedFingers = new android.util.SparseBooleanArray();
++    private final int[] m_qtViewOrigin = new int[2];
++
++    private static boolean isPen(int toolType) {
++        return toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER;
++    }
++
++    private void trackPen(MotionEvent ev) {
++        boolean hasPen = false;
++        for (int i = 0; i < ev.getPointerCount(); ++i) {
++            if (isPen(ev.getToolType(i))) { hasPen = true; break; }
++        }
++        if (!hasPen) return;
++        m_lastPenEvent = android.os.SystemClock.uptimeMillis();
++        switch (ev.getActionMasked()) {
++        case MotionEvent.ACTION_HOVER_ENTER:
++        case MotionEvent.ACTION_HOVER_MOVE:
++            m_penHovering = true;
++            break;
++        case MotionEvent.ACTION_HOVER_EXIT:
++            m_penHovering = false;
++            break;
++        case MotionEvent.ACTION_DOWN:
++        case MotionEvent.ACTION_POINTER_DOWN:
++        case MotionEvent.ACTION_MOVE:
++            m_penDown = true;
++            m_penHovering = false;
++            break;
++        case MotionEvent.ACTION_UP:
++        case MotionEvent.ACTION_CANCEL:
++            m_penDown = false;
++            break;
++        default:
++            break;
++        }
++    }
++
++    private boolean isPenActive(MotionEvent ev) {
++        for (int i = 0; i < ev.getPointerCount(); ++i) {
++            if (isPen(ev.getToolType(i))) return true;
++        }
++        return m_penDown || m_penHovering
++            || android.os.SystemClock.uptimeMillis() - m_lastPenEvent < PEN_ACTIVE_MS;
++    }
++
++    private void reportFinger(MotionEvent ev, int index, int action) {
++        try {
++            JNIWrappers.onPenTimeFinger(ev.getPointerId(index), action,
++                                        ev.getX(index) - m_qtViewOrigin[0],
++                                        ev.getY(index) - m_qtViewOrigin[1]);
++        } catch (UnsatisfiedLinkError e) {
++            // Krita's libraries are not loaded yet
++        }
++    }
++
++    private void reportFingers(MotionEvent ev) {
++        final int action = ev.getActionMasked();
++        final boolean starting = action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN;
++        if (m_reportedFingers.size() == 0 && !(starting && isPenActive(ev))) return;
++
++        android.view.View qtView = findViewById(android.R.id.content);
++        if (qtView != null) {
++            qtView.getLocationInWindow(m_qtViewOrigin);
++        }
++
++        switch (action) {
++        case MotionEvent.ACTION_DOWN:
++        case MotionEvent.ACTION_POINTER_DOWN: {
++            final int i = ev.getActionIndex();
++            if (ev.getToolType(i) == MotionEvent.TOOL_TYPE_FINGER && isPenActive(ev)) {
++                m_reportedFingers.put(ev.getPointerId(i), true);
++                reportFinger(ev, i, 0);
++            }
++            break;
++        }
++        case MotionEvent.ACTION_MOVE:
++            for (int i = 0; i < ev.getPointerCount(); ++i) {
++                if (m_reportedFingers.get(ev.getPointerId(i))) reportFinger(ev, i, 1);
++            }
++            break;
++        case MotionEvent.ACTION_UP:
++        case MotionEvent.ACTION_POINTER_UP: {
++            final int i = ev.getActionIndex();
++            final int id = ev.getPointerId(i);
++            if (m_reportedFingers.get(id)) {
++                reportFinger(ev, i, 2);
++                m_reportedFingers.delete(id);
++            }
++            break;
++        }
++        case MotionEvent.ACTION_CANCEL:
++            for (int i = 0; i < ev.getPointerCount(); ++i) {
++                if (m_reportedFingers.get(ev.getPointerId(i))) reportFinger(ev, i, 3);
++            }
++            m_reportedFingers.clear();
++            break;
++        default:
++            break;
++        }
++    }
++
++    @Override
++    public boolean dispatchTouchEvent(MotionEvent ev) {
++        trackPen(ev);
++        reportFingers(ev);
++        return super.dispatchTouchEvent(ev);
++    }
++
++    @Override
++    public boolean dispatchGenericMotionEvent(MotionEvent ev) {
++        trackPen(ev); // pen hover
++        return super.dispatchGenericMotionEvent(ev);
++    }
++
+     @Override
+     public boolean onGenericMotionEvent(MotionEvent event) {
+         // We manually pass these events to the QPA Android because,
