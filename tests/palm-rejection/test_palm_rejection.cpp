@@ -1,4 +1,4 @@
-// Tests for KisPalmRejection (Krita Nova patch 09)
+// Tests for KisPalmRejection (Krita Nova patches 09 and 28)
 #include <QApplication>
 #include <QScreen>
 #include <QTabletEvent>
@@ -75,9 +75,9 @@ int main(int argc, char **argv)
         CHECK(palm->isPenActive());
         CHECK(palm->shouldRejectTouchBegin(&finger, &canvas));
         sendTablet(&canvas, QEvent::TabletRelease);
-        CHECK(palm->isPenActive());              // within 500 ms
+        CHECK(palm->isPenActive());              // within the lift delay (100 ms)
         sendTablet(&app, QEvent::TabletLeaveProximity);
-        CHECK(palm->isPenActive());              // still within 500 ms
+        CHECK(palm->isPenActive());              // still within it
         QTest::qWait(650);
         CHECK(!palm->isPenActive());
         CHECK(!palm->shouldRejectTouchBegin(&finger, &canvas));
@@ -117,7 +117,7 @@ int main(int argc, char **argv)
 
         KisConfig::overrides()["palmRejectionEnabled"] = true;
         KisConfig::overrides()["palmRejectionMaxContactMm"] = 40;
-        KisConfig::overrides()["palmRejectionDelay"] = 0;
+        KisConfig::overrides()["palmRejectionLiftDelay"] = 0;
         KisConfigNotifier::instance()->notifyConfigChanged();
         QTest::qWait(20);
         CHECK(!palm->isPenActive());             // grace period 0
@@ -127,6 +127,43 @@ int main(int argc, char **argv)
         KisConfig::overrides()["palmRejectionMaxContactMm"] = 10;
         KisConfigNotifier::instance()->notifyConfigChanged();
         CHECK(!palm->shouldRejectTouchBegin(&big, &canvas));   // size check off
+    }
+
+    // 7. patch 28: after a stroke, hovering does not block touch; a pen that
+    //    comes back after a pause blocks it again until it presses
+    {
+        KisConfig::overrides()["palmRejectionLiftDelay"] = 100;
+        KisConfigNotifier::instance()->notifyConfigChanged();
+        QTouchEvent finger = makeTouch(fingerPx);
+
+        sendTablet(&canvas, QEvent::TabletPress);
+        sendTablet(&canvas, QEvent::TabletRelease);
+        CHECK(palm->shouldRejectTouchBegin(&finger, &canvas));   // just lifted
+        QTest::qWait(150);
+        sendTablet(&canvas, QEvent::TabletMove);                 // still hovering
+        QTest::qWait(150);
+        sendTablet(&canvas, QEvent::TabletMove);
+        QTest::qWait(150);
+        CHECK(!palm->isPenActive());                             // hover after a stroke
+        CHECK(!palm->shouldRejectTouchBegin(&finger, &canvas));
+
+        QTest::qWait(500);                                       // pen went away...
+        sendTablet(&canvas, QEvent::TabletMove);                 // ...and comes back
+        QTest::qWait(150);
+        CHECK(palm->isPenActive());                              // approaching: blocks
+        CHECK(palm->shouldRejectTouchBegin(&finger, &canvas));
+        sendTablet(&canvas, QEvent::TabletPress);
+        sendTablet(&canvas, QEvent::TabletRelease);
+        sendTablet(&canvas, QEvent::TabletMove);
+        QTest::qWait(150);
+        CHECK(!palm->isPenActive());
+
+        sendTablet(&app, QEvent::TabletEnterProximity);          // explicit proximity
+        QTest::qWait(150);
+        CHECK(palm->isPenActive());
+        sendTablet(&app, QEvent::TabletLeaveProximity);
+        QTest::qWait(150);
+        CHECK(!palm->isPenActive());
     }
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

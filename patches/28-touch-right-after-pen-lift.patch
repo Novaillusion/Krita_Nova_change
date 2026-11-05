@@ -1,0 +1,179 @@
+Krita Nova 28 - fingers work on the canvas right after the pen is lifted
+
+Palm rejection (patch 09) kept ignoring touch on the canvas for 500 ms after
+the pen was last used, and for as long as the pen hovered over the screen -
+which it does right after a stroke. So the first finger touch after lifting
+the pen (to pan, zoom or undo with a gesture) did nothing.
+
+1. Hovering blocks touch only while the pen approaches the screen: from
+   entering proximity (or, where the platform sends no proximity events, a
+   hover move after 400 ms of pen silence) until its first press. After a
+   release, a hovering pen no longer blocks touch.
+2. The delay after lifting the pen is now 100 ms by default, under a new
+   setting "palmRejectionLiftDelay" (Configure Krita > General > Tools,
+   "Keep ignoring touch after the pen is lifted for"); the old 500 ms value
+   saved as "palmRejectionDelay" is no longer used.
+3. While the pen is down, and for touches the size of a palm, nothing
+   changes.
+diff --git a/libs/ui/dialogs/kis_dlg_preferences.cc b/libs/ui/dialogs/kis_dlg_preferences.cc
+index fdcdb75..2c3bfb6 100644
+--- a/libs/ui/dialogs/kis_dlg_preferences.cc
++++ b/libs/ui/dialogs/kis_dlg_preferences.cc
+@@ -870,7 +870,7 @@ void GeneralTab::setDefault()
+     cmbTouchPainting->setCurrentIndex(int(cfg.touchPainting(true)));
+     chkTouchPressureSensitivity->setChecked(true);
+     m_chkPalmRejection->setChecked(true);
+-    m_spnPalmRejectionDelay->setValue(500);
++    m_spnPalmRejectionDelay->setValue(100);
+     m_chkPalmLargeContacts->setChecked(true);
+     m_spnPalmMaxContactMm->setValue(18);
+     chkEnableTransformToolAfterPaste->setChecked(cfg.activateTransformToolAfterPaste(true));
+@@ -1240,15 +1240,15 @@ void GeneralTab::setupPalmRejectionSettings(KisConfig &cfg)
+ {
+ 
+     m_chkPalmRejection = new QCheckBox(i18n("Palm rejection: ignore touch on the canvas while the pen is in use"), this);
+-    m_chkPalmRejection->setToolTip(i18n("Touches on the canvas are ignored while the pen is touching or hovering over the screen, and for a short time after it was used, so a resting hand neither paints nor moves the canvas."));
++    m_chkPalmRejection->setToolTip(i18n("Touches on the canvas are ignored while the pen is touching the screen or approaching it, and for a moment after it is lifted, so a resting hand neither paints nor moves the canvas."));
+     m_chkPalmRejection->setChecked(cfg.readEntry("palmRejectionEnabled", true));
+ 
+     m_spnPalmRejectionDelay = new QSpinBox(this);
+     m_spnPalmRejectionDelay->setRange(0, 5000);
+-    m_spnPalmRejectionDelay->setSingleStep(100);
++    m_spnPalmRejectionDelay->setSingleStep(50);
+     m_spnPalmRejectionDelay->setSuffix(i18n(" ms"));
+-    m_spnPalmRejectionDelay->setToolTip(i18n("How long touch stays ignored after the pen was last used"));
+-    m_spnPalmRejectionDelay->setValue(cfg.readEntry("palmRejectionDelay", 500));
++    m_spnPalmRejectionDelay->setToolTip(i18n("How long touch stays ignored after the pen is lifted"));
++    m_spnPalmRejectionDelay->setValue(cfg.readEntry("palmRejectionLiftDelay", 100));
+ 
+     m_chkPalmLargeContacts = new QCheckBox(i18n("Also ignore touches larger than"), this);
+     m_chkPalmLargeContacts->setToolTip(i18n("Ignore contacts bigger than a fingertip. Works only on screens that report the size of a touch."));
+@@ -1269,7 +1269,7 @@ void GeneralTab::setupPalmRejectionSettings(KisConfig &cfg)
+     QWidget *delayRow = new QWidget(this);
+     QHBoxLayout *delayLayout = new QHBoxLayout(delayRow);
+     delayLayout->setContentsMargins(0, 0, 0, 0);
+-    delayLayout->addWidget(new QLabel(i18n("Keep ignoring touch after the pen for"), delayRow));
++    delayLayout->addWidget(new QLabel(i18n("Keep ignoring touch after the pen is lifted for"), delayRow));
+     delayLayout->addWidget(m_spnPalmRejectionDelay);
+     delayLayout->addStretch();
+ 
+@@ -1306,7 +1306,7 @@ void GeneralTab::updatePalmRejectionEnabled()
+ void GeneralTab::savePalmRejectionSettings(KisConfig &cfg)
+ {
+     cfg.writeEntry("palmRejectionEnabled", m_chkPalmRejection->isChecked());
+-    cfg.writeEntry("palmRejectionDelay", m_spnPalmRejectionDelay->value());
++    cfg.writeEntry("palmRejectionLiftDelay", m_spnPalmRejectionDelay->value());
+     cfg.writeEntry("palmRejectionLargeContacts", m_chkPalmLargeContacts->isChecked());
+     cfg.writeEntry("palmRejectionMaxContactMm", m_spnPalmMaxContactMm->value());
+ }
+diff --git a/libs/ui/input/KisPalmRejection.cpp b/libs/ui/input/KisPalmRejection.cpp
+index 7dd987f..d1aa636 100644
+--- a/libs/ui/input/KisPalmRejection.cpp
++++ b/libs/ui/input/KisPalmRejection.cpp
+@@ -21,6 +21,9 @@ namespace {
+ // Even with a proximity flag set, stop rejecting when the pen has been silent
+ // this long: some drivers never send "leave proximity".
+ constexpr qint64 PROXIMITY_TIMEOUT_MS = 5000;
++// A pen event after this long a silence means the pen came (back) into range,
++// for platforms that send no proximity events (Android).
++constexpr qint64 PEN_RETURN_GAP_MS = 400;
+ }
+ 
+ KisPalmRejection *KisPalmRejection::instance()
+@@ -44,7 +47,7 @@ void KisPalmRejection::reloadConfig()
+ {
+     KisConfig cfg(true);
+     m_enabled = cfg.readEntry("palmRejectionEnabled", true);
+-    m_graceMs = qBound(0, cfg.readEntry("palmRejectionDelay", 500), 5000);
++    m_graceMs = qBound(0, cfg.readEntry("palmRejectionLiftDelay", 100), 5000);
+     m_checkContactSize = cfg.readEntry("palmRejectionLargeContacts", true);
+     m_maxContactMm = qBound(5, cfg.readEntry("palmRejectionMaxContactMm", 18), 100);
+ }
+@@ -55,24 +58,33 @@ bool KisPalmRejection::eventFilter(QObject *watched, QEvent *event)
+     case QEvent::TabletPress:
+         m_penDown = true;
+         m_penInProximity = true;
++        m_hoverBlocks = false;
+         m_lastPenEvent.start();
+         break;
+     case QEvent::TabletRelease:
++        // lifted: fingers work again once the (short) lift delay is over,
++        // even while the pen still hovers
+         m_penDown = false;
++        m_hoverBlocks = false;
+         m_lastPenEvent.start();
+         break;
+     case QEvent::TabletMove:
+         // includes hover moves on platforms that report them
++        if (!m_penDown && (!m_lastPenEvent.isValid() || m_lastPenEvent.elapsed() > PEN_RETURN_GAP_MS)) {
++            m_hoverBlocks = true; // the pen is coming (back) to the screen
++        }
+         m_penInProximity = true;
+         m_lastPenEvent.start();
+         break;
+     case QEvent::TabletEnterProximity:
+         m_penInProximity = true;
++        m_hoverBlocks = true;
+         m_lastPenEvent.start();
+         break;
+     case QEvent::TabletLeaveProximity:
+         m_penInProximity = false;
+         m_penDown = false;
++        m_hoverBlocks = false;
+         m_lastPenEvent.start();
+         break;
+     default:
+@@ -87,7 +99,7 @@ bool KisPalmRejection::isPenActive() const
+ 
+     const qint64 elapsed = m_lastPenEvent.elapsed();
+     if (m_penDown) return elapsed < PROXIMITY_TIMEOUT_MS * 6; // a long, still press
+-    if (m_penInProximity && elapsed < PROXIMITY_TIMEOUT_MS) return true;
++    if (m_penInProximity && m_hoverBlocks && elapsed < PROXIMITY_TIMEOUT_MS) return true;
+     return elapsed < m_graceMs;
+ }
+ 
+diff --git a/libs/ui/input/KisPalmRejection.h b/libs/ui/input/KisPalmRejection.h
+index 8dc93b2..3adca98 100644
+--- a/libs/ui/input/KisPalmRejection.h
++++ b/libs/ui/input/KisPalmRejection.h
+@@ -22,8 +22,11 @@ class QWidget;
+  * canvas input manager to ignore touch input that is most likely a resting
+  * hand:
+  *
+- *  - while the pen is touching the screen, hovering over it (in proximity),
+- *    or was used less than "palmRejectionDelay" ms ago;
++ *  - while the pen is touching the screen, or was lifted less than
++ *    "palmRejectionLiftDelay" ms ago;
++ *  - while the pen hovers over the screen on its way to it (from entering
++ *    proximity until the first press). Hovering after a stroke does not
++ *    block touch: once the pen is lifted, fingers work again right away;
+  *  - touches whose contact area is larger than "palmRejectionMaxContactMm"
+  *    millimetres (only on screens that report the contact size).
+  *
+@@ -32,7 +35,9 @@ class QWidget;
+  *
+  * Settings (kritarc, edited in Configure Krita > General > Tools):
+  *   palmRejectionEnabled       bool, default true
+- *   palmRejectionDelay         int ms, default 500
++ *   palmRejectionLiftDelay     int ms, default 100 (was palmRejectionDelay,
++ *                              500 ms, which made the first touch after a
++ *                              stroke fail)
+  *   palmRejectionLargeContacts bool, default true
+  *   palmRejectionMaxContactMm  int mm, default 18
+  */
+@@ -65,12 +70,14 @@ private:
+     KisPalmRejection();
+ 
+     bool m_enabled {true};
+-    int m_graceMs {500};
++    int m_graceMs {100};
+     bool m_checkContactSize {true};
+     int m_maxContactMm {18};
+ 
+     bool m_penDown {false};
+     bool m_penInProximity {false};
++    /// hovering blocks touch only before the first press after the pen came in
++    bool m_hoverBlocks {false};
+     QElapsedTimer m_lastPenEvent;
+ };
+ 
