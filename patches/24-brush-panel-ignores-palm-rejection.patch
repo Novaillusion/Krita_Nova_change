@@ -1,0 +1,156 @@
+Krita Nova 24 - the Brush Panel ignores palm rejection (Android)
+
+Palm rejection (patch 09) only filters touches on the canvas. On Android a
+touch sequence goes to the window under its first finger, though, so with a
+palm resting on the canvas a finger on the Brush Panel arrived at the canvas
+as part of the palm's sequence and was ignored along with it.
+
+PanelTouchRouter (KisMainWindow.cpp, Android only) watches touch sequences
+arriving at other windows. A finger that goes down over the floating Brush
+Panel, its "more" popup or a popup opened from it is forwarded to the widget
+under it as mouse press / move / release, so buttons, the size and opacity
+sliders, the colours and the grip work while the palm rests on the canvas or
+the pen is in use. A sequence that starts on the panel reaches it as before.
+diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
+index 6029be8..f7b3014 100644
+--- a/libs/ui/KisMainWindow.cpp
++++ b/libs/ui/KisMainWindow.cpp
+@@ -37,6 +37,7 @@
+ #include <QPainter>
+ #include <QPainterPath>
+ #include <QMouseEvent>
++#include <QTouchEvent>
+ #include <cmath>
+ #include <kis_slider_spin_box.h>
+ #include "widgets/kis_widget_chooser.h"
+@@ -1188,6 +1189,120 @@ private:
+     QPointer<QDockWidget> m_topBar;
+ };
+ 
++/// Palm rejection must not stop the Brush Panel. On Android a touch sequence
++/// goes to the window under its first finger, so with a palm resting on the
++/// canvas, a finger on the panel arrives at the canvas as part of the palm's
++/// (rejected) sequence and the panel never sees it. This forwards such fingers
++/// to the panel, or to one of its popups, as mouse events.
++class PanelTouchRouter : public QObject
++{
++public:
++    explicit PanelTouchRouter(QDockWidget *panel)
++        : QObject(panel), m_panel(panel)
++    {
++        qApp->installEventFilter(this);
++    }
++
++protected:
++    bool eventFilter(QObject *watched, QEvent *event) override
++    {
++        const QEvent::Type type = event->type();
++        if (type != QEvent::TouchBegin && type != QEvent::TouchUpdate
++            && type != QEvent::TouchEnd && type != QEvent::TouchCancel) {
++            return false;
++        }
++        // the raw sequence, as it arrives at a window (not its copies for widgets)
++        QWindow *window = qobject_cast<QWindow *>(watched);
++        if (!window) return false;
++
++        if (type == QEvent::TouchCancel) {
++            finish(m_lastPos);
++            return false;
++        }
++
++        const QTouchEvent *touch = static_cast<QTouchEvent *>(event);
++        Q_FOREACH (const QTouchEvent::TouchPoint &point, touch->touchPoints()) {
++            const QPoint globalPos = point.screenPos().toPoint();
++            if (m_target) {
++                if (point.id() != m_pointId) continue;
++                if (point.state() == Qt::TouchPointReleased) {
++                    finish(globalPos);
++                } else if (point.state() == Qt::TouchPointMoved) {
++                    send(QEvent::MouseMove, globalPos, Qt::LeftButton);
++                }
++                continue;
++            }
++            if (point.state() != Qt::TouchPointPressed) continue;
++
++            QWidget *top = panelWindowAt(globalPos);
++            // a sequence that starts on the panel reaches it the normal way
++            if (!top || top->windowHandle() == window) continue;
++
++            QWidget *target = top->childAt(top->mapFromGlobal(globalPos));
++            m_target = target ? target : top;
++            m_pointId = point.id();
++            send(QEvent::MouseButtonPress, globalPos, Qt::LeftButton);
++        }
++        if (type == QEvent::TouchEnd) {
++            finish(m_lastPos); // the finger was lifted without a release point
++        }
++        return false;
++    }
++
++private:
++    /// the panel, or a window opened from it (the "more" popup and the popups
++    /// of its buttons), under a screen position
++    QWidget *panelWindowAt(const QPoint &globalPos) const
++    {
++        if (!m_panel || !m_panel->isVisible()) return nullptr;
++
++        QWidget *top = QApplication::topLevelAt(globalPos);
++        if (top && belongsToPanel(top)) return top;
++
++        // topLevelAt may not know about the stacking order: popups first
++        QWidget *found = nullptr;
++        Q_FOREACH (QWidget *w, QApplication::topLevelWidgets()) {
++            if (!w->isVisible() || !w->frameGeometry().contains(globalPos)) continue;
++            if (!belongsToPanel(w)) continue;
++            if (w != m_panel) return w;
++            found = w;
++        }
++        return found;
++    }
++
++    bool belongsToPanel(QWidget *window) const
++    {
++        if (window == m_panel) return m_panel->isFloating();
++        for (QWidget *w = window->parentWidget(); w; w = w->parentWidget()) {
++            if (w == m_panel) return true;
++        }
++        return false;
++    }
++
++    void send(QEvent::Type type, const QPoint &globalPos, Qt::MouseButtons buttons)
++    {
++        m_lastPos = globalPos;
++        if (!m_target) return;
++        const Qt::MouseButton button = type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton;
++        QMouseEvent mouse(type, m_target->mapFromGlobal(globalPos), globalPos, button,
++                          buttons, QGuiApplication::keyboardModifiers());
++        QApplication::sendEvent(m_target, &mouse);
++    }
++
++    void finish(const QPoint &globalPos)
++    {
++        if (!m_target) return;
++        send(QEvent::MouseButtonRelease, globalPos, Qt::NoButton);
++        m_target.clear();
++        m_pointId = -1;
++    }
++
++    QPointer<QDockWidget> m_panel;
++    QPointer<QWidget> m_target;
++    int m_pointId {-1};
++    QPoint m_lastPos;
++};
++
+ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *viewManager, QStackedWidget *mainStack)
+ {
+     QDockWidget *topBar = createAndroidTopBarDock(mainWindow);
+@@ -1286,6 +1401,9 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+     // Show it once the main window is on screen: a floating dock is a window
+     // of its own and is not shown along with the main window, and the saved
+     // window state / workspace restored during startup may hide or re-dock it.
++    // fingers on the panel work while a palm rests on the canvas
++    new PanelTouchRouter(dock);
++
+     BrushPanelShower *shower = new BrushPanelShower(mainWindow, dock, keeper, mainStack);
+     keeper->onToolBarShown = [shower]() { shower->toolBarShown(); };
+ 
