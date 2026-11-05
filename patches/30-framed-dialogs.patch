@@ -13,29 +13,28 @@ no platform frame but a look of their own:
   handles these dialogs).
 
 KisTouchFriendlyStyle.cpp, DialogFramer (installed with the Android style):
-when a QDialog with a layout is polished - right before it is first shown -
-it gets FramelessWindowHint and a translucent background. If its platform
-window was already created (but not yet shown), that window is dropped and
-created again, frameless and with an alpha channel, when the dialog is shown,
-and the dialog gets a new backing store for it. A DialogFrame adds the title
-bar above the dialog's layout (whose margins make room for it) and paints the
-rounded background. Popups, tooltips, splash screens and windows that are
-already frameless are left alone.
+a dialog-type window gets FramelessWindowHint and a translucent background
+when it is created (QEvent::Create, sent from QWidget's constructor, before
+its platform window exists, so flags and alpha channel apply). When it is
+polished, right before it is first shown, a QDialog with a layout gets a
+DialogFrame: the title bar above the dialog's layout (whose margins make room
+for it) and the rounded background. Anything else (no layout, not a QDialog,
+or the window set its own flags meanwhile) gets its normal background and
+frame back. Popups, tooltips and windows that are already frameless are left
+alone.
 diff --git a/libs/ui/KisTouchFriendlyStyle.cpp b/libs/ui/KisTouchFriendlyStyle.cpp
-index 87f19c6..bc15c83 100644
+index 87f19c6..958bae8 100644
 --- a/libs/ui/KisTouchFriendlyStyle.cpp
 +++ b/libs/ui/KisTouchFriendlyStyle.cpp
 @@ -14,9 +14,23 @@
  #include <QScreen>
  #include <QStyleFactory>
  #include <QWindow>
-+#include <QBackingStore>
 +#include <QDialog>
 +#include <QHBoxLayout>
 +#include <QLabel>
 +#include <QLayout>
 +#include <QPainter>
-+#include <QSurfaceFormat>
 +#include <QToolButton>
 +
 +#include <kis_icon_utils.h>
@@ -45,6 +44,8 @@ index 87f19c6..bc15c83 100644
  
 +/// set on dialogs that got Krita Nova's own frame (DialogFramer)
 +const char NOVA_DECORATED_PROPERTY[] = "_kisNovaFramedDialog";
++/// set on dialog-type windows that were made frameless when they were created
++const char NOVA_CANDIDATE_PROPERTY[] = "_kisNovaFramelessDialog";
 +
  /**
   * Resizes floating (undocked) dockers by dragging anywhere in a wide band
@@ -96,7 +97,7 @@ index 87f19c6..bc15c83 100644
      QPointer<QWidget> m_target;
      bool m_resizing {false};
      bool m_replaying {false};
-@@ -205,6 +223,218 @@ private:
+@@ -205,6 +223,219 @@ private:
      QRect m_startGeometry;
  };
  
@@ -124,10 +125,13 @@ index 87f19c6..bc15c83 100644
 +protected:
 +    bool eventFilter(QObject *watched, QEvent *event) override
 +    {
-+        if (event->type() == QEvent::Polish) {
-+            if (QDialog *dialog = qobject_cast<QDialog *>(watched)) {
-+                frame(dialog);
-+            }
++        if (event->type() == QEvent::Create) {
++            // sent while the widget is being constructed, long before its
++            // platform window exists (flags and alpha channel are fixed then)
++            if (watched->isWidgetType()) prepare(static_cast<QWidget *>(watched));
++        } else if (event->type() == QEvent::Polish) {
++            // right before the window is first shown, fully constructed
++            if (watched->isWidgetType()) finish(static_cast<QWidget *>(watched));
 +        }
 +        return false;
 +    }
@@ -135,41 +139,39 @@ index 87f19c6..bc15c83 100644
 +private:
 +    explicit DialogFramer(QObject *parent) : QObject(parent) {}
 +
-+    static bool wantsFrame(QDialog *dialog)
++    /// a dialog-type window: no platform frame, a translucent background
++    static void prepare(QWidget *widget)
 +    {
-+        if (!dialog->isWindow() || dialog->isVisible()) return false;
-+        if (dialog->property(NOVA_DECORATED_PROPERTY).toBool()) return false;
-+        const Qt::WindowFlags flags = dialog->windowFlags();
-+        const Qt::WindowType type = dialog->windowType();
-+        if (type == Qt::Popup || type == Qt::ToolTip || type == Qt::SplashScreen) return false;
-+        if (flags & Qt::FramelessWindowHint) return false; // has its own look already
-+        // a dialog without a layout has nowhere to put the title bar
-+        return dialog->layout() != nullptr;
++        if (!widget->isWindow()) return;
++        const Qt::WindowType type = widget->windowType();
++        if (type != Qt::Dialog && type != Qt::Sheet) return;
++        if (widget->windowFlags() & Qt::FramelessWindowHint) return; // has its own look
++        widget->setProperty(NOVA_CANDIDATE_PROPERTY, true);
++        widget->overrideWindowFlags(widget->windowFlags() | Qt::FramelessWindowHint);
++        widget->setAttribute(Qt::WA_TranslucentBackground, true);
 +    }
 +
-+    static void frame(QDialog *dialog)
++    static void finish(QWidget *widget)
 +    {
-+        if (!wantsFrame(dialog)) return;
-+        dialog->setProperty(NOVA_DECORATED_PROPERTY, true);
++        if (!widget->property(NOVA_CANDIDATE_PROPERTY).toBool()) return;
++        widget->setProperty(NOVA_CANDIDATE_PROPERTY, false);
 +
-+        // no platform frame; rounded corners need a window with an alpha channel
-+        dialog->overrideWindowFlags(dialog->windowFlags() | Qt::FramelessWindowHint);
-+        dialog->setAttribute(Qt::WA_TranslucentBackground, true);
-+        if (QWindow *window = dialog->windowHandle()) {
-+            // The platform window exists already (a dialog is polished right
-+            // after it is created, when it is first shown) but is not visible
-+            // yet. Flags and format only apply to a new one: drop it, and
-+            // it is created again, frameless, when the dialog is shown. The
-+            // backing store belonged to the old one, so it gets a new one too.
-+            window->destroy();
-+            QSurfaceFormat format = window->requestedFormat();
-+            format.setAlphaBufferSize(8);
-+            window->setFormat(format);
-+            window->setFlags(dialog->windowFlags());
-+            dialog->setBackingStore(new QBackingStore(window));
++        QDialog *dialog = qobject_cast<QDialog *>(widget);
++        const bool stillFrameless = widget->windowFlags() & Qt::FramelessWindowHint;
++        if (dialog && stillFrameless && dialog->layout()) {
++            dialog->setProperty(NOVA_DECORATED_PROPERTY, true);
++            new DialogFrame(dialog);
++            return;
 +        }
 +
-+        new DialogFrame(dialog);
++        // not a dialog, no layout to put a title bar on, or the window set
++        // its own flags meanwhile: give it its normal background and frame back
++        widget->setAttribute(Qt::WA_TranslucentBackground, false);
++        widget->setAttribute(Qt::WA_NoSystemBackground, false);
++        if (stillFrameless) {
++            widget->overrideWindowFlags(widget->windowFlags() & ~Qt::FramelessWindowHint);
++            if (QWindow *window = widget->windowHandle()) window->setFlags(widget->windowFlags());
++        }
 +    }
 +
 +    /// title bar + rounded background of one dialog
@@ -315,7 +317,7 @@ index 87f19c6..bc15c83 100644
  } // namespace
  
  KisTouchFriendlyStyle::KisTouchFriendlyStyle(const QString &baseStyleName)
-@@ -263,4 +493,5 @@ void KisTouchFriendlyStyle::applyStyle(const QString &styleName)
+@@ -263,4 +494,5 @@ void KisTouchFriendlyStyle::applyStyle(const QString &styleName)
  
      qApp->setStyle(new KisTouchFriendlyStyle(styleName));
      FloatingDockResizer::install();
