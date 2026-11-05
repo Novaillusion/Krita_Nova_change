@@ -1,0 +1,55 @@
+Krita Nova 25 - the top bar is no taller than its buttons (Android)
+
+On the first start (no saved window layout) the top dock area took its height
+from what was docked there while the window was being set up and kept it,
+so the top bar with New/Open/Save, mirror, wrap etc. was several times taller
+than its buttons.
+
+TopRowArranger (patch 15) now also shrinks the top bar's row, at every start
+once the layout has settled, to the height the top bar needs (or the
+Toolbox, if it shares the row and needs more). A second row of dockers at the
+top, which only exists if the user made one, is left alone.
+diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
+index f7b3014..22efca3 100644
+--- a/libs/ui/KisMainWindow.cpp
++++ b/libs/ui/KisMainWindow.cpp
+@@ -1175,6 +1175,8 @@ private:
+     {
+         if (!m_mainWindow || !m_topBar) return;
+         m_topBar->show();
++        // once the layout has settled: no taller than its contents
++        QTimer::singleShot(0, this, [this]() { fitTopRow(); });
+         if (KisConfig(true).readEntry("androidToolboxRowArranged", false)) return;
+         QDockWidget *toolbox = m_mainWindow->findChild<QDockWidget *>(QStringLiteral("ToolBox"));
+         if (!toolbox || toolbox->isFloating()
+@@ -1185,6 +1187,30 @@ private:
+         KisConfig(false).writeEntry("androidToolboxRowArranged", true);
+     }
+ 
++    /**
++     * Without a saved window layout (first start) the top dock area gets its
++     * height from whatever was docked there while the window was set up (the
++     * Toolbox above or below the top bar, before it is moved next to it), and
++     * keeps it: the bar ends up several times taller than its buttons. Shrink
++     * the row to what the top bar, and the dockers sharing its row, need.
++     */
++    void fitTopRow()
++    {
++        if (!m_mainWindow || !m_topBar || m_topBar->isFloating() || !m_topBar->isVisible()) return;
++
++        int height = m_topBar->sizeHint().height();
++        Q_FOREACH (QDockWidget *dock, m_mainWindow->findChildren<QDockWidget *>()) {
++            if (dock == m_topBar || dock->isFloating() || !dock->isVisible()) continue;
++            if (m_mainWindow->dockWidgetArea(dock) != Qt::TopDockWidgetArea) continue;
++            // a second row of dockers at the top was made on purpose: leave it
++            if (qAbs(dock->y() - m_topBar->y()) > 4) return;
++            height = qMax(height, dock->minimumSizeHint().height());
++        }
++        if (height > 0 && m_topBar->height() > height + 8) {
++            m_mainWindow->resizeDocks({m_topBar}, {height}, Qt::Vertical);
++        }
++    }
++
+     QPointer<QMainWindow> m_mainWindow;
+     QPointer<QDockWidget> m_topBar;
+ };
