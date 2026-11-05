@@ -1,0 +1,52 @@
+Krita Nova 29 - the Line tool erases when it is used from the Eraser tool
+
+The eraser is a tool of its own (patch 01): switching to it gives the brush
+eraser mode, the eraser preset and its own size/opacity, and switching to any
+other tool takes that away again. So the Line tool, switched to from the
+Eraser tool (with the line tool shortcut, patch 13), drew a normal brush line.
+
+KisPaintopBox::slotToolChanged(): the Line tool, entered from the Eraser tool,
+keeps the eraser active - same preset, eraser mode, eraser size and opacity -
+so it draws erasing lines, and the eraser button stays checked. Choosing any
+other tool than the Line or Eraser tool ends it as before; "E" goes back to
+the tool used before the eraser. The Line tool entered from the Brush tool
+draws normally.
+diff --git a/libs/ui/kis_paintop_box.cc b/libs/ui/kis_paintop_box.cc
+index def7065..8ada2be 100644
+--- a/libs/ui/kis_paintop_box.cc
++++ b/libs/ui/kis_paintop_box.cc
+@@ -86,6 +86,7 @@ namespace {
+ // Tool ids (defined in plugins/tools/basictools)
+ const QString ERASER_TOOL_ID = QStringLiteral("KritaShape/KisToolEraser");
+ const QString BRUSH_TOOL_ID  = QStringLiteral("KritaShape/KisToolBrush");
++const QString LINE_TOOL_ID   = QStringLiteral("KritaShape/KisToolLine");
+ }
+ 
+ KisPaintopBox::KisPaintopBox(KisViewManager *viewManager, QWidget *parent, const char *name)
+@@ -1406,7 +1407,13 @@ void KisPaintopBox::slotToolChanged(KoCanvasController* canvas)
+ 
+     QString  id   = m_viewManager->toolManager()->activeToolId();
+ 
+-    const bool isEraserTool = (id == ERASER_TOOL_ID);
++    // Krita Nova (patch 29): the Line tool, switched to from the Eraser tool,
++    // draws erasing lines: the eraser stays active (same preset, eraser mode,
++    // eraser size/opacity) until another tool is chosen.
++    const bool isEraserLine = (id == LINE_TOOL_ID)
++            && (m_eraserToolActive || m_eraserLineActive);
++    const bool isEraserTool = (id == ERASER_TOOL_ID) || isEraserLine;
++    m_eraserLineActive = isEraserLine;
+     if (isEraserTool != m_eraserToolActive) {
+         setEraserToolActive(isEraserTool);
+     }
+diff --git a/libs/ui/kis_paintop_box.h b/libs/ui/kis_paintop_box.h
+index d25514e..c99e657 100644
+--- a/libs/ui/kis_paintop_box.h
++++ b/libs/ui/kis_paintop_box.h
+@@ -285,6 +285,7 @@ private:
+ 
+     // --- Eraser tool state (the eraser is a tool, not a brush mode) ---
+     bool               m_eraserToolActive {false};
++    bool               m_eraserLineActive {false}; ///< the Line tool, entered from the Eraser tool, erases
+     bool               m_eraserToolPresetOriginalEraserMode {false};
+     KisPaintOpPresetSP m_eraserToolPreset;       ///< preset the Eraser tool uses / last used
+     KisPaintOpPresetSP m_presetBeforeEraserTool; ///< preset to restore when leaving the Eraser tool
