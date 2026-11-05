@@ -48,7 +48,10 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
    (brushslider1/2): drag up/down to change the value relative to where the
    drag started (Size uses the same cubic curve). A small white "S" / "O"
    sits at the bottom of each; while dragging, the value shows as just the
-   number and unit ("40 px", "75%"). First placement: as narrow as the sliders allow (~52 px), 66% of
+   number and unit ("40 px", "75%"), in the UI font size (two lines if
+   "1000 px" doesn't fit; the Android font is set in pixels, so scaling
+   pointSizeF() had given a 6 pt font). The panel width is fixed, as narrow
+   as the sliders allow; only the height can be changed. First placement: 66% of
    the window height, vertically centered at the left edge (kritarc:
    androidBrushPanelPlaced4). Thin frame (PM_DockWidgetFrameWidth 3 for this
    panel, 3 px side margins, extra room around the color squares/sampler).
@@ -80,10 +83,10 @@ lock/reload, size, opacity) move into a floating narrow "Brush Panel".
 Desktop builds are unchanged.
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 2c48914..c856d6b 100644
+index 2c48914..86777df 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
-@@ -20,6 +20,27 @@
+@@ -20,6 +20,28 @@
  #include <QScreen>
  #include <QDialog>
  #include <QDockWidget>
@@ -91,6 +94,7 @@ index 2c48914..c856d6b 100644
 +#include <QTimer>
 +#include <functional>
 +#include <QWidgetAction>
++#include <QStyle>
 +#include <KisPopupButton.h>
 +#include <QElapsedTimer>
 +#include <QStackedWidget>
@@ -111,7 +115,7 @@ index 2c48914..c856d6b 100644
  #include <QIcon>
  #include <QInputDialog>
  #include <QLayout>
-@@ -366,6 +387,910 @@ public:
+@@ -366,6 +388,922 @@ public:
      }
  };
  
@@ -191,8 +195,9 @@ index 2c48914..c856d6b 100644
 +        p.restore();
 +        // small white letter at the bottom: "S" (size), "O" (opacity)
 +        {
-+            QFont f = font();
-+            f.setPointSizeF(qMax(6.0, f.pointSizeF() * 0.85));
++            // the normal UI font size (the Android font is set in pixels, so
++            // pointSizeF() is -1 there and scaling it gave a 6 pt font)
++            QFont f = QApplication::font();
 +            f.setBold(true);
 +            p.setFont(f);
 +            const QRectF letterRect(track.left(), track.bottom() - QFontMetricsF(f).height() - 4,
@@ -212,12 +217,16 @@ index 2c48914..c856d6b 100644
 +                const int decimals = m_painted < 10.0 ? 1 : 0;
 +                text = QLocale().toString(m_painted, 'f', decimals) + QLatin1Char(' ') + m_unit;
 +            }
-+            QFont f = font();
-+            f.setPointSizeF(qMax(6.0, f.pointSizeF() * 0.8));
++            QFont f = QApplication::font();
 +            p.setFont(f);
-+            const QRectF label(track.left(), track.top() + 4, track.width(), QFontMetricsF(f).height() * 1.2);
-+            p.setPen(pos > 0.9 ? palette().color(QPalette::Window) : palette().color(QPalette::WindowText));
-+            p.drawText(label, Qt::AlignHCenter | Qt::AlignTop, text);
++            const QFontMetricsF fm(f);
++            // too wide for the bar ("1000 px"): number and unit on two lines
++            if (fm.horizontalAdvance(text) > track.width() - 2 && m_unit != QLatin1String("%")) {
++                text.replace(QLatin1Char(' '), QLatin1Char('\n'));
++            }
++            const QRectF label(track.left(), track.top() + 4, track.width(), fm.height() * 2.2);
++            p.setPen(pos > 0.85 ? palette().color(QPalette::Window) : palette().color(QPalette::WindowText));
++            p.drawText(label, Qt::AlignHCenter | Qt::AlignTop | Qt::TextDontClip, text);
 +        }
 +    }
 +
@@ -676,12 +685,19 @@ index 2c48914..c856d6b 100644
 +        const bool onScreen = m_dock->isFloating() && m_dock->width() > 20 && m_dock->height() > 100
 +                              && available.intersects(m_dock->frameGeometry());
 +
++        // the width is fixed: as narrow as the sliders allow (resizing only
++        // made it wider, never narrower again)
++        const int panelWidth = qMax(m_dock->widget() ? m_dock->widget()->sizeHint().width()
++                                                     : m_dock->sizeHint().width(), 46)
++                               + 2 * m_dock->style()->pixelMetric(QStyle::PM_DockWidgetFrameWidth, nullptr, m_dock);
++        m_dock->setFixedWidth(panelWidth);
++
 +        if (force || !placedBefore || !onScreen) {
 +            m_dock->setFloating(true);
 +            m_dock->adjustSize();
 +            // as narrow as the sliders allow; a bit taller so the color squares
 +            // and the sampler button have room at the bottom
-+            const int width = qMax(m_dock->sizeHint().width(), 52);
++            const int width = panelWidth;
 +            const int height = qMax(320, int(area.height() * 0.66));
 +            const int top = area.top() + (area.height() - height) / 2;
 +            m_dock->setGeometry(area.left() + 8, top, width, height);
@@ -1022,7 +1038,7 @@ index 2c48914..c856d6b 100644
  KisMainWindow::KisMainWindow(QUuid uuid)
      : KXmlGuiWindow()
      , d(new Private(this, uuid))
-@@ -608,6 +1533,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
+@@ -608,6 +1546,15 @@ KisMainWindow::KisMainWindow(QUuid uuid)
          }
      }
  
