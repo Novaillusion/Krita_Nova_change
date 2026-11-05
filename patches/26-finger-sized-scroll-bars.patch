@@ -1,0 +1,70 @@
+Krita Nova 26 - scroll bars you can grab with a finger (Android)
+
+In an undocked docker (Brush Presets, for example) the scroll bar runs along
+the docker's right edge, inside the band that resizes floating dockers
+(patch 14), so dragging it resized the docker instead. It was also only a few
+pixels wide.
+
+1. FloatingDockResizer: a press on a scroll bar is left to the scroll bar.
+   The docker's frame still resizes it.
+2. KisTouchFriendlyStyle: scroll bars are at least 22 px wide.
+diff --git a/libs/ui/KisTouchFriendlyStyle.cpp b/libs/ui/KisTouchFriendlyStyle.cpp
+index ce54c82..87f19c6 100644
+--- a/libs/ui/KisTouchFriendlyStyle.cpp
++++ b/libs/ui/KisTouchFriendlyStyle.cpp
+@@ -6,6 +6,7 @@
+ 
+ #include "KisTouchFriendlyStyle.h"
+ 
++#include <QScrollBar>
+ #include <QApplication>
+ #include <QDockWidget>
+ #include <QMouseEvent>
+@@ -46,6 +47,9 @@ protected:
+             if (m_dock) return true; // already resizing; swallow extra presses
+             QMouseEvent *e = static_cast<QMouseEvent *>(event);
+             if (e->button() != Qt::LeftButton || !watched->isWidgetType()) break;
++            // a scroll bar along the docker's edge scrolls: the docker's frame
++            // still resizes it
++            if (isInScrollBar(static_cast<QWidget *>(watched))) break;
+             QDockWidget *dock = floatingDockFor(static_cast<QWidget *>(watched));
+             if (!dock) break;
+             const int edges = edgesAt(dock, e->globalPos());
+@@ -104,6 +108,14 @@ private:
+         return nullptr;
+     }
+ 
++    static bool isInScrollBar(QWidget *widget)
++    {
++        for (QWidget *w = widget; w && !w->isWindow(); w = w->parentWidget()) {
++            if (qobject_cast<QScrollBar *>(w)) return true;
++        }
++        return false;
++    }
++
+     static int edgesAt(QDockWidget *dock, const QPoint &globalPos)
+     {
+         const QPoint p = dock->mapFromGlobal(globalPos);
+@@ -213,6 +225,8 @@ int KisTouchFriendlyStyle::pixelMetric(PixelMetric metric, const QStyleOption *o
+     case PM_DockWidgetSeparatorExtent:
+     case PM_SplitterWidth:
+         return qMax(value, TOUCH_HANDLE_EXTENT);
++    case PM_ScrollBarExtent:
++        return qMax(value, SCROLL_BAR_EXTENT);
+     case PM_DockWidgetFrameWidth:
+         // only used for floating dockers with a custom title bar (Krita's);
+         // the Brush Panel (patch 15) has a thinner one
+diff --git a/libs/ui/KisTouchFriendlyStyle.h b/libs/ui/KisTouchFriendlyStyle.h
+index 4c20feb..1885637 100644
+--- a/libs/ui/KisTouchFriendlyStyle.h
++++ b/libs/ui/KisTouchFriendlyStyle.h
+@@ -50,6 +50,9 @@ public:
+      * band (no movement) still reaches the widget underneath.
+      */
+     static constexpr int FLOATING_DOCK_GRAB_EXTENT = 22;
++
++    /// Width of scroll bars, wide enough to grab with a finger
++    static constexpr int SCROLL_BAR_EXTENT = 22;
+ };
+ 
+ #endif // KIS_TOUCH_FRIENDLY_STYLE_H
