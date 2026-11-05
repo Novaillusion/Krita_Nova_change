@@ -1,0 +1,99 @@
+Krita Nova 23 - rounded undocked dockers and brush editor (Android)
+
+Like the Brush Panel (patch 15), every docker gets rounded corners (8 px) and
+a grey 1.5 px outline while it is undocked, and so does the brush editor
+("Brush Settings") popup.
+
+1. KisMainWindow::createDockWidget(): on Android, RoundedPanelPainter is
+   installed on every docker. It paints only while the docker is a window of
+   its own (floating); docked dockers look as before. The floating frame
+   (at least 6 px, patch 14) keeps the docker's contents inside the rounded
+   corners.
+2. KisPopupButtonFrame (patch 11): on Android, a popup with a title bar has a
+   translucent background and paints the rounded panel itself; the title
+   bar no longer fills its own (square) background, and the frame has small
+   margins so the contents stay inside the corners.
+
+diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
+index 1fcfaca..6029be8 100644
+--- a/libs/ui/KisMainWindow.cpp
++++ b/libs/ui/KisMainWindow.cpp
+@@ -1006,6 +1006,8 @@ protected:
+     {
+         if (event->type() != QEvent::Paint) return false;
+         QWidget *widget = static_cast<QWidget *>(watched);
++        // only as a window of its own (a docker while it is floating)
++        if (!widget->isWindow()) return false;
+         QPainter p(widget);
+         p.setRenderHint(QPainter::Antialiasing, true);
+         p.setCompositionMode(QPainter::CompositionMode_Source);
+@@ -3441,6 +3443,12 @@ QDockWidget* KisMainWindow::createDockWidget(KoDockFactoryBase* factory)
+             return 0;
+         }
+ 
++#ifdef Q_OS_ANDROID
++        // Krita Nova: rounded corners and a grey outline while undocked, like
++        // the Brush Panel (painted only while the docker is a window of its own)
++        RoundedPanelPainter::install(dockWidget);
++#endif
++
+         KoDockWidgetTitleBar *titleBar = dynamic_cast<KoDockWidgetTitleBar*>(dockWidget->titleBarWidget());
+ 
+         // Check if the dock widget is supposed to be collapsible
+diff --git a/libs/widgetutils/KisPopupButton.cpp b/libs/widgetutils/KisPopupButton.cpp
+index f1aa1c0..04cc28b 100644
+--- a/libs/widgetutils/KisPopupButton.cpp
++++ b/libs/widgetutils/KisPopupButton.cpp
+@@ -21,6 +21,7 @@
+ #include <QScreen>
+ #include <QStyleOption>
+ #include <QStylePainter>
++#include <QPainter>
+ #include <QWindow>
+ #include <QMenu>
+ 
+@@ -62,7 +63,14 @@ public:
+             if (!titleBar) {
+                 titleBar = new QWidget(this);
+                 titleBar->setObjectName("KisPopupButtonTitleBar");
++#ifdef Q_OS_ANDROID
++                // Krita Nova: the frame paints a rounded panel behind it
++                titleBar->setAutoFillBackground(false);
++                setAttribute(Qt::WA_TranslucentBackground, true);
++                frameLayout->setContentsMargins(4, 3, 4, 4);
++#else
+                 titleBar->setAutoFillBackground(true);
++#endif
+                 titleBar->setBackgroundRole(QPalette::Window);
+ 
+                 QHBoxLayout *barLayout = new QHBoxLayout(titleBar);
+@@ -152,6 +160,29 @@ public:
+     }
+ 
+ protected:
++#ifdef Q_OS_ANDROID
++    // Krita Nova: rounded corners and a grey outline for popups with a title
++    // bar (the brush editor), like the undocked dockers and the Brush Panel
++    void paintEvent(QPaintEvent *event) override
++    {
++        if (!titleBar) {
++            QFrame::paintEvent(event);
++            return;
++        }
++        QPainter p(this);
++        p.setRenderHint(QPainter::Antialiasing, true);
++        p.setCompositionMode(QPainter::CompositionMode_Source);
++        p.fillRect(rect(), Qt::transparent);
++        p.setCompositionMode(QPainter::CompositionMode_SourceOver);
++        QColor outline = palette().color(QPalette::WindowText);
++        outline.setAlpha(110);
++        const qreal pen = 1.5;
++        p.setPen(QPen(outline, pen));
++        p.setBrush(palette().color(QPalette::Window));
++        p.drawRoundedRect(QRectF(rect()).adjusted(pen / 2, pen / 2, -pen / 2, -pen / 2), 8.0, 8.0);
++    }
++#endif
++
+     bool eventFilter(QObject *watched, QEvent *event) override
+     {
+         if (watched == titleBar) {
