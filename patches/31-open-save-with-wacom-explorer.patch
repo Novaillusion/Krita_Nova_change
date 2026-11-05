@@ -1,0 +1,330 @@
+Krita Nova 31 - open and save with the Wacom Explorer (Android)
+
+When the user's file explorer (Wacom Explorer, package com.example.fileexplorer,
+github.com/Novaillusion/Nova_file_exlorer) is installed, File > Open, Import,
+Save As and Export use it instead of Android's system file picker.
+
+KoFileDialog.cpp (Android): for OpenFile/ImportFile, OpenFiles/ImportFiles and
+SaveFile (after the existing "Save As:" format choice), Krita sends the
+explorer's own requests to its PickerActivity:
+  com.example.fileexplorer.action.OPEN_DOCUMENT   (like ACTION_OPEN_DOCUMENT)
+  com.example.fileexplorer.action.CREATE_DOCUMENT (like ACTION_CREATE_DOCUMENT)
+with the MIME type, EXTRA_TITLE (suggested name, with the chosen extension),
+EXTRA_ALLOW_MULTIPLE and com.example.fileexplorer.extra.EXTENSIONS (the file
+extensions of the dialog's filters, so the explorer dims the rest), and waits
+for the result (QtAndroid::startActivity). The explorer answers with document
+URIs of its documents provider, readable and writable; Krita keeps access to
+them (takePersistableUriPermission). They are content:// URIs like the system
+picker's, so opening, saving, autosave and recent files work as before.
+
+If the explorer is not installed, the request can't be started, or
+[File Dialogs] UseNovaExplorer=false is set in kritarc, the system picker is
+used as before. Folder pickers always use the system picker.
+
+AndroidManifest.xml: <queries> for com.example.fileexplorer, without which
+Android 11+ hides the explorer from Krita.
+diff --git a/libs/widgetutils/KoFileDialog.cpp b/libs/widgetutils/KoFileDialog.cpp
+index d4ad079..385cf45 100644
+--- a/libs/widgetutils/KoFileDialog.cpp
++++ b/libs/widgetutils/KoFileDialog.cpp
+@@ -29,6 +29,218 @@
+ #include "KisMacosSecurityBookmarkManager.h"
+ #endif
+ 
++#ifdef Q_OS_ANDROID
++#include <QAndroidJniEnvironment>
++#include <QAndroidJniObject>
++#include <QEventLoop>
++#include <QPointer>
++#include <QRegularExpression>
++#include <QtAndroid>
++
++namespace {
++/**
++ * Krita Nova (patch 31): open and save files with the user's own file explorer
++ * ("Wacom Explorer", com.example.fileexplorer) instead of Android's system file
++ * picker, when it is installed. The explorer answers two requests of its own
++ * (like ACTION_OPEN_DOCUMENT / ACTION_CREATE_DOCUMENT) with document URIs of its
++ * documents provider, readable and writable, which Krita keeps access to - the
++ * same kind of content:// URI the system picker gives, so the rest of Krita
++ * (opening, saving, recent files) works unchanged.
++ *
++ * Folder pickers still use the system picker. Turn it off with
++ * [File Dialogs] UseNovaExplorer=false in kritarc.
++ */
++const char NOVA_EXPLORER_PACKAGE[] = "com.example.fileexplorer";
++const char NOVA_EXPLORER_PICKER[] = "com.example.fileexplorer.PickerActivity";
++const char NOVA_ACTION_OPEN[] = "com.example.fileexplorer.action.OPEN_DOCUMENT";
++const char NOVA_ACTION_CREATE[] = "com.example.fileexplorer.action.CREATE_DOCUMENT";
++const char NOVA_EXTRA_EXTENSIONS[] = "com.example.fileexplorer.extra.EXTENSIONS";
++const int NOVA_EXPLORER_REQUEST = 0x4E6F;
++const int ANDROID_RESULT_OK = -1;
++const int FLAG_GRANT_READ = 0x1;
++const int FLAG_GRANT_WRITE = 0x2;
++
++bool clearJniException()
++{
++    QAndroidJniEnvironment env;
++    if (env->ExceptionCheck()) {
++        env->ExceptionDescribe();
++        env->ExceptionClear();
++        return true;
++    }
++    return false;
++}
++
++QAndroidJniObject jstring_(const QString &s)
++{
++    return QAndroidJniObject::fromString(s);
++}
++
++void putExtra(QAndroidJniObject &intent, const QString &key, const QString &value)
++{
++    intent.callObjectMethod("putExtra", "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
++                            jstring_(key).object<jstring>(), jstring_(value).object<jstring>());
++}
++
++void putExtra(QAndroidJniObject &intent, const QString &key, bool value)
++{
++    intent.callObjectMethod("putExtra", "(Ljava/lang/String;Z)Landroid/content/Intent;",
++                            jstring_(key).object<jstring>(), jboolean(value));
++}
++
++void putExtra(QAndroidJniObject &intent, const QString &key, const QStringList &values)
++{
++    QAndroidJniEnvironment env;
++    jclass stringClass = env->FindClass("java/lang/String");
++    jobjectArray array = env->NewObjectArray(values.size(), stringClass, nullptr);
++    for (int i = 0; i < values.size(); ++i) {
++        QAndroidJniObject value = jstring_(values[i]);
++        env->SetObjectArrayElement(array, i, value.object<jstring>());
++    }
++    intent.callObjectMethod("putExtra", "(Ljava/lang/String;[Ljava/lang/String;)Landroid/content/Intent;",
++                            jstring_(key).object<jstring>(), array);
++    env->DeleteLocalRef(array);
++    env->DeleteLocalRef(stringClass);
++}
++
++QAndroidJniObject explorerIntent(bool save)
++{
++    QAndroidJniObject intent("android/content/Intent", "(Ljava/lang/String;)V",
++                             jstring_(save ? NOVA_ACTION_CREATE : NOVA_ACTION_OPEN).object<jstring>());
++    intent.callObjectMethod("setClassName", "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
++                            jstring_(NOVA_EXPLORER_PACKAGE).object<jstring>(),
++                            jstring_(NOVA_EXPLORER_PICKER).object<jstring>());
++    return intent;
++}
++
++bool explorerInstalled(const QAndroidJniObject &intent)
++{
++    QAndroidJniObject activity = QtAndroid::androidActivity();
++    if (!activity.isValid()) return false;
++    QAndroidJniObject packageManager =
++        activity.callObjectMethod("getPackageManager", "()Landroid/content/pm/PackageManager;");
++    if (clearJniException() || !packageManager.isValid()) return false;
++    QAndroidJniObject component =
++        intent.callObjectMethod("resolveActivity",
++                                "(Landroid/content/pm/PackageManager;)Landroid/content/ComponentName;",
++                                packageManager.object());
++    if (clearJniException()) return false;
++    return component.isValid();
++}
++
++QStringList urisFromResult(const QAndroidJniObject &data)
++{
++    QStringList uris;
++    if (!data.isValid()) return uris;
++    QAndroidJniObject clip = data.callObjectMethod("getClipData", "()Landroid/content/ClipData;");
++    clearJniException();
++    if (clip.isValid()) {
++        const int count = clip.callMethod<jint>("getItemCount");
++        for (int i = 0; i < count; ++i) {
++            QAndroidJniObject item = clip.callObjectMethod("getItemAt", "(I)Landroid/content/ClipData$Item;", jint(i));
++            QAndroidJniObject uri = item.isValid()
++                ? item.callObjectMethod("getUri", "()Landroid/net/Uri;") : QAndroidJniObject();
++            if (uri.isValid()) uris << uri.toString();
++        }
++        clearJniException();
++    }
++    if (uris.isEmpty()) {
++        QAndroidJniObject uri = data.callObjectMethod("getData", "()Landroid/net/Uri;");
++        clearJniException();
++        if (uri.isValid()) uris << uri.toString();
++    }
++    return uris;
++}
++
++/// keep access to the file after a restart, like the system picker's files
++void keepAccess(const QString &uriString)
++{
++    QAndroidJniObject activity = QtAndroid::androidActivity();
++    if (!activity.isValid()) return;
++    QAndroidJniObject uri = QAndroidJniObject::callStaticObjectMethod(
++        "android/net/Uri", "parse", "(Ljava/lang/String;)Landroid/net/Uri;", jstring_(uriString).object<jstring>());
++    QAndroidJniObject resolver = activity.callObjectMethod("getContentResolver", "()Landroid/content/ContentResolver;");
++    if (clearJniException() || !uri.isValid() || !resolver.isValid()) return;
++    resolver.callMethod<void>("takePersistableUriPermission", "(Landroid/net/Uri;I)V",
++                              uri.object(), jint(FLAG_GRANT_READ | FLAG_GRANT_WRITE));
++    if (clearJniException()) {
++        // granted read-only: keep that at least
++        resolver.callMethod<void>("takePersistableUriPermission", "(Landroid/net/Uri;I)V",
++                                  uri.object(), jint(FLAG_GRANT_READ));
++        clearJniException();
++    }
++}
++
++/// "*.kra" / "*.png" ... of the dialog's name filters, without "*."
++QStringList extensionsOf(const QStringList &filters)
++{
++    QStringList extensions;
++    static const QRegularExpression rx(QStringLiteral("\\*\\.([A-Za-z0-9_+\\-]+(?:\\.[A-Za-z0-9_+\\-]+)?)"));
++    for (const QString &filter : filters) {
++        QRegularExpressionMatchIterator it = rx.globalMatch(filter);
++        while (it.hasNext()) {
++            const QString ext = it.next().captured(1).toLower();
++            if (!extensions.contains(ext)) extensions << ext;
++        }
++    }
++    return extensions;
++}
++
++/**
++ * Shows the explorer's Open or Save As dialog and waits for it.
++ * \p launched is false when the explorer is not installed (or turned off);
++ * then the caller uses the system picker. Returns the chosen content:// URIs,
++ * empty if the user cancelled.
++ */
++QStringList pickWithNovaExplorer(bool save, bool multiple, const QStringList &filters,
++                                 const QString &mimeType, const QString &suggestedName, bool *launched)
++{
++    *launched = false;
++    KConfigGroup group(KSharedConfig::openConfig(), "File Dialogs");
++    if (!group.readEntry("UseNovaExplorer", true)) return {};
++
++    QAndroidJniObject intent = explorerIntent(save);
++    if (!explorerInstalled(intent)) return {};
++
++    intent.callObjectMethod("setType", "(Ljava/lang/String;)Landroid/content/Intent;",
++                            jstring_(mimeType.isEmpty() ? QStringLiteral("*/*") : mimeType).object<jstring>());
++    putExtra(intent, QString(NOVA_EXTRA_EXTENSIONS), extensionsOf(filters));
++    if (save) {
++        putExtra(intent, QStringLiteral("android.intent.extra.TITLE"), suggestedName);
++    } else {
++        putExtra(intent, QStringLiteral("android.intent.extra.ALLOW_MULTIPLE"), multiple);
++    }
++    clearJniException();
++
++    QEventLoop loop;
++    QPointer<QEventLoop> loopGuard(&loop);
++    QStringList result;
++    bool done = false;
++    // the callback may come from the Android UI thread: hand the result to this one
++    QtAndroid::startActivity(intent, NOVA_EXPLORER_REQUEST,
++                             [loopGuard, &result, &done](int requestCode, int resultCode, const QAndroidJniObject &data) {
++        if (requestCode != NOVA_EXPLORER_REQUEST) return;
++        const QStringList uris = resultCode == ANDROID_RESULT_OK ? urisFromResult(data) : QStringList();
++        if (!loopGuard) return;
++        QMetaObject::invokeMethod(loopGuard.data(), [loopGuard, uris, &result, &done]() {
++            if (!loopGuard) return; // the dialog is gone already
++            result = uris;
++            done = true;
++            loopGuard->quit();
++        }, Qt::QueuedConnection);
++    });
++    if (clearJniException()) return {}; // could not start it: use the system picker
++    *launched = true;
++    if (!done) loop.exec();
++
++    Q_FOREACH (const QString &uri, result) {
++        keepAccess(uri);
++    }
++    return result;
++}
++} // namespace
++#endif // Q_OS_ANDROID
++
+ class Q_DECL_HIDDEN KoFileDialog::Private
+ {
+ public:
+@@ -264,6 +476,20 @@ QString KoFileDialog::filename()
+     createFileDialog();
+ 
+ #ifdef Q_OS_ANDROID
++    // Krita Nova (patch 31): the user's file explorer, if installed
++    if (d->type == OpenFile || d->type == ImportFile) {
++        bool launched = false;
++        const QStringList uris = pickWithNovaExplorer(false, false, d->filterList, QString(), QString(), &launched);
++        if (launched) {
++            url = uris.value(0);
++            if (!url.isEmpty()) {
++                d->mimeType = KisMimeDatabase::mimeTypeForFile(url, true);
++                saveUsedDir(url, d->dialogName);
++            }
++            return url;
++        }
++    }
++
+     if (d->type == SaveFile) {
+         QString extension = ".kra";
+         QInputDialog mimeSelector;
+@@ -289,6 +515,25 @@ QString KoFileDialog::filename()
+             // HACK: discovered by looking into the code
+             d->fileDialog->setWindowTitle(proposedFileBaseName.isEmpty() ? QString("Untitled" + extension)
+                                                                          : proposedFileBaseName + extension);
++
++            // Krita Nova (patch 31): Save As in the user's file explorer, if installed
++            {
++                const QString suggested = proposedFileBaseName.isEmpty() ? QString("Untitled" + extension)
++                                                                         : proposedFileBaseName + extension;
++                QString mime = KisMimeDatabase::mimeTypeForSuffix(extension.mid(1));
++                if (mime == QLatin1String("application/octet-stream")) mime.clear();
++                bool launched = false;
++                const QStringList uris = pickWithNovaExplorer(true, false, QStringList() << selectedFilter,
++                                                              mime, suggested, &launched);
++                if (launched) {
++                    url = uris.value(0);
++                    if (!url.isEmpty()) {
++                        d->mimeType = KisMimeDatabase::mimeTypeForFile(suggested, false);
++                        saveUsedDir(url, d->dialogName);
++                    }
++                    return url;
++                }
++            }
+         } else {
+             return url;
+         }
+@@ -374,6 +619,19 @@ QStringList KoFileDialog::filenames()
+     QStringList urls;
+ 
+     createFileDialog();
++#ifdef Q_OS_ANDROID
++    // Krita Nova (patch 31): the user's file explorer, if installed
++    if (d->type == OpenFiles || d->type == ImportFiles) {
++        bool launched = false;
++        urls = pickWithNovaExplorer(false, true, d->filterList, QString(), QString(), &launched);
++        if (launched) {
++            if (urls.size() > 0) {
++                saveUsedDir(urls.first(), d->dialogName);
++            }
++            return urls;
++        }
++    }
++#endif
+     if (d->fileDialog->exec() == QDialog::Accepted) {
+         urls = d->fileDialog->selectedFiles();
+     }
+diff --git a/packaging/android/apk/AndroidManifest.xml b/packaging/android/apk/AndroidManifest.xml
+index c90a91a..502eb31 100644
+--- a/packaging/android/apk/AndroidManifest.xml
++++ b/packaging/android/apk/AndroidManifest.xml
+@@ -163,4 +163,10 @@
+     <uses-permission android:name="android.permission.INTERNET" />
+     <uses-permission android:name="com.android.vending.BILLING" />
+ 
++    <!-- Krita Nova: open and save files with the Wacom Explorer when it is installed
++         (KoFileDialog.cpp); Android 11+ only lets Krita see it when it is listed here -->
++    <queries>
++        <package android:name="com.example.fileexplorer" />
++    </queries>
++
+ </manifest>
