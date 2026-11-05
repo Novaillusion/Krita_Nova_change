@@ -143,6 +143,29 @@ jobs:
           OUT: ${{ github.workspace }}/out
         run: bash "$WORK/src/packaging/android/local-build/build-krita-android.sh"
 
+      # Diagnostic (temporary): print Qt's Android input code to the log, to see
+      # how it handles finger touches while the pen is active. Doesn't change
+      # the APK.
+      - name: "Diagnostic: Qt Android input code"
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          echo "== Qt Android java sources / jars =="
+          find "$WORK" -path '*org/qtproject/qt5/android*' -name '*.java' 2>/dev/null | sort -u | head -80
+          find "$WORK" -name 'Qt*Android*.jar' 2>/dev/null | sort -u | head -20
+          for f in $(find "$WORK" -path '*org/qtproject/qt5/android*' -name '*.java' 2>/dev/null \
+                     | xargs grep -l 'MotionEvent' 2>/dev/null \
+                     | awk -F/ '!seen[$NF]++'); do
+            echo; echo "======== FILE $f ========"
+            cat -n "$f"
+          done
+          if ! find "$WORK" -path '*org/qtproject/qt5/android*' -name '*.java' | grep -q .; then
+            for j in $(find "$WORK" -name 'Qt*Android*.jar' | head -3); do
+              echo "== classes in $j"; unzip -l "$j" | grep -i 'qt5/android/[A-Za-z]*\.class' | head -60
+            done
+          fi
+
       # Every APK must carry the same certificate, or Android refuses to install it
       # over the previous one (INSTALL_FAILED_UPDATE_INCOMPATIBLE).
       - name: Check APK signing certificate
