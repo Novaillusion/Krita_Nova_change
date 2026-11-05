@@ -1,0 +1,323 @@
+Krita Nova 30 - dialogs without the white border (Android)
+
+Krita's Android Qt draws a white frame around every decorated window, so the
+dialogs (Levels and the other filters, layer properties, message boxes ...)
+had a white border. Like the brush editor (patches 11 and 23), they now have
+no platform frame but a look of their own:
+
+- rounded corners (8 px) and a grey 1.5 px outline, in the dialog's colour;
+- a title bar in the same colour: the dialog's title in the middle and an
+  "x" on the right (closes the dialog like Cancel); dragging the title bar
+  moves the dialog;
+- dragging its edges resizes it (FloatingDockResizer, patch 14, now also
+  handles these dialogs).
+
+KisTouchFriendlyStyle.cpp, DialogFramer (installed with the Android style):
+when a QDialog with a layout is polished - right before it is first shown -
+it gets FramelessWindowHint and a translucent background. If its platform
+window was already created (but not yet shown), that window is dropped and
+created again, frameless and with an alpha channel, when the dialog is shown,
+and the dialog gets a new backing store for it. A DialogFrame adds the title
+bar above the dialog's layout (whose margins make room for it) and paints the
+rounded background. Popups, tooltips, splash screens and windows that are
+already frameless are left alone.
+diff --git a/libs/ui/KisTouchFriendlyStyle.cpp b/libs/ui/KisTouchFriendlyStyle.cpp
+index 87f19c6..bc15c83 100644
+--- a/libs/ui/KisTouchFriendlyStyle.cpp
++++ b/libs/ui/KisTouchFriendlyStyle.cpp
+@@ -14,9 +14,23 @@
+ #include <QScreen>
+ #include <QStyleFactory>
+ #include <QWindow>
++#include <QBackingStore>
++#include <QDialog>
++#include <QHBoxLayout>
++#include <QLabel>
++#include <QLayout>
++#include <QPainter>
++#include <QSurfaceFormat>
++#include <QToolButton>
++
++#include <kis_icon_utils.h>
++#include <klocalizedstring.h>
+ 
+ namespace {
+ 
++/// set on dialogs that got Krita Nova's own frame (DialogFramer)
++const char NOVA_DECORATED_PROPERTY[] = "_kisNovaFramedDialog";
++
+ /**
+  * Resizes floating (undocked) dockers by dragging anywhere in a wide band
+  * along their edges. Qt's own QWidgetResizeHandler only reacts within 4 px of
+@@ -50,7 +64,7 @@ protected:
+             // a scroll bar along the docker's edge scrolls: the docker's frame
+             // still resizes it
+             if (isInScrollBar(static_cast<QWidget *>(watched))) break;
+-            QDockWidget *dock = floatingDockFor(static_cast<QWidget *>(watched));
++            QWidget *dock = floatingDockFor(static_cast<QWidget *>(watched));
+             if (!dock) break;
+             const int edges = edgesAt(dock, e->globalPos());
+             if (edges == None) break;
+@@ -97,13 +111,17 @@ protected:
+ private:
+     explicit FloatingDockResizer(QObject *parent) : QObject(parent) {}
+ 
+-    static QDockWidget *floatingDockFor(QWidget *widget)
++    /// a floating docker, or a dialog with Krita Nova's own frame (patch 30)
++    static QWidget *floatingDockFor(QWidget *widget)
+     {
+         for (QWidget *w = widget; w; w = w->parentWidget()) {
+             if (QDockWidget *dock = qobject_cast<QDockWidget *>(w)) {
+                 return (dock->isFloating() && dock->isWindow()) ? dock : nullptr;
+             }
+-            if (w->isWindow()) break; // a popup/dialog above a docker is not the docker
++            if (w->isWindow()) {
++                // a popup/dialog above a docker is not the docker
++                return w->property(NOVA_DECORATED_PROPERTY).toBool() ? w : nullptr;
++            }
+         }
+         return nullptr;
+     }
+@@ -116,7 +134,7 @@ private:
+         return false;
+     }
+ 
+-    static int edgesAt(QDockWidget *dock, const QPoint &globalPos)
++    static int edgesAt(QWidget *dock, const QPoint &globalPos)
+     {
+         const QPoint p = dock->mapFromGlobal(globalPos);
+         const int w = dock->width();
+@@ -196,7 +214,7 @@ private:
+         m_replaying = false;
+     }
+ 
+-    QPointer<QDockWidget> m_dock;
++    QPointer<QWidget> m_dock;
+     QPointer<QWidget> m_target;
+     bool m_resizing {false};
+     bool m_replaying {false};
+@@ -205,6 +223,218 @@ private:
+     QRect m_startGeometry;
+ };
+ 
++/**
++ * Krita Nova (patch 30): Krita's Android Qt draws a white frame around every
++ * decorated window, so dialogs (Levels, filters, layer properties, message
++ * boxes...) had a white border. Like the brush editor (patches 11, 23), they
++ * get no platform frame but rounded corners, a grey outline, and a title bar
++ * of their own: the title in the middle and an "x" on the right, in the
++ * dialog's own colour. Dragging the title bar moves the dialog; its edges
++ * resize it (FloatingDockResizer).
++ */
++class DialogFramer : public QObject
++{
++public:
++    static void install()
++    {
++        static DialogFramer *s_instance = nullptr;
++        if (!s_instance && qApp) {
++            s_instance = new DialogFramer(qApp);
++            qApp->installEventFilter(s_instance);
++        }
++    }
++
++protected:
++    bool eventFilter(QObject *watched, QEvent *event) override
++    {
++        if (event->type() == QEvent::Polish) {
++            if (QDialog *dialog = qobject_cast<QDialog *>(watched)) {
++                frame(dialog);
++            }
++        }
++        return false;
++    }
++
++private:
++    explicit DialogFramer(QObject *parent) : QObject(parent) {}
++
++    static bool wantsFrame(QDialog *dialog)
++    {
++        if (!dialog->isWindow() || dialog->isVisible()) return false;
++        if (dialog->property(NOVA_DECORATED_PROPERTY).toBool()) return false;
++        const Qt::WindowFlags flags = dialog->windowFlags();
++        const Qt::WindowType type = dialog->windowType();
++        if (type == Qt::Popup || type == Qt::ToolTip || type == Qt::SplashScreen) return false;
++        if (flags & Qt::FramelessWindowHint) return false; // has its own look already
++        // a dialog without a layout has nowhere to put the title bar
++        return dialog->layout() != nullptr;
++    }
++
++    static void frame(QDialog *dialog)
++    {
++        if (!wantsFrame(dialog)) return;
++        dialog->setProperty(NOVA_DECORATED_PROPERTY, true);
++
++        // no platform frame; rounded corners need a window with an alpha channel
++        dialog->overrideWindowFlags(dialog->windowFlags() | Qt::FramelessWindowHint);
++        dialog->setAttribute(Qt::WA_TranslucentBackground, true);
++        if (QWindow *window = dialog->windowHandle()) {
++            // The platform window exists already (a dialog is polished right
++            // after it is created, when it is first shown) but is not visible
++            // yet. Flags and format only apply to a new one: drop it, and
++            // it is created again, frameless, when the dialog is shown. The
++            // backing store belonged to the old one, so it gets a new one too.
++            window->destroy();
++            QSurfaceFormat format = window->requestedFormat();
++            format.setAlphaBufferSize(8);
++            window->setFormat(format);
++            window->setFlags(dialog->windowFlags());
++            dialog->setBackingStore(new QBackingStore(window));
++        }
++
++        new DialogFrame(dialog);
++    }
++
++    /// title bar + rounded background of one dialog
++    class DialogFrame : public QObject
++    {
++    public:
++        explicit DialogFrame(QDialog *dialog)
++            : QObject(dialog), m_dialog(dialog)
++        {
++            m_titleBar = new QWidget(dialog);
++            m_titleBar->setObjectName(QStringLiteral("KritaNovaDialogTitleBar"));
++            m_titleBar->setAutoFillBackground(false);
++
++            QHBoxLayout *barLayout = new QHBoxLayout(m_titleBar);
++            barLayout->setContentsMargins(6, 2, 4, 2);
++            barLayout->setSpacing(4);
++
++            m_title = new QLabel(m_titleBar);
++            m_title->setAlignment(Qt::AlignCenter);
++            QFont font = m_title->font();
++            font.setBold(true);
++            m_title->setFont(font);
++            m_title->setText(dialog->windowTitle());
++
++            QToolButton *closeButton = new QToolButton(m_titleBar);
++            closeButton->setObjectName(QStringLiteral("KritaNovaDialogCloseButton"));
++            closeButton->setAutoRaise(true);
++            closeButton->setIcon(KisIconUtils::loadIcon("window-close"));
++            closeButton->setToolTip(i18nc("@info:tooltip", "Close"));
++            // big enough for a finger
++            const int side = qMax(32, m_title->fontMetrics().height() * 2);
++            closeButton->setFixedSize(side, side);
++            closeButton->setIconSize(QSize(side * 5 / 8, side * 5 / 8));
++            QObject::connect(closeButton, &QToolButton::clicked, dialog, &QDialog::reject);
++
++            barLayout->addSpacing(side); // keeps the title centered
++            barLayout->addWidget(m_title, 1);
++            barLayout->addWidget(closeButton);
++
++            m_barHeight = qMax(m_titleBar->sizeHint().height(), side + 4);
++
++            // room for the title bar and the rounded outline
++            QLayout *layout = dialog->layout();
++            QMargins margins = layout->contentsMargins();
++            margins.setTop(margins.top() + BORDER + m_barHeight);
++            margins.setLeft(margins.left() + BORDER);
++            margins.setRight(margins.right() + BORDER);
++            margins.setBottom(margins.bottom() + BORDER);
++            layout->setContentsMargins(margins);
++
++            m_titleBar->installEventFilter(this);
++            dialog->installEventFilter(this);
++            placeTitleBar();
++            m_titleBar->raise();
++            m_titleBar->show();
++        }
++
++    protected:
++        bool eventFilter(QObject *watched, QEvent *event) override
++        {
++            if (watched == m_dialog) {
++                switch (event->type()) {
++                case QEvent::Paint:
++                    paintBackground();
++                    break;
++                case QEvent::Resize:
++                case QEvent::Show:
++                    placeTitleBar();
++                    break;
++                case QEvent::WindowTitleChange:
++                    m_title->setText(m_dialog->windowTitle());
++                    break;
++                default:
++                    break;
++                }
++                return false;
++            }
++            if (watched == m_titleBar) {
++                switch (event->type()) {
++                case QEvent::MouseButtonPress: {
++                    QMouseEvent *e = static_cast<QMouseEvent *>(event);
++                    if (e->button() == Qt::LeftButton) {
++                        m_dragOffset = e->globalPos() - m_dialog->frameGeometry().topLeft();
++                        m_dragging = true;
++                        return true;
++                    }
++                    break;
++                }
++                case QEvent::MouseMove:
++                    if (m_dragging) {
++                        m_dialog->move(static_cast<QMouseEvent *>(event)->globalPos() - m_dragOffset);
++                        return true;
++                    }
++                    break;
++                case QEvent::MouseButtonRelease:
++                    if (m_dragging) {
++                        m_dragging = false;
++                        return true;
++                    }
++                    break;
++                default:
++                    break;
++                }
++            }
++            return false;
++        }
++
++    private:
++        static constexpr int BORDER = 4;
++
++        void placeTitleBar()
++        {
++            if (!m_dialog || !m_titleBar) return;
++            m_titleBar->setGeometry(BORDER, BORDER - 1, m_dialog->width() - 2 * BORDER, m_barHeight);
++            m_titleBar->raise();
++        }
++
++        /// same look as the brush editor and the undocked dockers
++        void paintBackground()
++        {
++            QPainter p(m_dialog);
++            p.setRenderHint(QPainter::Antialiasing, true);
++            p.setCompositionMode(QPainter::CompositionMode_Source);
++            p.fillRect(m_dialog->rect(), Qt::transparent);
++            p.setCompositionMode(QPainter::CompositionMode_SourceOver);
++            QColor outline = m_dialog->palette().color(QPalette::WindowText);
++            outline.setAlpha(110);
++            const qreal pen = 1.5;
++            p.setPen(QPen(outline, pen));
++            p.setBrush(m_dialog->palette().color(QPalette::Window));
++            p.drawRoundedRect(QRectF(m_dialog->rect()).adjusted(pen / 2, pen / 2, -pen / 2, -pen / 2), 8.0, 8.0);
++        }
++
++        QPointer<QDialog> m_dialog;
++        QWidget *m_titleBar {nullptr};
++        QLabel *m_title {nullptr};
++        int m_barHeight {0};
++        bool m_dragging {false};
++        QPoint m_dragOffset;
++    };
++};
++
+ } // namespace
+ 
+ KisTouchFriendlyStyle::KisTouchFriendlyStyle(const QString &baseStyleName)
+@@ -263,4 +493,5 @@ void KisTouchFriendlyStyle::applyStyle(const QString &styleName)
+ 
+     qApp->setStyle(new KisTouchFriendlyStyle(styleName));
+     FloatingDockResizer::install();
++    DialogFramer::install();
+ }
