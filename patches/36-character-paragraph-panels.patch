@@ -1,0 +1,1339 @@
+Krita Nova 36 - Photoshop-style Character and Paragraph panels (text tool, part 1)
+
+Two new dockers (Settings > Dockers > Character / Paragraph, docked on the
+right by default), laid out like Photoshop's panels, for the text being
+edited. They use the same text property models as the Text Properties
+docker, which stays for everything else ("More Text Options..." shows it).
+
+Character - the selected characters while some are selected in the text,
+otherwise the whole text (or the defaults for new text):
+- font family, style (weight / width / slant / named instances);
+- size (tT) | leading (A↕, with Auto = the font's normal line height);
+- kerning (Metrics / None) | tracking (VA, letter spacing);
+- baseline shift (Aª) | color (the foreground color, which the text tool
+  applies to the selection; click to choose);
+- bold, italic, all caps, small caps, superscript, subscript, underline,
+  strikethrough;
+- OpenType: standard ligatures (fi), discretionary (st), historical (ct),
+  swash (A, 'swsh'), stylistic alternates (aa, 'salt'), titling (T),
+  ordinals (1st), fractions (½).
+
+Paragraph - the whole text:
+- align left / center / right, justify with the last line left / centered /
+  right, justify all (text-align-all, text-align-last; text-anchor for point
+  text);
+- direction left to right / right to left;
+- first line indent (hanging);
+- Roman hanging punctuation.
+
+Not in SVG text, so not in the panels: vertical / horizontal character
+scaling, left / right paragraph indents, space before / after paragraphs,
+hyphenation.
+
+Files: NovaTextPanelDock.{h,cpp} (the dock: QML host, text color, More
+options), qml/NovaCharacterPanel.qml, NovaParagraphPanel.qml and the small
+NovaLengthField, NovaLeadingField, NovaToggle; registered in
+TextPropertiesPlugin.cpp, textproperties.qrc, CMakeLists.txt.
+diff --git a/plugins/dockers/textproperties/CMakeLists.txt b/plugins/dockers/textproperties/CMakeLists.txt
+index a55a2e7..ed2c819 100644
+--- a/plugins/dockers/textproperties/CMakeLists.txt
++++ b/plugins/dockers/textproperties/CMakeLists.txt
+@@ -10,6 +10,7 @@ set(KRITA_TEXTPROPERTIES_SOURCES
+     TextPropertyConfigDialog.cpp
+     CssStylePresetEditDialog.cpp
+     TextPropertiesCanvasObserver.cpp
++    NovaTextPanelDock.cpp
+ )
+ 
+ qt_add_resources(KRITA_TEXTPROPERTIES_SOURCES textproperties.qrc)
+diff --git a/plugins/dockers/textproperties/NovaTextPanelDock.cpp b/plugins/dockers/textproperties/NovaTextPanelDock.cpp
+new file mode 100644
+index 0000000..80e2d04
+--- /dev/null
++++ b/plugins/dockers/textproperties/NovaTextPanelDock.cpp
+@@ -0,0 +1,116 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "NovaTextPanelDock.h"
++
++#include <QColorDialog>
++#include <QMainWindow>
++#include <QQmlContext>
++#include <QQmlEngine>
++#include <QQuickItem>
++
++#include <KisQQuickWidget.h>
++#include <KisMainWindow.h>
++#include <KisViewManager.h>
++#include <KoCanvasResourcesIds.h>
++#include <KoCanvasResourceProvider.h>
++#include <KoColor.h>
++#include <KoColorSpaceRegistry.h>
++#include <klocalizedstring.h>
++#include <kis_debug.h>
++
++#include "TextPropertiesCanvasObserver.h"
++
++NovaTextPanelDock::NovaTextPanelDock(const QString &title, const QString &qmlSource, const QString &observerName)
++    : QDockWidget(title)
++    , m_observer(new TextPropertiesCanvasObserver(this))
++    , m_observerName(observerName)
++{
++    m_quickWidget = new KisQQuickWidget(this);
++    setWidget(m_quickWidget);
++    setEnabled(true);
++    m_quickWidget->setMinimumHeight(100);
++    m_quickWidget->setSource(QUrl(qmlSource));
++
++    if (!m_quickWidget->errors().empty()) {
++        qWarning() << "Errors in " << windowTitle() << ":" << m_quickWidget->errors();
++    } else {
++        m_quickWidget->rootObject()->setProperty("canvasObserver", QVariant::fromValue(m_observer));
++        m_quickWidget->rootObject()->setProperty("panel", QVariant::fromValue(static_cast<QObject *>(this)));
++    }
++    m_quickWidget->setPalette(this->palette());
++}
++
++NovaTextPanelDock::~NovaTextPanelDock()
++{
++    delete m_quickWidget;
++}
++
++QString NovaTextPanelDock::observerName()
++{
++    return m_observerName;
++}
++
++void NovaTextPanelDock::setViewManager(KisViewManager *kisview)
++{
++    m_viewManager = kisview;
++    m_observer->setViewManager(kisview);
++}
++
++void NovaTextPanelDock::setCanvas(KoCanvasBase *canvas)
++{
++    if (m_canvas) {
++        m_canvas->resourceManager()->disconnect(this);
++    }
++    m_observer->setCanvas(canvas);
++    m_canvas = dynamic_cast<KisCanvas2 *>(canvas);
++    if (m_canvas) {
++        connect(m_canvas->resourceManager(), SIGNAL(canvasResourceChanged(int,QVariant)),
++                this, SLOT(slotCanvasResourceChanged(int,QVariant)));
++    }
++    Q_EMIT textColorChanged();
++}
++
++void NovaTextPanelDock::unsetCanvas()
++{
++    if (m_canvas) {
++        m_canvas->resourceManager()->disconnect(this);
++    }
++    m_canvas = nullptr;
++    m_observer->unsetCanvas();
++}
++
++QColor NovaTextPanelDock::textColor() const
++{
++    if (!m_canvas) return Qt::black;
++    return m_canvas->resourceManager()->foregroundColor().toQColor();
++}
++
++void NovaTextPanelDock::pickTextColor()
++{
++    if (!m_canvas) return;
++    const QColor color = QColorDialog::getColor(textColor(), this, i18nc("@title:window", "Text Color"));
++    if (!color.isValid()) return;
++    // the text tool applies a new foreground color to the selected text
++    m_canvas->resourceManager()->setForegroundColor(KoColor(color, KoColorSpaceRegistry::instance()->rgb8()));
++}
++
++void NovaTextPanelDock::showMoreOptions()
++{
++    QMainWindow *mainWindow = m_viewManager ? static_cast<QMainWindow *>(m_viewManager->mainWindow()) : nullptr;
++    if (!mainWindow) return;
++    if (QDockWidget *dock = mainWindow->findChild<QDockWidget *>(QStringLiteral("TextProperties"))) {
++        dock->show();
++        dock->raise();
++    }
++}
++
++void NovaTextPanelDock::slotCanvasResourceChanged(int key, const QVariant &value)
++{
++    Q_UNUSED(value);
++    if (key == KoCanvasResource::ForegroundColor) {
++        Q_EMIT textColorChanged();
++    }
++}
+diff --git a/plugins/dockers/textproperties/NovaTextPanelDock.h b/plugins/dockers/textproperties/NovaTextPanelDock.h
+new file mode 100644
+index 0000000..6242e5d
+--- /dev/null
++++ b/plugins/dockers/textproperties/NovaTextPanelDock.h
+@@ -0,0 +1,63 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#ifndef NOVATEXTPANELDOCK_H
++#define NOVATEXTPANELDOCK_H
++
++#include <QColor>
++#include <QDockWidget>
++#include <QPointer>
++
++#include <kis_mainwindow_observer.h>
++#include <kis_canvas2.h>
++
++class KisQQuickWidget;
++class KisViewManager;
++class TextPropertiesCanvasObserver;
++
++/**
++ * Krita Nova (patch 36): the compact, Photoshop-style "Character" and
++ * "Paragraph" panels of the text tool. Both show the text properties of the
++ * text being edited (Character: the selected characters, or the whole text;
++ * Paragraph: the whole text) with the same models as the Text Properties
++ * docker, which stays available for everything else ("More options").
++ */
++class NovaTextPanelDock : public QDockWidget, public KisMainwindowObserver
++{
++    Q_OBJECT
++    /// the text color: the foreground color, which the text tool uses for text
++    Q_PROPERTY(QColor textColor READ textColor NOTIFY textColorChanged)
++
++public:
++    NovaTextPanelDock(const QString &title, const QString &qmlSource, const QString &observerName);
++    ~NovaTextPanelDock() override;
++
++    QString observerName() override;
++    void setViewManager(KisViewManager *kisview) override;
++    void setCanvas(KoCanvasBase *canvas) override;
++    void unsetCanvas() override;
++
++    QColor textColor() const;
++
++    /// choose the text color (sets the foreground color)
++    Q_INVOKABLE void pickTextColor();
++    /// show the Text Properties docker, with all of Krita's text options
++    Q_INVOKABLE void showMoreOptions();
++
++Q_SIGNALS:
++    void textColorChanged();
++
++private Q_SLOTS:
++    void slotCanvasResourceChanged(int key, const QVariant &value);
++
++private:
++    KisQQuickWidget *m_quickWidget {nullptr};
++    TextPropertiesCanvasObserver *m_observer {nullptr};
++    QPointer<KisCanvas2> m_canvas;
++    QPointer<KisViewManager> m_viewManager;
++    QString m_observerName;
++};
++
++#endif // NOVATEXTPANELDOCK_H
+diff --git a/plugins/dockers/textproperties/TextPropertiesPlugin.cpp b/plugins/dockers/textproperties/TextPropertiesPlugin.cpp
+index b579ed3..ebb28f0 100644
+--- a/plugins/dockers/textproperties/TextPropertiesPlugin.cpp
++++ b/plugins/dockers/textproperties/TextPropertiesPlugin.cpp
+@@ -16,6 +16,7 @@
+ #include "KisViewManager.h"
+ 
+ #include "TextPropertiesDock.h"
++#include "NovaTextPanelDock.h"
+ #include <KoDockRegistry.h>
+ #include <QQmlEngine>
+ 
+@@ -96,10 +97,52 @@ public:
+ 
+ };
+ 
++/// Krita Nova (patch 36): the Photoshop-style Character and Paragraph panels
++class NovaTextPanelDockFactory : public KoDockFactoryBase {
++public:
++    NovaTextPanelDockFactory(const QString &id, bool character)
++        : m_id(id)
++        , m_character(character)
++    {
++    }
++
++    QString id() const override
++    {
++        return m_id;
++    }
++
++    virtual Qt::DockWidgetArea defaultDockWidgetArea() const
++    {
++        return Qt::RightDockWidgetArea;
++    }
++
++    QDockWidget* createDockWidget() override
++    {
++        NovaTextPanelDock *dockWidget = m_character
++            ? new NovaTextPanelDock(i18nc("@title:window", "Character"),
++                                    QStringLiteral("qrc:/NovaCharacterPanel.qml"), QStringLiteral("NovaCharacterPanel"))
++            : new NovaTextPanelDock(i18nc("@title:window", "Paragraph"),
++                                    QStringLiteral("qrc:/NovaParagraphPanel.qml"), QStringLiteral("NovaParagraphPanel"));
++        dockWidget->setObjectName(id());
++        return dockWidget;
++    }
++
++    DockPosition defaultDockPosition() const override
++    {
++        return DockRight;
++    }
++
++private:
++    QString m_id;
++    bool m_character;
++};
++
+ TextPropertiesPlugin::TextPropertiesPlugin(QObject *parent, const QVariantList &)
+     : QObject(parent)
+ {
+     KoDockRegistry::instance()->add(new TextPropertiesDockFactory());
++    KoDockRegistry::instance()->add(new NovaTextPanelDockFactory(QStringLiteral("NovaTextCharacter"), true));
++    KoDockRegistry::instance()->add(new NovaTextPanelDockFactory(QStringLiteral("NovaTextParagraph"), false));
+ }
+ 
+ TextPropertiesPlugin::~TextPropertiesPlugin()
+diff --git a/plugins/dockers/textproperties/qml/NovaCharacterPanel.qml b/plugins/dockers/textproperties/qml/NovaCharacterPanel.qml
+new file mode 100644
+index 0000000..0f34401
+--- /dev/null
++++ b/plugins/dockers/textproperties/qml/NovaCharacterPanel.qml
+@@ -0,0 +1,415 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++import QtQuick 2.15
++import QtQuick.Controls 2.15
++import QtQuick.Layouts 1.12
++import org.krita.flake.text 1.0
++import org.krita.components 1.0 as Kis
++
++/**
++ * Krita Nova (patch 36): the Character panel, laid out like Photoshop's.
++ * It edits the selected characters while some are selected in the text being
++ * edited, otherwise the whole text (or the defaults for new text).
++ */
++Control {
++    id: root;
++    anchors.fill: parent;
++
++    property TextPropertiesCanvasObserver canvasObserver: TextPropertiesCanvasObserver {
++    }
++    /// NovaTextPanelDock: text color, More options
++    property QtObject panel: null;
++
++    property KoSvgTextPropertiesModel props: (canvasObserver.characterProperties.enabled
++                                              && canvasObserver.characterProperties.spanSelection)
++                                             ? canvasObserver.characterProperties
++                                             : canvasObserver.textProperties;
++    property double dpi: canvasObserver.dpi;
++    property bool blockSignals: false;
++
++    Kis.ThemedControl {
++        id: pal;
++    }
++    palette: pal.palette;
++    background: Rectangle {
++        color: palette.window;
++    }
++
++    Kis.WindowFocusChecker {
++        id: focusChecker;
++        onInFocusChanged: canvasObserver.hasFocus = inFocus;
++    }
++
++    Kis.FontFunctions {
++        id: fontFunctions;
++    }
++
++    FontStyleModel {
++        id: stylesModel;
++    }
++
++    function refreshFamilyAndStyle() {
++        if (!props) return;
++        blockSignals = true;
++        let families = props.fontFamilies;
++        if (families.length > 0) {
++            let name = fontFunctions.wwsFontFamilyName(families[0]);
++            if (name !== familyCmb.modelWrapper.resourceFilename) {
++                familyCmb.modelWrapper.currentTag = 0;
++                familyCmb.modelWrapper.currentIndex = -1;
++            }
++            familyCmb.resourceName = name;
++        }
++        stylesModel.setFromTextPropertiesModel(props);
++        styleCmb.currentIndex = stylesModel.rowForStyle(props.fontWeight, props.fontWidth,
++                                                        props.fontStyle.style, props.fontStyle.value);
++        blockSignals = false;
++    }
++
++    onPropsChanged: refreshFamilyAndStyle();
++    Component.onCompleted: refreshFamilyAndStyle();
++
++    Connections {
++        target: root.props;
++        ignoreUnknownSignals: true;
++        function onFontFamiliesChanged() { root.refreshFamilyAndStyle(); }
++        function onFontWeightChanged() { root.refreshFamilyAndStyle(); }
++        function onFontWidthChanged() { root.refreshFamilyAndStyle(); }
++        function onFontStyleChanged() { root.refreshFamilyAndStyle(); }
++    }
++
++    /// toggle one OpenType feature tag (swsh, salt ...) in font-feature-settings
++    function featureOn(tag) {
++        let features = props ? props.fontFeatureSettings : {};
++        return features !== undefined && features[tag] !== undefined && features[tag] > 0;
++    }
++    function toggleFeature(tag) {
++        let features = Object.assign({}, props.fontFeatureSettings);
++        if (features[tag] !== undefined && features[tag] > 0) {
++            delete features[tag];
++        } else {
++            features[tag] = 1;
++        }
++        props.fontFeatureSettings = features;
++    }
++
++    ScrollView {
++        id: scroll;
++        anchors.fill: parent;
++        clip: true;
++        contentWidth: availableWidth;
++
++        ColumnLayout {
++            width: scroll.availableWidth;
++            spacing: 4;
++            enabled: root.props ? root.props.enabled : false;
++
++            Item { height: 2; }
++
++            // ---- font family and style
++            FontResourceDropdown {
++                id: familyCmb;
++                Layout.fillWidth: true;
++                Layout.leftMargin: 4;
++                Layout.rightMargin: 4;
++                locales: canvasObserver.locales;
++                onActivated: {
++                    if (root.blockSignals) return;
++                    let families = root.props.fontFamilies.slice();
++                    if (families.length > 0) {
++                        families[0] = resourceName;
++                    } else {
++                        families = [resourceName];
++                    }
++                    root.props.fontFamilies = families;
++                }
++            }
++
++            SqueezedComboBox {
++                id: styleCmb;
++                model: stylesModel;
++                textRole: "display";
++                Layout.fillWidth: true;
++                Layout.leftMargin: 4;
++                Layout.rightMargin: 4;
++                onActivated: {
++                    if (root.blockSignals) return;
++                    // read everything first: each change makes the model update
++                    var weight = stylesModel.weightValue(currentIndex);
++                    var width = stylesModel.widthValue(currentIndex);
++                    var styleMode = stylesModel.styleModeValue(currentIndex);
++                    var styleVal = stylesModel.slantValue(currentIndex);
++                    var axesValues = stylesModel.axesValues(currentIndex);
++                    root.props.fontWeight = weight;
++                    root.props.fontWidth = width;
++                    root.props.fontStyle.style = styleMode;
++                    if (styleMode === CssFontStyleModel.StyleOblique) {
++                        root.props.fontStyle.value = styleVal;
++                    }
++                    root.props.axisValues = axesValues;
++                }
++            }
++
++            // ---- size | leading,  kerning | tracking,  baseline shift | color
++            GridLayout {
++                columns: 2;
++                columnSpacing: 6;
++                rowSpacing: 4;
++                Layout.fillWidth: true;
++                Layout.leftMargin: 4;
++                Layout.rightMargin: 4;
++
++                NovaLengthField {
++                    Layout.fillWidth: true;
++                    symbol: "tT";
++                    toolTipText: i18nc("@info:tooltip", "Font size");
++                    textProperties: root.props;
++                    lengthModel: root.props ? root.props.fontSize : null;
++                    dpi: root.dpi;
++                    isFontSize: true;
++                    allowPercentage: true;
++                }
++
++                NovaLeadingField {
++                    Layout.fillWidth: true;
++                    textProperties: root.props;
++                    dpi: root.dpi;
++                }
++
++                RowLayout {
++                    Layout.fillWidth: true;
++                    spacing: 2;
++                    Label {
++                        text: "V/A";
++                        font.bold: true;
++                        horizontalAlignment: Text.AlignHCenter;
++                        Layout.preferredWidth: 24;
++                    }
++                    ComboBox {
++                        id: kerningCmb;
++                        Layout.fillWidth: true;
++                        model: [i18nc("Kerning: from the font", "Metrics"), i18nc("Kerning: off", "None")];
++                        currentIndex: root.props && !root.props.fontKerning ? 1 : 0;
++                        ToolTip.text: i18nc("@info:tooltip", "Kerning: the font's own kerning (Metrics) or none");
++                        ToolTip.visible: hovered;
++                        ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval;
++                        onActivated: {
++                            root.props.fontKerning = (index === 0);
++                            // choosing breaks the binding: follow the text again
++                            currentIndex = Qt.binding(function() { return root.props && !root.props.fontKerning ? 1 : 0; });
++                        }
++                    }
++                }
++
++                NovaLengthField {
++                    Layout.fillWidth: true;
++                    symbol: "VA";
++                    toolTipText: i18nc("@info:tooltip", "Tracking (letter spacing)");
++                    textProperties: root.props;
++                    lengthModel: root.props ? root.props.letterSpacing : null;
++                    dpi: root.dpi;
++                    dFrom: -99;
++                    dTo: 99;
++                    softDFrom: -10;
++                    softDTo: 10;
++                    dStepSize: 0.1;
++                }
++
++                NovaLengthField {
++                    Layout.fillWidth: true;
++                    symbol: "Aª";
++                    toolTipText: i18nc("@info:tooltip", "Baseline shift");
++                    textProperties: root.props;
++                    lengthModel: root.props ? root.props.baselineShiftValue : null;
++                    dpi: root.dpi;
++                    dFrom: -999;
++                    dTo: 999;
++                    softDFrom: -36;
++                    softDTo: 36;
++                    allowPercentage: true;
++                    onEdited: root.props.baselineShiftMode = KoSvgText.ShiftLengthPercentage;
++                }
++
++                RowLayout {
++                    Layout.fillWidth: true;
++                    spacing: 4;
++                    Label {
++                        text: i18nc("Character panel", "Color");
++                    }
++                    Rectangle {
++                        id: colorSwatch;
++                        Layout.fillWidth: true;
++                        Layout.preferredHeight: 22;
++                        radius: 3;
++                        color: root.panel ? root.panel.textColor : "black";
++                        border.color: palette.mid;
++                        border.width: 1;
++                        MouseArea {
++                            anchors.fill: parent;
++                            cursorShape: Qt.PointingHandCursor;
++                            onClicked: if (root.panel) root.panel.pickTextColor();
++                        }
++                        ToolTip.text: i18nc("@info:tooltip", "Text color (the foreground color)");
++                        ToolTip.visible: swatchHover.hovered;
++                        HoverHandler {
++                            id: swatchHover;
++                        }
++                    }
++                }
++            }
++
++            // ---- faux bold, faux italic, all caps, small caps, super, sub, underline, strikethrough
++            RowLayout {
++                Layout.fillWidth: true;
++                Layout.leftMargin: 4;
++                Layout.rightMargin: 4;
++                spacing: 1;
++
++                NovaToggle {
++                    text: "T";
++                    font.bold: true;
++                    tip: i18nc("@info:tooltip", "Bold");
++                    active: root.props ? root.props.fontWeight >= 600 : false;
++                    onActivated: root.props.fontWeight = root.props.fontWeight >= 600 ? 400 : 700;
++                }
++                NovaToggle {
++                    text: "T";
++                    italicGlyph: true;
++                    tip: i18nc("@info:tooltip", "Italic");
++                    active: root.props ? root.props.fontStyle.style !== CssFontStyleModel.StyleNormal : false;
++                    onActivated: root.props.fontStyle.style = (root.props.fontStyle.style !== CssFontStyleModel.StyleNormal)
++                                 ? CssFontStyleModel.StyleNormal : CssFontStyleModel.StyleItalic;
++                }
++                NovaToggle {
++                    text: "TT";
++                    tip: i18nc("@info:tooltip", "All caps");
++                    active: root.props ? root.props.textTransform.capitals === KoSvgText.TextTransformUppercase : false;
++                    onActivated: root.props.textTransform.capitals =
++                                 (root.props.textTransform.capitals === KoSvgText.TextTransformUppercase)
++                                 ? KoSvgText.TextTransformNone : KoSvgText.TextTransformUppercase;
++                }
++                NovaToggle {
++                    text: "Tᴛ";
++                    tip: i18nc("@info:tooltip", "Small caps");
++                    active: root.props ? root.props.fontVariantCaps === KoSvgText.CapsSmall : false;
++                    onActivated: root.props.fontVariantCaps = (root.props.fontVariantCaps === KoSvgText.CapsSmall)
++                                 ? KoSvgText.CapsNormal : KoSvgText.CapsSmall;
++                }
++                NovaToggle {
++                    text: "T¹";
++                    tip: i18nc("@info:tooltip", "Superscript");
++                    active: root.props ? root.props.baselineShiftMode === KoSvgText.ShiftSuper : false;
++                    onActivated: root.props.baselineShiftMode = (root.props.baselineShiftMode === KoSvgText.ShiftSuper)
++                                 ? KoSvgText.ShiftNone : KoSvgText.ShiftSuper;
++                }
++                NovaToggle {
++                    text: "T₁";
++                    tip: i18nc("@info:tooltip", "Subscript");
++                    active: root.props ? root.props.baselineShiftMode === KoSvgText.ShiftSub : false;
++                    onActivated: root.props.baselineShiftMode = (root.props.baselineShiftMode === KoSvgText.ShiftSub)
++                                 ? KoSvgText.ShiftNone : KoSvgText.ShiftSub;
++                }
++                NovaToggle {
++                    text: "T";
++                    underlineGlyph: true;
++                    tip: i18nc("@info:tooltip", "Underline");
++                    active: root.props ? root.props.textDecorationUnderline : false;
++                    onActivated: root.props.textDecorationUnderline = !root.props.textDecorationUnderline;
++                }
++                NovaToggle {
++                    text: "T";
++                    strikeGlyph: true;
++                    tip: i18nc("@info:tooltip", "Strikethrough");
++                    active: root.props ? root.props.textDecorationLineThrough : false;
++                    onActivated: root.props.textDecorationLineThrough = !root.props.textDecorationLineThrough;
++                }
++            }
++
++            // ---- OpenType: ligatures, discretionary, historical, swash, stylistic, titling, ordinals, fractions
++            RowLayout {
++                Layout.fillWidth: true;
++                Layout.leftMargin: 4;
++                Layout.rightMargin: 4;
++                spacing: 1;
++
++                NovaToggle {
++                    text: "fi";
++                    tip: i18nc("@info:tooltip", "Standard ligatures");
++                    active: root.props ? root.props.fontVariantLigatures.commonLigatures : false;
++                    onActivated: root.props.fontVariantLigatures.commonLigatures = !root.props.fontVariantLigatures.commonLigatures;
++                }
++                NovaToggle {
++                    text: "st";
++                    tip: i18nc("@info:tooltip", "Discretionary ligatures");
++                    active: root.props ? root.props.fontVariantLigatures.discretionaryLigatures : false;
++                    onActivated: root.props.fontVariantLigatures.discretionaryLigatures = !root.props.fontVariantLigatures.discretionaryLigatures;
++                }
++                NovaToggle {
++                    text: "ct";
++                    italicGlyph: true;
++                    tip: i18nc("@info:tooltip", "Historical ligatures");
++                    active: root.props ? root.props.fontVariantLigatures.historicalLigatures : false;
++                    onActivated: root.props.fontVariantLigatures.historicalLigatures = !root.props.fontVariantLigatures.historicalLigatures;
++                }
++                NovaToggle {
++                    text: "A";
++                    italicGlyph: true;
++                    tip: i18nc("@info:tooltip", "Swash");
++                    active: root.featureOn("swsh");
++                    onActivated: root.toggleFeature("swsh");
++                }
++                NovaToggle {
++                    text: "aa";
++                    tip: i18nc("@info:tooltip", "Stylistic alternates");
++                    active: root.featureOn("salt");
++                    onActivated: root.toggleFeature("salt");
++                }
++                NovaToggle {
++                    text: "T";
++                    tip: i18nc("@info:tooltip", "Titling alternates");
++                    active: root.props ? root.props.fontVariantCaps === KoSvgText.CapsTitling : false;
++                    onActivated: root.props.fontVariantCaps = (root.props.fontVariantCaps === KoSvgText.CapsTitling)
++                                 ? KoSvgText.CapsNormal : KoSvgText.CapsTitling;
++                }
++                NovaToggle {
++                    text: "1ˢᵗ";
++                    tip: i18nc("@info:tooltip", "Ordinals");
++                    active: root.props ? root.props.fontVariantNumeric.ordinals : false;
++                    onActivated: root.props.fontVariantNumeric.ordinals = !root.props.fontVariantNumeric.ordinals;
++                }
++                NovaToggle {
++                    text: "½";
++                    tip: i18nc("@info:tooltip", "Fractions");
++                    active: root.props ? root.props.fontVariantNumeric.fractions === KoSvgText.NumericFractionsDiagonal : false;
++                    onActivated: root.props.fontVariantNumeric.fractions =
++                                 (root.props.fontVariantNumeric.fractions === KoSvgText.NumericFractionsDiagonal)
++                                 ? KoSvgText.NumericFractionsNormal : KoSvgText.NumericFractionsDiagonal;
++                }
++            }
++
++            Kis.ToolSeparatorBase {
++                orientation: Qt.Horizontal;
++                Layout.fillWidth: true;
++            }
++
++            // ---- everything else: the Text Properties docker
++            Button {
++                Layout.fillWidth: true;
++                Layout.leftMargin: 4;
++                Layout.rightMargin: 4;
++                text: i18nc("@action:button", "More Text Options...");
++                ToolTip.text: i18nc("@info:tooltip", "All of Krita's text options: writing mode, OpenType features, baselines, line breaking, language...");
++                ToolTip.visible: hovered;
++                ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval;
++                onClicked: if (root.panel) root.panel.showMoreOptions();
++            }
++
++            Item {
++                Layout.fillHeight: true;
++            }
++        }
++    }
++}
+diff --git a/plugins/dockers/textproperties/qml/NovaLeadingField.qml b/plugins/dockers/textproperties/qml/NovaLeadingField.qml
+new file mode 100644
+index 0000000..bd2d46d
+--- /dev/null
++++ b/plugins/dockers/textproperties/qml/NovaLeadingField.qml
+@@ -0,0 +1,143 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++import QtQuick 2.15
++import QtQuick.Controls 2.15
++import QtQuick.Layouts 1.12
++import org.krita.flake.text 1.0
++import org.krita.components 1.0 as Kis
++
++/**
++ * Krita Nova (patch 36): leading (line height) for the Character panel, like
++ * Photoshop's: "Auto" (the font's normal line height) or a value.
++ */
++RowLayout {
++    id: field;
++    spacing: 2;
++
++    property KoSvgTextPropertiesModel textProperties;
++    property double dpi: 72.0;
++    property bool blockSignals: false;
++
++    property var unitMap: [
++        { user: CssQmlUnitConverter.Pt, data: LineHeightModel.Absolute},
++        { user: CssQmlUnitConverter.Em, data: LineHeightModel.Em},
++        { user: CssQmlUnitConverter.Ex, data: LineHeightModel.Ex},
++        { user: CssQmlUnitConverter.Cap, data: LineHeightModel.Cap},
++        { user: CssQmlUnitConverter.Ch, data: LineHeightModel.Ch},
++        { user: CssQmlUnitConverter.Ic, data: LineHeightModel.Ic},
++        { user: CssQmlUnitConverter.Lh, data: LineHeightModel.Lh},
++        { user: CssQmlUnitConverter.Percentage, data: LineHeightModel.Percentage},
++        { user: CssQmlUnitConverter.Lines, data: LineHeightModel.Lines},
++    ]
++
++    CssQmlUnitConverter {
++        id: converter;
++        dpi: field.dpi;
++        onUserValueChanged: spin.dValue = userValue;
++        onUserUnitChanged: unitCmb.currentIndex = unitCmb.indexOfValue(userUnit);
++        onDataValueChanged: {
++            if (!field.blockSignals && field.textProperties && !autoBtn.checked) {
++                field.textProperties.lineHeight.value = dataValue;
++            }
++        }
++        onDataUnitChanged: {
++            if (!field.blockSignals && field.textProperties && !autoBtn.checked) {
++                field.textProperties.lineHeight.unit = dataUnit;
++            }
++        }
++    }
++
++    Component.onCompleted: {
++        converter.setDataUnitMap(unitMap);
++        converter.setDataValueAndUnit(0, 0);
++        refresh();
++    }
++
++    function refresh() {
++        if (!textProperties) return;
++        blockSignals = true;
++        converter.setFontMetricsFromTextPropertiesModel(textProperties, false, true);
++        converter.percentageReference = textProperties.resolvedFontSize(false);
++        autoBtn.checked = textProperties.lineHeight.isNormal;
++        if (!spin.dragging) {
++            converter.setDataValueAndUnit(textProperties.lineHeight.value, textProperties.lineHeight.unit);
++        }
++        blockSignals = false;
++    }
++
++    onTextPropertiesChanged: refresh();
++
++    Connections {
++        target: field.textProperties;
++        ignoreUnknownSignals: true;
++        function onLineHeightChanged() { field.refresh(); }
++        function onFontSizeChanged() { field.refresh(); }
++        function onFontFamiliesChanged() { field.refresh(); }
++    }
++
++    Label {
++        text: "A↕";
++        font.bold: true;
++        horizontalAlignment: Text.AlignHCenter;
++        Layout.preferredWidth: 24;
++        ToolTip.text: i18nc("@info:tooltip", "Leading (line height)");
++        ToolTip.visible: leadingArea.containsMouse;
++        ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval;
++        MouseArea {
++            id: leadingArea;
++            anchors.fill: parent;
++            hoverEnabled: true;
++            acceptedButtons: Qt.NoButton;
++        }
++    }
++
++    Kis.DoubleSliderSpinBox {
++        id: spin;
++        Layout.fillWidth: true;
++        Layout.minimumWidth: 48;
++        enabled: !autoBtn.checked;
++        dFrom: 0;
++        dTo: 999;
++        softDFrom: 0;
++        softDTo: 72;
++        softRangeActive: true;
++        blockUpdateSignalOnDrag: true;
++        onDValueChanged: if (enabled) converter.userValue = dValue;
++    }
++
++    SqueezedComboBox {
++        id: unitCmb;
++        model: converter.userUnitModel;
++        textRole: "description";
++        valueRole: "value";
++        displayText: converter.symbol;
++        enabled: !autoBtn.checked;
++        TextMetrics {
++            id: symbolWidth;
++            font: unitCmb.font;
++            text: unitCmb.displayText;
++        }
++        Layout.preferredWidth: symbolWidth.width + leftPadding + rightPadding + spacing + indicator.width;
++        Layout.maximumWidth: implicitWidth;
++        onCurrentValueChanged: converter.userUnit = currentValue;
++    }
++
++    ToolButton {
++        id: autoBtn;
++        text: i18nc("Leading: the font's own line height", "Auto");
++        checkable: true;
++        ToolTip.text: i18nc("@info:tooltip", "Use the font's normal line height");
++        ToolTip.visible: hovered;
++        ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval;
++        onToggled: {
++            if (field.blockSignals || !field.textProperties) return;
++            if (checked) {
++                converter.setFromNormalLineHeight();
++            }
++            field.textProperties.lineHeight.isNormal = checked;
++        }
++    }
++}
+diff --git a/plugins/dockers/textproperties/qml/NovaLengthField.qml b/plugins/dockers/textproperties/qml/NovaLengthField.qml
+new file mode 100644
+index 0000000..3ce7005
+--- /dev/null
++++ b/plugins/dockers/textproperties/qml/NovaLengthField.qml
+@@ -0,0 +1,116 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++import QtQuick 2.15
++import QtQuick.Controls 2.15
++import QtQuick.Layouts 1.12
++import org.krita.flake.text 1.0
++import org.krita.components 1.0 as Kis
++
++/**
++ * Krita Nova (patch 36): a compact length field for the Character and
++ * Paragraph panels: a small symbol, a spin box and a unit box, bound to one
++ * CssLengthPercentageModel of the text properties (font size, tracking,
++ * baseline shift, indent ...).
++ */
++RowLayout {
++    id: field;
++    spacing: 2;
++
++    property KoSvgTextPropertiesModel textProperties;
++    property CssLengthPercentageModel lengthModel;
++    property double dpi: 72.0;
++    property bool isFontSize: false;
++    property bool allowPercentage: false;
++    property string symbol: "";
++    property string toolTipText: "";
++    property alias dFrom: spin.dFrom;
++    property alias dTo: spin.dTo;
++    property alias softDFrom: spin.softDFrom;
++    property alias softDTo: spin.softDTo;
++    property alias dStepSize: spin.dStepSize;
++    property bool blockSignals: false;
++
++    /// the user changed the value
++    signal edited();
++
++    function refresh() {
++        if (!lengthModel || !textProperties) return;
++        blockSignals = true;
++        unitCmb.setTextProperties(textProperties);
++        if (isFontSize) {
++            unitCmb.percentageReference = textProperties.resolvedFontSize(true);
++        }
++        if (!spin.dragging) {
++            unitCmb.setDataValueAndUnit(lengthModel.value, lengthModel.unitType);
++        }
++        blockSignals = false;
++    }
++
++    onLengthModelChanged: refresh();
++    onTextPropertiesChanged: refresh();
++
++    Connections {
++        target: field.lengthModel;
++        ignoreUnknownSignals: true;
++        function onValueChanged() { field.refresh(); }
++        function onUnitTypeChanged() { field.refresh(); }
++    }
++
++    Label {
++        text: field.symbol;
++        visible: text !== "";
++        font.bold: true;
++        horizontalAlignment: Text.AlignHCenter;
++        Layout.preferredWidth: 24;
++        ToolTip.text: field.toolTipText;
++        ToolTip.visible: field.toolTipText !== "" && symbolArea.containsMouse;
++        ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval;
++        MouseArea {
++            id: symbolArea;
++            anchors.fill: parent;
++            hoverEnabled: true;
++            acceptedButtons: Qt.NoButton;
++        }
++    }
++
++    Kis.DoubleSliderSpinBox {
++        id: spin;
++        Layout.fillWidth: true;
++        Layout.minimumWidth: 48;
++        dFrom: 0;
++        dTo: 999;
++        softDFrom: 0;
++        softDTo: 72;
++        softRangeActive: true;
++        blockUpdateSignalOnDrag: true;
++        onDValueChanged: unitCmb.userValue = dValue;
++    }
++
++    UnitComboBox {
++        id: unitCmb;
++        spinBoxControl: spin;
++        dpi: field.dpi;
++        isFontSize: field.isFontSize;
++        isLineHeight: false;
++        allowPercentage: field.allowPercentage;
++        Layout.preferredWidth: minimumUnitBoxWidth;
++        Layout.maximumWidth: implicitWidth;
++        onUserValueChanged: spin.dValue = userValue;
++
++        onDataValueChanged: {
++            if (!field.blockSignals && field.lengthModel) {
++                field.lengthModel.value = dataValue;
++                field.edited();
++            }
++        }
++        onDataUnitChanged: {
++            if (!field.blockSignals && field.lengthModel) {
++                field.lengthModel.unitType = dataUnit;
++                field.edited();
++            }
++        }
++    }
++}
+diff --git a/plugins/dockers/textproperties/qml/NovaParagraphPanel.qml b/plugins/dockers/textproperties/qml/NovaParagraphPanel.qml
+new file mode 100644
+index 0000000..bead795
+--- /dev/null
++++ b/plugins/dockers/textproperties/qml/NovaParagraphPanel.qml
+@@ -0,0 +1,280 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++import QtQuick 2.15
++import QtQuick.Controls 2.15
++import QtQuick.Layouts 1.12
++import org.krita.flake.text 1.0
++import org.krita.components 1.0 as Kis
++
++/**
++ * Krita Nova (patch 36): the Paragraph panel, laid out like Photoshop's:
++ * alignment and justification, direction, first line indent. It edits the
++ * whole text (SVG text has one paragraph style per text).
++ */
++Control {
++    id: root;
++    anchors.fill: parent;
++
++    property TextPropertiesCanvasObserver canvasObserver: TextPropertiesCanvasObserver {
++    }
++    property QtObject panel: null;
++    property KoSvgTextPropertiesModel props: canvasObserver.textProperties;
++    property double dpi: canvasObserver.dpi;
++
++    Kis.ThemedControl {
++        id: pal;
++    }
++    palette: pal.palette;
++    background: Rectangle {
++        color: palette.window;
++    }
++
++    Kis.WindowFocusChecker {
++        id: focusChecker;
++        onInFocusChanged: canvasObserver.hasFocus = inFocus;
++    }
++
++    // Photoshop's seven alignment buttons, as text-align-all / text-align-last
++    // (text boxes) and text-anchor (point text)
++    readonly property int alignLeft: 0;
++    readonly property int alignCenter: 1;
++    readonly property int alignRight: 2;
++    readonly property int justifyLeft: 3;
++    readonly property int justifyCenter: 4;
++    readonly property int justifyRight: 5;
++    readonly property int justifyAll: 6;
++
++    function currentAlignment() {
++        if (!props) return alignLeft;
++        let all = props.textAlignAll;
++        let last = props.textAlignLast;
++        if (all === KoSvgText.AlignJustify) {
++            if (last === KoSvgText.AlignJustify) return justifyAll;
++            if (last === KoSvgText.AlignCenter) return justifyCenter;
++            if (last === KoSvgText.AlignEnd || last === KoSvgText.AlignRight) return justifyRight;
++            return justifyLeft;
++        }
++        if (props.textAlignAllState === KoSvgTextPropertiesModel.PropertyUnset) {
++            // point text: the anchor
++            if (props.textAnchor === KoSvgText.AnchorMiddle) return alignCenter;
++            if (props.textAnchor === KoSvgText.AnchorEnd) return alignRight;
++            return alignLeft;
++        }
++        if (all === KoSvgText.AlignCenter) return alignCenter;
++        if (all === KoSvgText.AlignEnd || all === KoSvgText.AlignRight) return alignRight;
++        return alignLeft;
++    }
++
++    function setAlignment(mode) {
++        if (!props) return;
++        let anchor = KoSvgText.AnchorStart;
++        let all = KoSvgText.AlignStart;
++        let last = KoSvgText.AlignLastAuto;
++        if (mode === alignCenter) {
++            anchor = KoSvgText.AnchorMiddle;
++            all = KoSvgText.AlignCenter;
++        } else if (mode === alignRight) {
++            anchor = KoSvgText.AnchorEnd;
++            all = KoSvgText.AlignEnd;
++        } else if (mode >= justifyLeft) {
++            all = KoSvgText.AlignJustify;
++            last = mode === justifyCenter ? KoSvgText.AlignCenter
++                 : mode === justifyRight ? KoSvgText.AlignEnd
++                 : mode === justifyAll ? KoSvgText.AlignJustify
++                 : KoSvgText.AlignStart;
++            anchor = mode === justifyCenter ? KoSvgText.AnchorMiddle
++                   : mode === justifyRight ? KoSvgText.AnchorEnd
++                   : KoSvgText.AnchorStart;
++        }
++        props.textAnchor = anchor;
++        props.textAlignAll = all;
++        if (last === KoSvgText.AlignLastAuto) {
++            props.textAlignLastState = KoSvgTextPropertiesModel.PropertyUnset;
++        } else {
++            props.textAlignLast = last;
++        }
++    }
++
++    property int alignment: currentAlignment();
++
++    ScrollView {
++        id: scroll;
++        anchors.fill: parent;
++        clip: true;
++        contentWidth: availableWidth;
++
++        ColumnLayout {
++            width: scroll.availableWidth;
++            spacing: 4;
++            enabled: root.props ? root.props.enabled : false;
++
++            Item { height: 2; }
++
++            // ---- alignment and justification
++            RowLayout {
++                Layout.fillWidth: true;
++                Layout.leftMargin: 4;
++                Layout.rightMargin: 4;
++                spacing: 1;
++
++                NovaToggle {
++                    icon.source: "qrc:///16_light_format-justify-left.svg";
++                    icon.color: palette.text;
++                    tip: i18nc("@info:tooltip", "Align left");
++                    active: root.alignment === root.alignLeft;
++                    onActivated: root.setAlignment(root.alignLeft);
++                }
++                NovaToggle {
++                    icon.source: "qrc:///16_light_format-justify-center.svg";
++                    icon.color: palette.text;
++                    tip: i18nc("@info:tooltip", "Center");
++                    active: root.alignment === root.alignCenter;
++                    onActivated: root.setAlignment(root.alignCenter);
++                }
++                NovaToggle {
++                    icon.source: "qrc:///16_light_format-justify-right.svg";
++                    icon.color: palette.text;
++                    tip: i18nc("@info:tooltip", "Align right");
++                    active: root.alignment === root.alignRight;
++                    onActivated: root.setAlignment(root.alignRight);
++                }
++                NovaToggle {
++                    icon.source: "qrc:///16_light_format-justify-fill.svg";
++                    icon.color: palette.text;
++                    text: "←";
++                    display: AbstractButton.TextUnderIcon;
++                    tip: i18nc("@info:tooltip", "Justify, last line left (text boxes)");
++                    active: root.alignment === root.justifyLeft;
++                    onActivated: root.setAlignment(root.justifyLeft);
++                }
++                NovaToggle {
++                    icon.source: "qrc:///16_light_format-justify-fill.svg";
++                    icon.color: palette.text;
++                    text: "↔";
++                    display: AbstractButton.TextUnderIcon;
++                    tip: i18nc("@info:tooltip", "Justify, last line centered (text boxes)");
++                    active: root.alignment === root.justifyCenter;
++                    onActivated: root.setAlignment(root.justifyCenter);
++                }
++                NovaToggle {
++                    icon.source: "qrc:///16_light_format-justify-fill.svg";
++                    icon.color: palette.text;
++                    text: "→";
++                    display: AbstractButton.TextUnderIcon;
++                    tip: i18nc("@info:tooltip", "Justify, last line right (text boxes)");
++                    active: root.alignment === root.justifyRight;
++                    onActivated: root.setAlignment(root.justifyRight);
++                }
++                NovaToggle {
++                    icon.source: "qrc:///16_light_format-justify-fill.svg";
++                    icon.color: palette.text;
++                    text: "⇿";
++                    display: AbstractButton.TextUnderIcon;
++                    tip: i18nc("@info:tooltip", "Justify all lines (text boxes)");
++                    active: root.alignment === root.justifyAll;
++                    onActivated: root.setAlignment(root.justifyAll);
++                }
++            }
++
++            // ---- direction
++            RowLayout {
++                Layout.fillWidth: true;
++                Layout.leftMargin: 4;
++                Layout.rightMargin: 4;
++                spacing: 1;
++
++                NovaToggle {
++                    icon.source: "qrc:///16_light_format-text-direction-ltr.svg";
++                    icon.color: palette.text;
++                    tip: i18nc("@info:tooltip", "Left to right");
++                    active: root.props ? root.props.direction === KoSvgText.DirectionLeftToRight : false;
++                    onActivated: root.props.direction = KoSvgText.DirectionLeftToRight;
++                }
++                NovaToggle {
++                    icon.source: "qrc:///16_light_format-text-direction-rtl.svg";
++                    icon.color: palette.text;
++                    tip: i18nc("@info:tooltip", "Right to left");
++                    active: root.props ? root.props.direction === KoSvgText.DirectionRightToLeft : false;
++                    onActivated: root.props.direction = KoSvgText.DirectionRightToLeft;
++                }
++                Item {
++                    Layout.fillWidth: true;
++                }
++            }
++
++            // ---- indent
++            GridLayout {
++                columns: 2;
++                columnSpacing: 6;
++                rowSpacing: 4;
++                Layout.fillWidth: true;
++                Layout.leftMargin: 4;
++                Layout.rightMargin: 4;
++
++                NovaLengthField {
++                    Layout.fillWidth: true;
++                    symbol: "¶→";
++                    toolTipText: i18nc("@info:tooltip", "Indent first line");
++                    textProperties: root.props;
++                    lengthModel: root.props ? root.props.textIndent.length : null;
++                    dpi: root.dpi;
++                    dFrom: -999;
++                    dTo: 999;
++                    softDFrom: -72;
++                    softDTo: 72;
++                    allowPercentage: true;
++                }
++                CheckBox {
++                    text: i18nc("@option:check", "Hanging");
++                    checked: root.props ? root.props.textIndent.hanging : false;
++                    ToolTip.text: i18nc("@info:tooltip", "Indent every line but the first");
++                    ToolTip.visible: hovered;
++                    ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval;
++                    onToggled: {
++                        root.props.textIndent.hanging = checked;
++                        checked = Qt.binding(function() { return root.props ? root.props.textIndent.hanging : false; });
++                    }
++                }
++            }
++
++            CheckBox {
++                Layout.leftMargin: 4;
++                text: i18nc("@option:check", "Roman hanging punctuation");
++                checked: root.props ? (root.props.hangingPunctuationFirst || root.props.hangingPunctuationLast) : false;
++                ToolTip.text: i18nc("@info:tooltip", "Let opening and closing punctuation hang outside the text box");
++                ToolTip.visible: hovered;
++                ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval;
++                onToggled: {
++                    root.props.hangingPunctuationFirst = checked;
++                    root.props.hangingPunctuationLast = checked;
++                    checked = Qt.binding(function() {
++                        return root.props ? (root.props.hangingPunctuationFirst || root.props.hangingPunctuationLast) : false;
++                    });
++                }
++            }
++
++            Kis.ToolSeparatorBase {
++                orientation: Qt.Horizontal;
++                Layout.fillWidth: true;
++            }
++
++            Button {
++                Layout.fillWidth: true;
++                Layout.leftMargin: 4;
++                Layout.rightMargin: 4;
++                text: i18nc("@action:button", "More Text Options...");
++                ToolTip.text: i18nc("@info:tooltip", "All of Krita's text options: writing mode, white space, line and word breaking, tab size...");
++                ToolTip.visible: hovered;
++                ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval;
++                onClicked: if (root.panel) root.panel.showMoreOptions();
++            }
++
++            Item {
++                Layout.fillHeight: true;
++            }
++        }
++    }
++}
+diff --git a/plugins/dockers/textproperties/qml/NovaToggle.qml b/plugins/dockers/textproperties/qml/NovaToggle.qml
+new file mode 100644
+index 0000000..41bb7ae
+--- /dev/null
++++ b/plugins/dockers/textproperties/qml/NovaToggle.qml
+@@ -0,0 +1,36 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++import QtQuick 2.15
++import QtQuick.Controls 2.15
++import QtQuick.Layouts 1.12
++
++/**
++ * Krita Nova (patch 36): a small glyph button of the Character and Paragraph
++ * panels (faux bold, all caps, ligatures, alignment ...). "on" shows the
++ * state of the text; clicking emits "activated" and the panel changes it.
++ */
++ToolButton {
++    id: btn;
++    property bool active: false;
++    property string tip: "";
++    property bool italicGlyph: false;
++    property bool underlineGlyph: false;
++    property bool strikeGlyph: false;
++    signal activated();
++
++    checkable: false;
++    checked: active;
++    Layout.fillWidth: true;
++    Layout.minimumWidth: 24;
++    Layout.preferredHeight: 26;
++    font.italic: italicGlyph;
++    font.underline: underlineGlyph;
++    font.strikeout: strikeGlyph;
++    ToolTip.text: tip;
++    ToolTip.visible: hovered && tip !== "";
++    ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval;
++    onClicked: activated();
++}
+diff --git a/plugins/dockers/textproperties/textproperties.qrc b/plugins/dockers/textproperties/textproperties.qrc
+index 7c43fde..137feaf 100644
+--- a/plugins/dockers/textproperties/textproperties.qrc
++++ b/plugins/dockers/textproperties/textproperties.qrc
+@@ -61,5 +61,10 @@
+         <file alias="TextPropertyConfigDialog.qml">qml/TextPropertyConfigDialog.qml</file>
+         <file alias="CssStylePresetEdit.qml">qml/CssStylePresetEdit.qml</file>
+         <file alias="TextAreaOptions.qml">qml/TextAreaOptions.qml</file>
++        <file alias="NovaCharacterPanel.qml">qml/NovaCharacterPanel.qml</file>
++        <file alias="NovaParagraphPanel.qml">qml/NovaParagraphPanel.qml</file>
++        <file alias="NovaLengthField.qml">qml/NovaLengthField.qml</file>
++        <file alias="NovaLeadingField.qml">qml/NovaLeadingField.qml</file>
++        <file alias="NovaToggle.qml">qml/NovaToggle.qml</file>
+     </qresource>
+ </RCC>
