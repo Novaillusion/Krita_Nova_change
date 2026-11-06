@@ -9,7 +9,8 @@ the original where it was:
 - Otherwise the layers the Move tool would move (the selected layers, the
   layer under the cursor or its group, depending on the tool's mode) are
   duplicated - each copy right above its original, named "<name> copy" - the
-  copies become the selected layers and the drag moves them. Duplicating
+  copies become the selected layers (as soon as the document has them) and
+  the drag moves them. Duplicating
   ("Duplicate") and moving are two undo steps.
 - While Alt+dragging, Alt does not slow the movement down (Krita's precision
   mode for Alt stays for normal drags).
@@ -19,21 +20,23 @@ the original where it was:
 kis_tool_move.cc: startDuplicateAction(), duplicateNodesForMove(), and a
 "duplicate" start of the stroke; MoveSelectionStrokeStrategy: keepSource.
 diff --git a/plugins/tools/basictools/kis_tool_move.cc b/plugins/tools/basictools/kis_tool_move.cc
-index 028acfa..4db731d 100644
+index 028acfa..09e5350 100644
 --- a/plugins/tools/basictools/kis_tool_move.cc
 +++ b/plugins/tools/basictools/kis_tool_move.cc
-@@ -26,6 +26,10 @@
+@@ -26,6 +26,12 @@
  #include "kis_resources_snapshot.h"
  #include "kis_action_registry.h"
  #include "krita_utils.h"
 +#include <kis_command_utils.h>
++#include <QPointer>
++#include <QTimer>
 +#include <commands/kis_image_layer_add_command.h>
 +#include <kis_undo_adapter.h>
 +#include <klocalizedstring.h>
  
  #include <KisViewManager.h>
  #include <KisDocument.h>
-@@ -141,7 +145,7 @@ void KisToolMove::resetCursorStyle()
+@@ -141,7 +147,7 @@ void KisToolMove::resetCursorStyle()
      }
  }
  
@@ -42,7 +45,7 @@ index 028acfa..4db731d 100644
  {
      KisNodeSP node;
      KisImageSP image = this->image();
-@@ -170,7 +174,8 @@ bool KisToolMove::startStrokeImpl(MoveToolMode mode, const QPoint *pos)
+@@ -170,7 +176,8 @@ bool KisToolMove::startStrokeImpl(MoveToolMode mode, const QPoint *pos)
          // restart stroke when the mode has changed or the user tried to
          // pick another layer in "layer under cursor" mode.
          if (m_strokeId &&
@@ -52,7 +55,7 @@ index 028acfa..4db731d 100644
                   m_currentlyUsingSelection != canUseSelectionMode ||
                   (!m_currentlyUsingSelection &&
                    mode != MoveSelectedLayer &&
-@@ -201,7 +206,8 @@ bool KisToolMove::startStrokeImpl(MoveToolMode mode, const QPoint *pos)
+@@ -201,7 +208,8 @@ bool KisToolMove::startStrokeImpl(MoveToolMode mode, const QPoint *pos)
              new MoveSelectionStrokeStrategy(paintLayer,
                                              selection,
                                              image.data(),
@@ -62,7 +65,7 @@ index 028acfa..4db731d 100644
  
          connect(moveStrategy,
                  SIGNAL(sigHandlesRectCalculated(const QRect&)),
-@@ -223,6 +229,13 @@ bool KisToolMove::startStrokeImpl(MoveToolMode mode, const QPoint *pos)
+@@ -223,6 +231,13 @@ bool KisToolMove::startStrokeImpl(MoveToolMode mode, const QPoint *pos)
                          *pos) :
                  KisNodeSelectionRecipe(this->selectedNodes());
  
@@ -76,7 +79,7 @@ index 028acfa..4db731d 100644
  
          MoveStrokeStrategy *moveStrategy =
              new MoveStrokeStrategy(nodeSelection, image.data(), image.data());
-@@ -252,6 +265,7 @@ bool KisToolMove::startStrokeImpl(MoveToolMode mode, const QPoint *pos)
+@@ -252,6 +267,7 @@ bool KisToolMove::startStrokeImpl(MoveToolMode mode, const QPoint *pos)
      m_strokeId = image->startStroke(strategy);
      m_currentlyProcessingNodes = nodes;
      m_currentlyUsingSelection = isMoveSelection;
@@ -84,7 +87,7 @@ index 028acfa..4db731d 100644
      m_currentMode = mode;
      m_accumulatedOffset = QPoint();
  
-@@ -485,9 +499,79 @@ void KisToolMove::requestRedoDuringStroke()
+@@ -485,9 +501,100 @@ void KisToolMove::requestRedoDuringStroke()
  
  void KisToolMove::beginPrimaryAction(KoPointerEvent *event)
  {
@@ -128,12 +131,33 @@ index 028acfa..4db731d 100644
 +    }
 +    image->undoAdapter()->addCommand(command);
 +
-+    // the copies are the selected layers now, like in Photoshop
++    // the copies are the selected layers now, like in Photoshop - once the
++    // document knows them (selecting a layer before its shape exists trips a
++    // safe assert in KisNodeManager)
 +    KisCanvas2 *kisCanvas = dynamic_cast<KisCanvas2 *>(canvas());
-+    if (kisCanvas && kisCanvas->viewManager() && kisCanvas->viewManager()->nodeManager()) {
-+        kisCanvas->viewManager()->nodeManager()->slotImageRequestNodeReselection(copies.last(), copies);
++    if (kisCanvas && kisCanvas->viewManager()) {
++        reselectWhenReady(kisCanvas->viewManager(), copies, 25);
 +    }
 +    return copies;
++}
++
++void KisToolMove::reselectWhenReady(QPointer<KisViewManager> viewManager, KisNodeList nodes, int attempts)
++{
++    if (!viewManager || !viewManager->nodeManager() || !viewManager->document() || nodes.isEmpty()) return;
++    bool ready = true;
++    Q_FOREACH (KisNodeSP node, nodes) {
++        if (!node->graphListener()) return; // removed again (undo)
++        if (!viewManager->document()->shapeForNode(node)) ready = false;
++    }
++    if (!ready) {
++        if (attempts > 0) {
++            QTimer::singleShot(20, [viewManager, nodes, attempts]() {
++                reselectWhenReady(viewManager, nodes, attempts - 1);
++            });
++        }
++        return;
++    }
++    viewManager->nodeManager()->slotImageRequestNodeReselection(nodes.last(), nodes);
 +}
 +
 +void KisToolMove::startDuplicateAction(KoPointerEvent *event, MoveToolMode mode)
@@ -164,7 +188,7 @@ index 028acfa..4db731d 100644
  void KisToolMove::continuePrimaryAction(KoPointerEvent *event)
  {
      continueAction(event);
-@@ -500,6 +584,12 @@ void KisToolMove::endPrimaryAction(KoPointerEvent *event)
+@@ -500,6 +607,12 @@ void KisToolMove::endPrimaryAction(KoPointerEvent *event)
  
  void KisToolMove::beginAlternateAction(KoPointerEvent *event, AlternateAction action)
  {
@@ -177,7 +201,7 @@ index 028acfa..4db731d 100644
      // Ctrl+Right click toggles between moving current layer and moving layer w/ content
      if (action == SampleFgNode || action == SampleBgImage) {
          MoveToolMode mode = moveToolMode();
-@@ -728,8 +818,9 @@ QPoint KisToolMove::applyModifiers(Qt::KeyboardModifiers modifiers, QPoint pos)
+@@ -728,8 +841,9 @@ QPoint KisToolMove::applyModifiers(Qt::KeyboardModifiers modifiers, QPoint pos)
          move = snapToClosestAxis(move);
      }
  
@@ -190,10 +214,26 @@ index 028acfa..4db731d 100644
          move = SCALE_FACTOR * move;
      }
 diff --git a/plugins/tools/basictools/kis_tool_move.h b/plugins/tools/basictools/kis_tool_move.h
-index a1f33a9..7850ba4 100644
+index a1f33a9..6862a09 100644
 --- a/plugins/tools/basictools/kis_tool_move.h
 +++ b/plugins/tools/basictools/kis_tool_move.h
-@@ -123,7 +123,11 @@ private:
+@@ -18,6 +18,7 @@
+ #include <QWidget>
+ #include <QGroupBox>
+ #include <QRadioButton>
++#include <QPointer>
+ #include "KisToolChangesTracker.h"
+ #include "kis_signal_compressor.h"
+ #include "kis_signal_auto_connection.h"
+@@ -27,6 +28,7 @@
+ 
+ 
+ class KoCanvasBase;
++class KisViewManager;
+ class MoveToolOptionsWidget;
+ class KisDocument;
+ 
+@@ -123,7 +125,13 @@ private:
      void cancelStroke();
      QPoint applyModifiers(Qt::KeyboardModifiers modifiers, QPoint pos);
  
@@ -201,12 +241,14 @@ index a1f33a9..7850ba4 100644
 +    bool startStrokeImpl(MoveToolMode mode, const QPoint *pos, bool duplicate = false);
 +    /// Krita Nova (patch 40): copies of the layers to be moved, above them
 +    KisNodeList duplicateNodesForMove(const KisNodeList &nodes);
++    /// Krita Nova (patch 40): select the copies once the document has them
++    static void reselectWhenReady(QPointer<KisViewManager> viewManager, KisNodeList nodes, int attempts);
 +    /// Krita Nova (patch 40): Alt+drag duplicates, like Photoshop
 +    void startDuplicateAction(KoPointerEvent *event, MoveToolMode mode);
  
      QPoint currentOffset() const;
      void notifyGuiAfterMove(bool showFloatingMessage = true);
-@@ -154,6 +158,7 @@ private:
+@@ -154,6 +162,7 @@ private:
  
      KisNodeList m_currentlyProcessingNodes;
      bool m_currentlyUsingSelection {false};
