@@ -1,0 +1,607 @@
+Krita Nova 35 - the color range slider of the HSV Adjustment (Photoshop style)
+
+Below the sliders of Filter > Adjust > HSV/HSL Adjustment, like Photoshop's
+Hue/Saturation:
+
+- two hue spectrum bars: the colors as they are (top) and as the adjustment
+  turns them (bottom);
+- for a color range (Reds ... Magentas, patch 34), its limits between the
+  bars: full effect between the two inner bars (dark), fading out towards the
+  two outer triangles (light). Drag a limit to move it (they keep their order,
+  and the range stays under 360 degrees); drag the range itself to move all
+  four. The limits are shown above the bars as "315°/345° \ 15°/45°".
+- The bars are centered on the range being edited (red for Master, which has
+  no limits). With Colorize or YUV (no color ranges) the slider is hidden.
+  Reset puts the limits back to Photoshop's defaults.
+
+KisHueRangeSlider (kis_hsv_adjustment_filter.h/.cpp) is the widget. The limits
+are saved per range as "ra_1".."rd_6" (continuous degrees a <= b <= c <= d,
+default center -45, -15, +15, +45) and handed to the transformation as
+"rangeBounds" (24 values); KisHSVAdjustment::rangeWeight() uses them instead
+of the fixed widths of patch 34.
+diff --git a/plugins/color/colorspaceextensions/kis_hsv_adjustment.cpp b/plugins/color/colorspaceextensions/kis_hsv_adjustment.cpp
+index aeab1dd..18a13fd 100644
+--- a/plugins/color/colorspaceextensions/kis_hsv_adjustment.cpp
++++ b/plugins/color/colorspaceextensions/kis_hsv_adjustment.cpp
+@@ -388,9 +388,8 @@ public:
+ 
+                     // Krita Nova (patch 34): adjustments of one color range (Reds,
+                     // Yellows ... Magentas, like Photoshop's Hue/Saturation) add to
+-                    // the master ones, weighted by how close the pixel's own hue is
+-                    // to the range: full within 15 degrees of its center, fading out
+-                    // over the next 30 degrees. Grays are not in any color range.
++                    // the master ones, weighted by where the pixel's own hue is in
++                    // the range (rangeWeight). Grays are not in any color range.
+                     float adjH = m_adj_h;
+                     float adjS = m_adj_s;
+                     float adjV = m_adj_v;
+@@ -407,10 +406,8 @@ public:
+                             else if (rg == rM) hue = 2.0f + (rb - rr) / rc;
+                             else hue = 4.0f + (rr - rg) / rc;
+                             hue = normalizeAngleDegrees(hue * 60.0f);
+-                            for (int i = 0; i < 6; ++i) {
+-                                float d = std::abs(hue - 60.0f * i);
+-                                if (d > 180.0f) d = 360.0f - d;
+-                                const float w = qBound(0.0f, (45.0f - d) / 30.0f, 1.0f);
++                                for (int i = 0; i < 6; ++i) {
++                                const float w = rangeWeight(i, hue);
+                                 if (w > 0.0f) {
+                                     adjH += w * m_rangeH[i];
+                                     adjS += w * m_rangeS[i];
+@@ -588,13 +585,15 @@ public:
+     {
+       QList<QString> list;
+       list << "h" << "s" << "v" << "type" << "colorize" << "lumaRed" << "lumaGreen"<< "lumaBlue" << "compatibilityMode"
+-           << "rangeH" << "rangeS" << "rangeV";
++           << "rangeH" << "rangeS" << "rangeV" << "rangeBounds";
+       return list;
+     }
+ 
+     int parameterId(const QString& name) const override
+     {
+-        if (name == "rangeH") {
++        if (name == "rangeBounds") {
++            return 12;
++        } else if (name == "rangeH") {
+             return 9;
+         } else if (name == "rangeS") {
+             return 10;
+@@ -677,6 +676,20 @@ public:
+             }
+             break;
+         }
++        case 12: {
++            // 6 x (a, b, c, d) limits of the color ranges, degrees
++            const QVariantList values = parameter.toList();
++            if (values.size() == 24) {
++                for (int i = 0; i < 6; ++i) {
++                    float r[4];
++                    for (int k = 0; k < 4; ++k) r[k] = values[i * 4 + k].toFloat();
++                    if (r[0] <= r[1] && r[1] <= r[2] && r[2] <= r[3] && r[3] - r[0] < 360.0f) {
++                        for (int k = 0; k < 4; ++k) m_rangeBounds[i][k] = r[k];
++                    }
++                }
++            }
++            break;
++        }
+         default:
+             KIS_ASSERT_RECOVER_NOOP(false && "Unknown parameter ID. Ignored!");
+             ;
+@@ -685,6 +698,29 @@ public:
+ 
+ private:
+ 
++    /**
++     * How much color range \p i affects a pixel of hue \p hue (degrees):
++     * fully between its inner limits b..c, fading out linearly towards its
++     * outer limits a and d (Photoshop's range slider). The limits are
++     * continuous degrees (a <= b <= c <= d, d - a < 360) and may go below 0
++     * or above 360. Default: center -/+ 15 full, -/+ 45 outer.
++     */
++    inline float rangeWeight(int i, float hue) const
++    {
++        const float *r = m_rangeBounds[i];
++        float x = hue;
++        while (x < r[0]) x += 360.0f;
++        while (x >= r[0] + 360.0f) x -= 360.0f;
++        if (x < r[1]) return r[1] > r[0] ? (x - r[0]) / (r[1] - r[0]) : 1.0f;
++        if (x <= r[2]) return 1.0f;
++        if (x < r[3]) return (r[3] - x) / (r[3] - r[2]);
++        return 0.0f;
++    }
++
++    float m_rangeBounds[6][4] {
++        {-45, -15, 15, 45}, {15, 45, 75, 105}, {75, 105, 135, 165},
++        {135, 165, 195, 225}, {195, 225, 255, 285}, {255, 285, 315, 345},
++    };
+     float m_rangeH[6] {0, 0, 0, 0, 0, 0};
+     float m_rangeS[6] {0, 0, 0, 0, 0, 0};
+     float m_rangeV[6] {0, 0, 0, 0, 0, 0};
+diff --git a/plugins/filters/colorsfilters/kis_hsv_adjustment_filter.cpp b/plugins/filters/colorsfilters/kis_hsv_adjustment_filter.cpp
+index 16ecadc..0413b8a 100644
+--- a/plugins/filters/colorsfilters/kis_hsv_adjustment_filter.cpp
++++ b/plugins/filters/colorsfilters/kis_hsv_adjustment_filter.cpp
+@@ -27,6 +27,10 @@
+ #include "kis_signals_blocker.h"
+ 
+ #include <QComboBox>
++#include <QMouseEvent>
++#include <QPainter>
++#include <QVBoxLayout>
++#include <cmath>
+ #include <QLabel>
+ #include <QShortcut>
+ 
+@@ -257,6 +261,19 @@ SliderSettings sliderSetting(SLIDER_TYPE type) {
+ /// (1..6) is centered on hue (i - 1) * 60 degrees.
+ const int COLOR_RANGE_COUNT = 6;
+ 
++/// Photoshop's default limits of color range i (1..6): full within 15 degrees
++/// of its center, fading out over the next 30
++std::array<int, 4> defaultRangeLimits(int i)
++{
++    const int center = (i - 1) * 60;
++    return {{center - 45, center - 15, center + 15, center + 45}};
++}
++
++QString hueText(int degrees)
++{
++    return QString::number(((degrees % 360) + 360) % 360) + QChar(0x00B0);
++}
++
+ }
+ 
+ KisHSVAdjustmentFilter::KisHSVAdjustmentFilter()
+@@ -311,6 +328,16 @@ KoColorTransformation *KisHSVAdjustmentFilter::createTransformation(const KoColo
+                 params["rangeH"] = rangeH;
+                 params["rangeS"] = rangeS;
+                 params["rangeV"] = rangeV;
++
++                QVariantList bounds;
++                for (int i = 1; i <= COLOR_RANGE_COUNT; ++i) {
++                    const std::array<int, 4> def = defaultRangeLimits(i);
++                    bounds << config->getInt(QString("ra_%1").arg(i), def[0])
++                           << config->getInt(QString("rb_%1").arg(i), def[1])
++                           << config->getInt(QString("rc_%1").arg(i), def[2])
++                           << config->getInt(QString("rd_%1").arg(i), def[3]);
++                }
++                params["rangeBounds"] = bounds;
+             }
+         }
+     }
+@@ -367,6 +394,27 @@ KisHSVConfigWidget::KisHSVConfigWidget(QWidget *parent, Qt::WindowFlags f)
+     m_page->formLayout->insertRow(2, rangeLabel, m_cmbRange);
+     connect(m_cmbRange, SIGNAL(currentIndexChanged(int)), this, SLOT(slotRangeChanged(int)));
+ 
++    // Krita Nova (patch 35): the color range slider, below the sliders
++    for (int i = 1; i <= COLOR_RANGE_COUNT; ++i) {
++        m_rangeLimits[i] = defaultRangeLimits(i);
++    }
++    m_rangeLimits[0] = {{-45, -15, 15, 45}};
++    QWidget *rangeBox = new QWidget(this);
++    QVBoxLayout *rangeLayout = new QVBoxLayout(rangeBox);
++    rangeLayout->setContentsMargins(0, 4, 0, 0);
++    rangeLayout->setSpacing(2);
++    m_rangeLimitsLabel = new QLabel(rangeBox);
++    m_rangeLimitsLabel->setAlignment(Qt::AlignCenter);
++    m_rangeSlider = new KisHueRangeSlider(rangeBox);
++    m_rangeSlider->setToolTip(i18n("The hues the color range adjusts: fully between the inner bars, "
++                                   "less and less towards the outer triangles. Drag a limit to move it, "
++                                   "drag the range to move it all."));
++    rangeLayout->addWidget(m_rangeLimitsLabel);
++    rangeLayout->addWidget(m_rangeSlider);
++    m_page->formLayout->insertRow(6, rangeBox);
++    connect(m_rangeSlider, SIGNAL(limitsChanged()), this, SLOT(slotRangeLimitsChanged()));
++    connect(m_page->hSlider, SIGNAL(valueChanged(int)), this, SLOT(updateRangeSlider()));
++
+     connect(m_page->cmbType, SIGNAL(activated(int)), this, SLOT(configureSliderLimitsAndLabels()));
+     connect(m_page->chkColorize, SIGNAL(toggled(bool)), this, SLOT(configureSliderLimitsAndLabels()));
+     connect(m_page->chkCompatibilityMode, SIGNAL(toggled(bool)), SIGNAL(sigConfigurationItemChanged()));
+@@ -410,6 +458,12 @@ KisPropertiesConfigurationSP KisHSVConfigWidget::configuration() const
+         c->setProperty(QString("v_%1").arg(i), values[i][2]);
+     }
+     c->setProperty("range", m_currentRange);
++    for (int i = 1; i <= COLOR_RANGE_COUNT; ++i) {
++        c->setProperty(QString("ra_%1").arg(i), m_rangeLimits[i][0]);
++        c->setProperty(QString("rb_%1").arg(i), m_rangeLimits[i][1]);
++        c->setProperty(QString("rc_%1").arg(i), m_rangeLimits[i][2]);
++        c->setProperty(QString("rd_%1").arg(i), m_rangeLimits[i][3]);
++    }
+     c->setProperty("type", m_page->cmbType->currentIndex());
+     c->setProperty("colorize", m_page->chkColorize->isChecked());
+     c->setProperty("compatibilityMode", m_page->chkCompatibilityMode->isChecked());
+@@ -428,6 +482,15 @@ void KisHSVConfigWidget::setConfiguration(const KisPropertiesConfigurationSP con
+                             config->getInt(QString("s_%1").arg(i), 0),
+                             config->getInt(QString("v_%1").arg(i), 0)};
+     }
++    for (int i = 1; i <= COLOR_RANGE_COUNT; ++i) {
++        const std::array<int, 4> def = defaultRangeLimits(i);
++        std::array<int, 4> r = {{config->getInt(QString("ra_%1").arg(i), def[0]),
++                                 config->getInt(QString("rb_%1").arg(i), def[1]),
++                                 config->getInt(QString("rc_%1").arg(i), def[2]),
++                                 config->getInt(QString("rd_%1").arg(i), def[3])}};
++        const bool valid = r[0] <= r[1] && r[1] <= r[2] && r[2] <= r[3] && r[3] - r[0] < 360;
++        m_rangeLimits[i] = valid ? r : def;
++    }
+     // show Master first while the limits are set up; the slider ranges of
+     // the color ranges are the (relative) ones of Master without Colorize
+     m_currentRange = 0;
+@@ -446,6 +509,7 @@ void KisHSVConfigWidget::setConfiguration(const KisPropertiesConfigurationSP con
+     if (range != 0 && m_cmbRange->isEnabled()) {
+         m_cmbRange->setCurrentIndex(range);
+     }
++    updateRangeSlider();
+ }
+ 
+ void KisHSVConfigWidget::slotRangeChanged(int index)
+@@ -464,6 +528,7 @@ void KisHSVConfigWidget::slotRangeChanged(int index)
+         m_page->vSpinBox->setValue(m_page->vSlider->value());
+     }
+     recolorSliders();
++    updateRangeSlider();
+     // nothing changed in the image, but the shown range is part of the configuration
+     Q_EMIT sigConfigurationItemChanged();
+ }
+@@ -481,6 +546,7 @@ void KisHSVConfigWidget::configureSliderLimitsAndLabels()
+         m_cmbRange->setCurrentIndex(0); // stores the range's values, shows Master's
+     }
+     m_cmbRange->setEnabled(rangesAvailable);
++    m_rangeSlider->parentWidget()->setVisible(rangesAvailable);
+ 
+     // Prevent the sliders from recoloring when setValue is triggered in apply()
+     // Since some values will be invalid while inside this function if colorize is changed
+@@ -523,9 +589,262 @@ void KisHSVConfigWidget::resetFilter()
+     for (auto &values : m_rangeValues) {
+         values = {0, 0, 0};
+     }
++    for (int i = 1; i <= COLOR_RANGE_COUNT; ++i) {
++        m_rangeLimits[i] = defaultRangeLimits(i);
++    }
++    updateRangeSlider();
+ 
+     sliderSetting(sliderSet[0]).reset(m_page->hSlider);
+     sliderSetting(sliderSet[1]).reset(m_page->sSlider);
+     sliderSetting(sliderSet[2]).reset(m_page->vSlider);
+ }
+ 
++
++void KisHSVConfigWidget::slotRangeLimitsChanged()
++{
++    if (m_currentRange < 1) return;
++    m_rangeLimits[m_currentRange] = m_rangeSlider->limits();
++    updateRangeSlider();
++    Q_EMIT sigConfigurationItemChanged();
++}
++
++void KisHSVConfigWidget::updateRangeSlider()
++{
++    if (!m_rangeSlider) return;
++    const bool isRange = m_currentRange >= 1;
++    const int masterHue = isRange ? m_rangeValues[0][0] : m_page->hSlider->value();
++    const int rangeHue = isRange ? m_page->hSlider->value() : 0;
++
++    m_rangeSlider->setRangeVisible(isRange);
++    if (isRange) {
++        const std::array<int, 4> &r = m_rangeLimits[m_currentRange];
++        m_rangeSlider->setLimits(r);
++        m_rangeSlider->setCenterHue((m_currentRange - 1) * 60);
++        // like Photoshop: 315°/345° \ 15°/45°
++        m_rangeLimitsLabel->setText(QString("%1/%2  \\  %3/%4")
++                                        .arg(hueText(r[0]), hueText(r[1]), hueText(r[2]), hueText(r[3])));
++    } else {
++        m_rangeSlider->setCenterHue(0); // red in the middle, like Photoshop
++        m_rangeLimitsLabel->setText(QString());
++    }
++    m_rangeSlider->setHueShifts(masterHue, rangeHue);
++}
++
++// ---------------------------------------------------------------------------
++// KisHueRangeSlider (Krita Nova, patch 35)
++
++namespace {
++const int BAR_HEIGHT = 10;
++const int RANGE_HEIGHT = 16;
++const int SIDE_MARGIN = 8;
++const int HANDLE_GRAB = 10;
++}
++
++KisHueRangeSlider::KisHueRangeSlider(QWidget *parent)
++    : QWidget(parent)
++{
++    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
++    setMouseTracking(false);
++}
++
++QSize KisHueRangeSlider::sizeHint() const
++{
++    return QSize(360, 2 * BAR_HEIGHT + RANGE_HEIGHT + 8);
++}
++
++QSize KisHueRangeSlider::minimumSizeHint() const
++{
++    return QSize(180, 2 * BAR_HEIGHT + RANGE_HEIGHT + 8);
++}
++
++void KisHueRangeSlider::setLimits(const std::array<int, 4> &limits)
++{
++    if (m_limits == limits) return;
++    m_limits = limits;
++    update();
++}
++
++void KisHueRangeSlider::setRangeVisible(bool visible)
++{
++    if (m_rangeVisible == visible) return;
++    m_rangeVisible = visible;
++    m_drag = -1;
++    update();
++}
++
++void KisHueRangeSlider::setCenterHue(qreal hue)
++{
++    m_center = hue;
++    update();
++}
++
++void KisHueRangeSlider::setHueShifts(qreal master, qreal range)
++{
++    m_masterShift = master;
++    m_rangeShift = range;
++    update();
++}
++
++QRect KisHueRangeSlider::barsRect() const
++{
++    return rect().adjusted(SIDE_MARGIN, 2, -SIDE_MARGIN, -2);
++}
++
++qreal KisHueRangeSlider::xForHue(qreal hue) const
++{
++    const QRect r = barsRect();
++    // the hue's position within the 360 degrees around the center
++    qreal offset = hue - (m_center - 180.0);
++    offset = std::fmod(offset, 360.0);
++    if (offset < 0) offset += 360.0;
++    return r.left() + offset / 360.0 * r.width();
++}
++
++qreal KisHueRangeSlider::hueForX(qreal x) const
++{
++    const QRect r = barsRect();
++    return m_center - 180.0 + (x - r.left()) / qMax(1, r.width()) * 360.0;
++}
++
++qreal KisHueRangeSlider::weightAt(qreal hue) const
++{
++    const std::array<int, 4> &r = m_limits;
++    qreal x = hue;
++    while (x < r[0]) x += 360.0;
++    while (x >= r[0] + 360.0) x -= 360.0;
++    if (x < r[1]) return r[1] > r[0] ? (x - r[0]) / (r[1] - r[0]) : 1.0;
++    if (x <= r[2]) return 1.0;
++    if (x < r[3]) return (r[3] - x) / (r[3] - r[2]);
++    return 0.0;
++}
++
++void KisHueRangeSlider::paintEvent(QPaintEvent *)
++{
++    QPainter p(this);
++    const QRect r = barsRect();
++    const int top = r.top();
++    const int bottom = r.bottom() - BAR_HEIGHT + 1;
++    const int rangeTop = top + BAR_HEIGHT + 4;
++
++    auto hueColor = [](qreal hue) {
++        qreal h = std::fmod(hue, 360.0);
++        if (h < 0) h += 360.0;
++        return QColor::fromHsvF(h / 360.0, 1.0, 1.0);
++    };
++
++    // spectrum bars: as they are (top) and as adjusted (bottom)
++    for (int x = r.left(); x <= r.right(); ++x) {
++        const qreal hue = hueForX(x + 0.5);
++        p.setPen(hueColor(hue));
++        p.drawLine(x, top, x, top + BAR_HEIGHT - 1);
++        const qreal shift = m_masterShift + (m_rangeVisible ? weightAt(hue) * m_rangeShift : 0.0);
++        p.setPen(hueColor(hue + shift));
++        p.drawLine(x, bottom, x, bottom + BAR_HEIGHT - 1);
++    }
++    p.setPen(palette().color(QPalette::Mid));
++    p.setBrush(Qt::NoBrush);
++    p.drawRect(r.left(), top, r.width() - 1, BAR_HEIGHT - 1);
++    p.drawRect(r.left(), bottom, r.width() - 1, BAR_HEIGHT - 1);
++
++    if (!m_rangeVisible) return;
++
++    // the range: falloff (light), full effect (dark), limits
++    const qreal xa = xForHue(m_limits[0]);
++    const qreal span = (m_limits[3] - m_limits[0]) / 360.0 * r.width();
++    const qreal xb = xa + (m_limits[1] - m_limits[0]) / 360.0 * r.width();
++    const qreal xc = xa + (m_limits[2] - m_limits[0]) / 360.0 * r.width();
++    const qreal xd = xa + span;
++    const int barY = rangeTop + RANGE_HEIGHT / 2 - 3;
++    const QColor falloff = palette().color(QPalette::Mid);
++    const QColor full = palette().color(QPalette::Dark).darker(110);
++
++    p.setRenderHint(QPainter::Antialiasing, true);
++    // the range may run past the right end: draw it once more shifted left
++    for (const qreal shiftX : {0.0, -qreal(r.width())}) {
++        p.save();
++        p.setClipRect(r);
++        p.translate(shiftX, 0);
++        p.fillRect(QRectF(xa, barY, xd - xa, 6), falloff);
++        p.fillRect(QRectF(xb, barY, xc - xb, 6), full);
++
++        p.setPen(QPen(palette().color(QPalette::WindowText), 1));
++        p.setBrush(palette().color(QPalette::Button));
++        // inner limits: small bars
++        for (const qreal x : {xb, xc}) {
++            p.drawRect(QRectF(x - 2.5, rangeTop, 5, RANGE_HEIGHT));
++        }
++        // outer limits: triangles
++        for (const qreal x : {xa, xd}) {
++            const QPointF tri[3] = {QPointF(x, barY - 1), QPointF(x - 5, rangeTop + RANGE_HEIGHT),
++                                    QPointF(x + 5, rangeTop + RANGE_HEIGHT)};
++            p.drawPolygon(tri, 3);
++        }
++        p.restore();
++    }
++}
++
++void KisHueRangeSlider::mousePressEvent(QMouseEvent *event)
++{
++    if (!m_rangeVisible || event->button() != Qt::LeftButton) {
++        QWidget::mousePressEvent(event);
++        return;
++    }
++    const QRect r = barsRect();
++    const qreal xa = xForHue(m_limits[0]);
++    qreal xs[4];
++    for (int k = 0; k < 4; ++k) xs[k] = xa + (m_limits[k] - m_limits[0]) / 360.0 * r.width();
++
++    // the range drawn where it was pressed (it may wrap past the right end)
++    qreal px = event->pos().x();
++    if (px < xa - HANDLE_GRAB) px += r.width();
++
++    int best = -1;
++    qreal bestDistance = HANDLE_GRAB;
++    // inner limits first: they win when both are in reach
++    for (int k : {1, 2, 0, 3}) {
++        const qreal distance = std::abs(px - xs[k]);
++        if (distance < bestDistance - 0.5) {
++            best = k;
++            bestDistance = distance;
++        }
++    }
++    if (best < 0 && px > xs[0] && px < xs[3]) best = 4;
++
++    m_drag = best;
++    m_pressX = event->pos().x();
++    m_pressLimits = m_limits;
++    event->accept();
++}
++
++void KisHueRangeSlider::mouseMoveEvent(QMouseEvent *event)
++{
++    if (m_drag < 0) {
++        QWidget::mouseMoveEvent(event);
++        return;
++    }
++    const QRect r = barsRect();
++    const int delta = qRound((event->pos().x() - m_pressX) * 360.0 / qMax(1, r.width()));
++    std::array<int, 4> l = m_pressLimits;
++    if (m_drag == 4) {
++        for (int &v : l) v += delta;
++    } else {
++        const int k = m_drag;
++        int v = m_pressLimits[k] + delta;
++        const int lower = k > 0 ? l[k - 1] : l[3] - 359;
++        const int upper = k < 3 ? l[k + 1] : l[0] + 359;
++        v = qBound(lower, v, upper);
++        l[k] = v;
++    }
++    if (l != m_limits) {
++        m_limits = l;
++        update();
++        Q_EMIT limitsChanged();
++    }
++    event->accept();
++}
++
++void KisHueRangeSlider::mouseReleaseEvent(QMouseEvent *event)
++{
++    m_drag = -1;
++    QWidget::mouseReleaseEvent(event);
++}
+diff --git a/plugins/filters/colorsfilters/kis_hsv_adjustment_filter.h b/plugins/filters/colorsfilters/kis_hsv_adjustment_filter.h
+index b31dbb2..6cbac68 100644
+--- a/plugins/filters/colorsfilters/kis_hsv_adjustment_filter.h
++++ b/plugins/filters/colorsfilters/kis_hsv_adjustment_filter.h
+@@ -17,6 +17,7 @@
+ #include <array>
+ 
+ class QComboBox;
++class QLabel;
+ 
+ class QWidget;
+ class KoColorTransformation;
+@@ -46,6 +47,59 @@ public:
+ };
+ 
+ 
++/**
++ * Krita Nova (patch 35): Photoshop's color range slider for the HSV
++ * adjustment. Two hue spectrum bars (top: the colors as they are, bottom: as
++ * the adjustment turns them) with the range of the color being edited in
++ * between: full effect between the two inner bars, fading out towards the two
++ * outer triangles. Drag a limit to move it, drag the range to move all four.
++ * Hues are continuous degrees; the bars are centered on the edited range.
++ */
++class KisHueRangeSlider : public QWidget
++{
++    Q_OBJECT
++public:
++    explicit KisHueRangeSlider(QWidget *parent = nullptr);
++
++    /// a <= b <= c <= d, d - a < 360
++    void setLimits(const std::array<int, 4> &limits);
++    std::array<int, 4> limits() const { return m_limits; }
++
++    /// show the limits (a color range) or not (Master)
++    void setRangeVisible(bool visible);
++    /// hue in the middle of the bars
++    void setCenterHue(qreal hue);
++    /// hue shift of all colors, and the extra one of the range (degrees)
++    void setHueShifts(qreal master, qreal range);
++
++    QSize sizeHint() const override;
++    QSize minimumSizeHint() const override;
++
++Q_SIGNALS:
++    void limitsChanged();
++
++protected:
++    void paintEvent(QPaintEvent *event) override;
++    void mousePressEvent(QMouseEvent *event) override;
++    void mouseMoveEvent(QMouseEvent *event) override;
++    void mouseReleaseEvent(QMouseEvent *event) override;
++
++private:
++    QRect barsRect() const;
++    qreal xForHue(qreal hue) const;
++    qreal hueForX(qreal x) const;
++    qreal weightAt(qreal hue) const;
++
++    std::array<int, 4> m_limits {{-45, -15, 15, 45}};
++    std::array<int, 4> m_pressLimits {{-45, -15, 15, 45}};
++    bool m_rangeVisible {false};
++    qreal m_center {0.0};
++    qreal m_masterShift {0.0};
++    qreal m_rangeShift {0.0};
++    int m_drag {-1}; ///< 0..3: a limit, 4: the whole range
++    int m_pressX {0};
++};
++
+ class KisHSVConfigWidget : public KisConfigWidget
+ {
+ 
+@@ -66,6 +120,8 @@ private Q_SLOTS:
+     void resetFilter();
+     void recolorSliders();
+     void slotRangeChanged(int index);
++    void slotRangeLimitsChanged();
++    void updateRangeSlider();
+ 
+ private:
+     bool m_prevColorize;
+@@ -73,6 +129,10 @@ private:
+     QComboBox *m_cmbRange {nullptr};
+     int m_currentRange {0};
+     std::array<std::array<int, 3>, 7> m_rangeValues;
++    // Krita Nova (patch 35): the color ranges' limits (a, b, c, d), 1..6
++    std::array<std::array<int, 4>, 7> m_rangeLimits;
++    KisHueRangeSlider *m_rangeSlider {nullptr};
++    QLabel *m_rangeLimitsLabel {nullptr};
+ };
+ 
+ #endif
