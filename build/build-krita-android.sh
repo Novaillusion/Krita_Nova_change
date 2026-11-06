@@ -90,6 +90,8 @@ if [ "${KRITA_SKIP_PATCHES:-0}" != "1" ]; then
                 # (filter git's "has type 100755" noise for sources coming from a Windows drive)
                 git apply --whitespace=nowarn "$patch" 2> >(grep -v 'has type 100755, expected 100644' >&2)
                 for f in "${files[@]}"; do
+                    # a file the patch deleted stays deleted (touch would make an empty one)
+                    [ -e "$f" ] || continue
                     if [ -f "$SRC/$f" ]; then src_mtime=$(stat -c %Y "$SRC/$f"); else src_mtime=0; fi
                     touch -d "@$(( patch_mtime > src_mtime ? patch_mtime : src_mtime ))" "$f"
                 done
