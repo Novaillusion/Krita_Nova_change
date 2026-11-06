@@ -1,0 +1,231 @@
+Krita Nova 39 - text layers, like Photoshop (text tool, part 4)
+
+Each new text gets a vector layer of its own, like a Photoshop type layer:
+
+- The layer is added above the current layer, in the same group, and becomes
+  the current layer. While nothing is typed it is called "Text".
+- When editing the text ends (click away, Esc, Ctrl+Enter, another text), the
+  layer is named after its text (up to 40 characters), undoably - again after
+  later edits, until the user renames the layer.
+- A text that was never typed into is removed together with its layer
+  (patch 38).
+- Text in a shape stays in the layer of its shape, and text created in a
+  vector selection (selection mask) stays there, as before.
+
+SvgCreateTextStrategy::createTextLayer() makes the layer (as part of the
+"create text" undo step); the layers carry the node property
+krita-nova-text-layer-name (the name the tool gave them).
+SvgTextTool::updateTextLayerName() renames, removeIfEmpty() removes the layer
+of an empty text.
+diff --git a/plugins/tools/svgtexttool/SvgCreateTextStrategy.cpp b/plugins/tools/svgtexttool/SvgCreateTextStrategy.cpp
+index 1e1e36c..54e3c80 100644
+--- a/plugins/tools/svgtexttool/SvgCreateTextStrategy.cpp
++++ b/plugins/tools/svgtexttool/SvgCreateTextStrategy.cpp
+@@ -26,6 +26,16 @@
+ #include "KoSvgTextPathInfoChangeCommand.h"
+ #include "kis_global.h"
+ #include "kis_shape_layer.h"
++#include <KisViewManager.h>
++#include <QPointer>
++#include <QTimer>
++#include <kis_canvas2.h>
++#include <kis_command_utils.h>
++#include <kis_image.h>
++#include <kis_node_manager.h>
++#include <kis_selection_mask.h>
++#include <commands/kis_image_layer_add_command.h>
++#include <klocalizedstring.h>
+ #include "kundo2command.h"
+ #include <KoColorDisplayRendererInterface.h>
+ 
+@@ -65,6 +75,54 @@ void SvgCreateTextStrategy::handleMouseMove(const QPointF &mouseLocation, Qt::Ke
+     tool()->canvas()->updateCanvas(kisGrowRect(updateRect, 100));
+ }
+ 
++KoShapeContainer *SvgCreateTextStrategy::createTextLayer(SvgTextTool *tool, KUndo2Command *parentCommand)
++{
++    KisCanvas2 *kisCanvas = dynamic_cast<KisCanvas2 *>(tool->canvas());
++    if (!kisCanvas || !kisCanvas->imageView() || !kisCanvas->image()) return nullptr;
++
++    KisNodeSP current = kisCanvas->imageView()->currentNode();
++    // text in a vector selection: Krita's own way
++    if (current && qobject_cast<KisSelectionMask *>(current.data())) return nullptr;
++
++    KisImageSP image = kisCanvas->image();
++    KoShapeControllerBase *controllerBase = tool->canvas()->shapeController()->documentBase();
++    if (!controllerBase) return nullptr;
++
++    const QString name = i18nc("Name of a new text layer, until its text is typed", "Text");
++    KisShapeLayerSP layer = new KisShapeLayer(controllerBase, image, name, OPACITY_OPAQUE_U8);
++    // the layer is named after its text until the user renames it (SvgTextTool)
++    layer->setNodeProperty(SvgTextTool::autoLayerNameProperty(), name);
++
++    KisNodeSP parentNode = image->rootLayer();
++    KisNodeSP above;
++    if (current) {
++        // above the current layer (a mask: above its layer), in the same group
++        KisNodeSP layerNode = current;
++        if (!layerNode->inherits("KisLayer") && layerNode->parent()) layerNode = layerNode->parent();
++        if (layerNode != image->rootLayer() && layerNode->parent()) {
++            parentNode = layerNode->parent();
++            above = layerNode;
++        }
++    }
++
++    KisCommandUtils::CompositeCommand *layerCommand = new KisCommandUtils::CompositeCommand(parentCommand);
++    if (above) {
++        layerCommand->addCommand(new KisImageLayerAddCommand(image, layer, parentNode, above));
++    } else {
++        layerCommand->addCommand(new KisImageLayerAddCommand(image, layer, parentNode, parentNode->childCount()));
++    }
++
++    // make it the current layer once it is there, like Photoshop
++    QPointer<KisViewManager> viewManager = kisCanvas->viewManager();
++    QTimer::singleShot(0, [viewManager, layer]() {
++        if (viewManager && viewManager->nodeManager() && layer->graphListener()) {
++            viewManager->nodeManager()->slotNonUiActivatedNode(layer);
++        }
++    });
++
++    return layer.data();
++}
++
+ KUndo2Command *SvgCreateTextStrategy::createCommand()
+ {
+     SvgTextTool *const tool = qobject_cast<SvgTextTool *>(this->tool());
+@@ -158,7 +216,12 @@ KUndo2Command *SvgCreateTextStrategy::createCommand()
+ 
+     new KoKeepShapesSelectedCommand(tool->koSelection()->selectedShapes(), {}, tool->canvas()->selectedShapesProxy(), false, parentCommand);
+ 
+-    KoShapeContainer* parent = tool->canvas()->shapeController()->documentBase()->createParentForShapes({textShape}, false, tool->canvas(), parentCommand);
++    // Krita Nova (patch 39): like Photoshop, each new text gets a layer of its
++    // own, above the current layer (text in a shape stays with its shape)
++    KoShapeContainer* parent = m_flowShape ? nullptr : createTextLayer(tool, parentCommand);
++    if (!parent) {
++        parent = tool->canvas()->shapeController()->documentBase()->createParentForShapes({textShape}, false, tool->canvas(), parentCommand);
++    }
+     KUndo2Command *cmd = tool->canvas()->shapeController()->addShape(textShape, parent, parentCommand);
+ 
+     parentCommand->setText(cmd->text());
+diff --git a/plugins/tools/svgtexttool/SvgCreateTextStrategy.h b/plugins/tools/svgtexttool/SvgCreateTextStrategy.h
+index 0f69227..275998f 100644
+--- a/plugins/tools/svgtexttool/SvgCreateTextStrategy.h
++++ b/plugins/tools/svgtexttool/SvgCreateTextStrategy.h
+@@ -17,6 +17,8 @@ class SvgTextTool;
+ 
+ class KoSvgTextShape;
+ class KoShape;
++class KoShapeContainer;
++class KUndo2Command;
+ 
+ class SvgCreateTextStrategy : public KoInteractionStrategy
+ {
+@@ -34,6 +36,10 @@ public:
+     bool hasWrappingShape();
+ 
+ private:
++    /// Krita Nova (patch 39): a new vector layer for the new text, above the
++    /// current layer; nullptr where Krita's own choice of parent applies
++    static KoShapeContainer *createTextLayer(SvgTextTool *tool, KUndo2Command *parentCommand);
++
+     QPointF m_dragStart;
+     QPointF m_dragEnd;
+     QSizeF m_minSizeInline;
+diff --git a/plugins/tools/svgtexttool/SvgTextTool.cpp b/plugins/tools/svgtexttool/SvgTextTool.cpp
+index ab23c4c..ecbc75b 100644
+--- a/plugins/tools/svgtexttool/SvgTextTool.cpp
++++ b/plugins/tools/svgtexttool/SvgTextTool.cpp
+@@ -52,6 +52,9 @@
+ #include <KoShapeManager.h>
+ #include <KoShapeController.h>
+ #include <QTimer>
++#include <kis_shape_layer.h>
++#include <commands/kis_image_layer_remove_command.h>
++#include <commands/KisNodeRenameCommand.h>
+ #include <kundo2magicstring.h>
+ #include <KoShapeRegistry.h>
+ #include <KoShapeFactoryBase.h>
+@@ -468,6 +471,16 @@ void SvgTextTool::removeIfEmpty(KoSvgTextShape *shape)
+     if (!shape->plainText().isEmpty()) return;
+     if (koSelection() && koSelection()->isSelected(shape)) return;
+     if (!shape->shapesInside().isEmpty()) return; // text in a shape: leave its frame alone
++    // its own text layer goes with it (patch 39)
++    KisShapeLayer *layer = dynamic_cast<KisShapeLayer *>(shape->parent());
++    KisCanvas2 *kisCanvas = dynamic_cast<KisCanvas2 *>(canvas());
++    if (layer && kisCanvas && kisCanvas->image() && layer->shapes().size() == 1
++            && layer->nodeProperties().contains(autoLayerNameProperty())) {
++        KUndo2Command *command = new KisImageLayerRemoveCommand(kisCanvas->image(), KisNodeSP(layer));
++        command->setText(kundo2_i18n("Remove Empty Text"));
++        canvas()->addCommand(command);
++        return;
++    }
+     KUndo2Command *command = canvas()->shapeController()->removeShape(shape);
+     if (command) {
+         command->setText(kundo2_i18n("Remove Empty Text"));
+@@ -475,6 +488,26 @@ void SvgTextTool::removeIfEmpty(KoSvgTextShape *shape)
+     }
+ }
+ 
++void SvgTextTool::updateTextLayerName(KoSvgTextShape *shape)
++{
++    if (!shape || !canvas() || !canvas()->shapeManager()) return;
++    if (!canvas()->shapeManager()->shapes().contains(shape)) return;
++    KisShapeLayer *layer = dynamic_cast<KisShapeLayer *>(shape->parent());
++    if (!layer || layer->shapes().size() != 1) return;
++    if (!layer->nodeProperties().contains(autoLayerNameProperty())) return;
++    // renamed by the user: leave it
++    if (layer->name() != layer->nodeProperties().stringProperty(autoLayerNameProperty())) return;
++
++    QString text = shape->plainText().simplified();
++    if (text.isEmpty()) return;
++    if (text.size() > 40) text = text.left(40) + QChar(0x2026);
++    if (text == layer->name()) return;
++
++    layer->setNodeProperty(autoLayerNameProperty(), text);
++    KUndo2Command *command = new KisNodeRenameCommand(KisNodeSP(layer), layer->name(), text);
++    canvas()->addCommand(command);
++}
++
+ void SvgTextTool::slotShapeSelectionChanged()
+ {
+     QList<KoShape *> shapes = koSelection()->selectedEditableShapes();
+@@ -506,8 +539,13 @@ void SvgTextTool::slotShapeSelectionChanged()
+         // the text that was being edited: remove it if nothing was typed,
+         // once the selection change is over (not in the middle of an undo)
+         KoSvgTextShape *previous = m_textCursor.shape();
+-        if (previous->plainText().isEmpty() && !m_textCursor.isAddingCommand() && !m_strategyAddingCommand) {
+-            QTimer::singleShot(0, this, [this, previous]() { removeIfEmpty(previous); });
++        if (!m_textCursor.isAddingCommand() && !m_strategyAddingCommand) {
++            if (previous->plainText().isEmpty()) {
++                QTimer::singleShot(0, this, [this, previous]() { removeIfEmpty(previous); });
++            } else {
++                // Photoshop names a text layer after its text
++                QTimer::singleShot(0, this, [this, previous]() { updateTextLayerName(previous); });
++            }
+         }
+     }
+     if (shape != m_textCursor.shape() || shape == nullptr) {
+diff --git a/plugins/tools/svgtexttool/SvgTextTool.h b/plugins/tools/svgtexttool/SvgTextTool.h
+index 4a6020a..e309352 100644
+--- a/plugins/tools/svgtexttool/SvgTextTool.h
++++ b/plugins/tools/svgtexttool/SvgTextTool.h
+@@ -40,6 +40,10 @@ class SvgTextTool : public KoToolBase
+     friend class SvgChangeTextPathInfoStrategy;
+ 
+ public:
++    /// Krita Nova (patch 39): node property of the text layers the tool made:
++    /// the name it gave them (renamed after their text while it still matches)
++    static QString autoLayerNameProperty() { return QStringLiteral("krita-nova-text-layer-name"); }
++
+     explicit SvgTextTool(KoCanvasBase *canvas);
+     ~SvgTextTool() override;
+     /// reimplemented from KoToolBase
+@@ -159,6 +163,8 @@ private Q_SLOTS:
+     void commitText();
+     /// Krita Nova (patch 38): remove a text nothing was typed into
+     void removeIfEmpty(KoSvgTextShape *shape);
++    /// Krita Nova (patch 39): name the text's own layer after its text
++    void updateTextLayerName(KoSvgTextShape *shape);
+ 
+     /**
+      * @brief updateCursor
