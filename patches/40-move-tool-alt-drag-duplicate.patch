@@ -1,0 +1,295 @@
+Krita Nova 40 - Alt+drag with the Move tool duplicates, like Photoshop
+
+With the Move tool, holding Alt when starting a drag moves a copy and leaves
+the original where it was:
+
+- With a selection on a paint layer, the selected pixels are copied (not
+  cut) and moved with the selection - "Duplicate Selection" in the undo
+  history.
+- Otherwise the layers the Move tool would move (the selected layers, the
+  layer under the cursor or its group, depending on the tool's mode) are
+  duplicated - each copy right above its original, named "<name> copy" - the
+  copies become the selected layers and the drag moves them. Duplicating
+  ("Duplicate") and moving are two undo steps.
+- While Alt+dragging, Alt does not slow the movement down (Krita's precision
+  mode for Alt stays for normal drags).
+- In input profiles where Alt+click is a canvas shortcut (Photoshop
+  compatible: color sampling), Alt+drag with the Move tool duplicates too.
+
+kis_tool_move.cc: startDuplicateAction(), duplicateNodesForMove(), and a
+"duplicate" start of the stroke; MoveSelectionStrokeStrategy: keepSource.
+diff --git a/plugins/tools/basictools/kis_tool_move.cc b/plugins/tools/basictools/kis_tool_move.cc
+index 028acfa..4db731d 100644
+--- a/plugins/tools/basictools/kis_tool_move.cc
++++ b/plugins/tools/basictools/kis_tool_move.cc
+@@ -26,6 +26,10 @@
+ #include "kis_resources_snapshot.h"
+ #include "kis_action_registry.h"
+ #include "krita_utils.h"
++#include <kis_command_utils.h>
++#include <commands/kis_image_layer_add_command.h>
++#include <kis_undo_adapter.h>
++#include <klocalizedstring.h>
+ 
+ #include <KisViewManager.h>
+ #include <KisDocument.h>
+@@ -141,7 +145,7 @@ void KisToolMove::resetCursorStyle()
+     }
+ }
+ 
+-bool KisToolMove::startStrokeImpl(MoveToolMode mode, const QPoint *pos)
++bool KisToolMove::startStrokeImpl(MoveToolMode mode, const QPoint *pos, bool duplicate)
+ {
+     KisNodeSP node;
+     KisImageSP image = this->image();
+@@ -170,7 +174,8 @@ bool KisToolMove::startStrokeImpl(MoveToolMode mode, const QPoint *pos)
+         // restart stroke when the mode has changed or the user tried to
+         // pick another layer in "layer under cursor" mode.
+         if (m_strokeId &&
+-                (m_currentMode != mode ||
++                (duplicate || m_duplicating ||
++                 m_currentMode != mode ||
+                  m_currentlyUsingSelection != canUseSelectionMode ||
+                  (!m_currentlyUsingSelection &&
+                   mode != MoveSelectedLayer &&
+@@ -201,7 +206,8 @@ bool KisToolMove::startStrokeImpl(MoveToolMode mode, const QPoint *pos)
+             new MoveSelectionStrokeStrategy(paintLayer,
+                                             selection,
+                                             image.data(),
+-                                            image.data());
++                                            image.data(),
++                                            duplicate);
+ 
+         connect(moveStrategy,
+                 SIGNAL(sigHandlesRectCalculated(const QRect&)),
+@@ -223,6 +229,13 @@ bool KisToolMove::startStrokeImpl(MoveToolMode mode, const QPoint *pos)
+                         *pos) :
+                 KisNodeSelectionRecipe(this->selectedNodes());
+ 
++        if (duplicate) {
++            // Krita Nova (patch 40): move copies of the layers, which stay
++            KisNodeList copies = duplicateNodesForMove(nodeSelection.selectNodesToProcess());
++            if (copies.isEmpty()) return false;
++            nodeSelection = KisNodeSelectionRecipe(copies);
++        }
++
+ 
+         MoveStrokeStrategy *moveStrategy =
+             new MoveStrokeStrategy(nodeSelection, image.data(), image.data());
+@@ -252,6 +265,7 @@ bool KisToolMove::startStrokeImpl(MoveToolMode mode, const QPoint *pos)
+     m_strokeId = image->startStroke(strategy);
+     m_currentlyProcessingNodes = nodes;
+     m_currentlyUsingSelection = isMoveSelection;
++    m_duplicating = duplicate;
+     m_currentMode = mode;
+     m_accumulatedOffset = QPoint();
+ 
+@@ -485,9 +499,79 @@ void KisToolMove::requestRedoDuringStroke()
+ 
+ void KisToolMove::beginPrimaryAction(KoPointerEvent *event)
+ {
++    if (event->modifiers() & Qt::AltModifier) {
++        startDuplicateAction(event, moveToolMode());
++        return;
++    }
+     startAction(event, moveToolMode());
+ }
+ 
++KisNodeList KisToolMove::duplicateNodesForMove(const KisNodeList &nodes)
++{
++    KisImageSP image = this->image();
++    KisNodeList copies;
++    if (!image) return copies;
++
++    // only the topmost of nested layers: a group's copy has its children
++    KisNodeList roots;
++    Q_FOREACH (KisNodeSP node, nodes) {
++        bool nested = false;
++        for (KisNodeSP parent = node->parent(); parent; parent = parent->parent()) {
++            if (nodes.contains(parent)) {
++                nested = true;
++                break;
++            }
++        }
++        if (!nested && node->parent() && node != image->root()) roots << node;
++    }
++    if (roots.isEmpty()) return copies;
++
++    // the move of the previous drag may still be finishing
++    image->waitForDone();
++
++    KUndo2Command *command = new KUndo2Command(kundo2_i18n("Duplicate"));
++    KisCommandUtils::CompositeCommand *composite = new KisCommandUtils::CompositeCommand(command);
++    Q_FOREACH (KisNodeSP node, roots) {
++        KisNodeSP copy = node->clone();
++        copy->setName(i18nc("Name of a layer duplicated with Alt+drag", "%1 copy", node->name()));
++        composite->addCommand(new KisImageLayerAddCommand(image, copy, node->parent(), node, true, true));
++        copies << copy;
++    }
++    image->undoAdapter()->addCommand(command);
++
++    // the copies are the selected layers now, like in Photoshop
++    KisCanvas2 *kisCanvas = dynamic_cast<KisCanvas2 *>(canvas());
++    if (kisCanvas && kisCanvas->viewManager() && kisCanvas->viewManager()->nodeManager()) {
++        kisCanvas->viewManager()->nodeManager()->slotImageRequestNodeReselection(copies.last(), copies);
++    }
++    return copies;
++}
++
++void KisToolMove::startDuplicateAction(KoPointerEvent *event, MoveToolMode mode)
++{
++    QPoint pos = convertToPixelCoordAndSnap(event).toPoint();
++    m_dragStart = pos;
++    m_dragPos = pos;
++
++    if (m_strokeId) {
++        endStroke(); // the previous moves are done: duplicate what they made
++    }
++
++    if (startStrokeImpl(mode, &pos, true)) {
++        setMode(KisTool::PAINT_MODE);
++        if (m_currentlyUsingSelection) {
++            KisImageSP image = currentImage();
++            image->addJob(m_strokeId,
++                          new MoveSelectionStrokeStrategy::ShowSelectionData(false));
++        }
++    } else {
++        event->ignore();
++        m_dragPos = QPoint();
++        m_dragStart = QPoint();
++    }
++    qobject_cast<KisCanvas2*>(canvas())->updateCanvas();
++}
++
+ void KisToolMove::continuePrimaryAction(KoPointerEvent *event)
+ {
+     continueAction(event);
+@@ -500,6 +584,12 @@ void KisToolMove::endPrimaryAction(KoPointerEvent *event)
+ 
+ void KisToolMove::beginAlternateAction(KoPointerEvent *event, AlternateAction action)
+ {
++    // Krita Nova (patch 40): in input profiles where Alt+click is a shortcut
++    // (Photoshop compatible: color sampling), Alt+drag still duplicates
++    if ((event->modifiers() & (Qt::AltModifier | Qt::ControlModifier | Qt::ShiftModifier)) == Qt::AltModifier) {
++        startDuplicateAction(event, moveToolMode());
++        return;
++    }
+     // Ctrl+Right click toggles between moving current layer and moving layer w/ content
+     if (action == SampleFgNode || action == SampleBgImage) {
+         MoveToolMode mode = moveToolMode();
+@@ -728,8 +818,9 @@ QPoint KisToolMove::applyModifiers(Qt::KeyboardModifiers modifiers, QPoint pos)
+         move = snapToClosestAxis(move);
+     }
+ 
+-    // "Precision mode" - scale down movement by 1/5
+-    if (modifiers & Qt::AltModifier) {
++    // "Precision mode" - scale down movement by 1/5; not while Alt+dragging a
++    // duplicate (Krita Nova, patch 40), where Alt is still held from the start
++    if ((modifiers & Qt::AltModifier) && !m_duplicating) {
+         const qreal SCALE_FACTOR = .2;
+         move = SCALE_FACTOR * move;
+     }
+diff --git a/plugins/tools/basictools/kis_tool_move.h b/plugins/tools/basictools/kis_tool_move.h
+index a1f33a9..7850ba4 100644
+--- a/plugins/tools/basictools/kis_tool_move.h
++++ b/plugins/tools/basictools/kis_tool_move.h
+@@ -123,7 +123,11 @@ private:
+     void cancelStroke();
+     QPoint applyModifiers(Qt::KeyboardModifiers modifiers, QPoint pos);
+ 
+-    bool startStrokeImpl(MoveToolMode mode, const QPoint *pos);
++    bool startStrokeImpl(MoveToolMode mode, const QPoint *pos, bool duplicate = false);
++    /// Krita Nova (patch 40): copies of the layers to be moved, above them
++    KisNodeList duplicateNodesForMove(const KisNodeList &nodes);
++    /// Krita Nova (patch 40): Alt+drag duplicates, like Photoshop
++    void startDuplicateAction(KoPointerEvent *event, MoveToolMode mode);
+ 
+     QPoint currentOffset() const;
+     void notifyGuiAfterMove(bool showFloatingMessage = true);
+@@ -154,6 +158,7 @@ private:
+ 
+     KisNodeList m_currentlyProcessingNodes;
+     bool m_currentlyUsingSelection {false};
++    bool m_duplicating {false}; ///< Krita Nova: the current stroke moves a duplicate (Alt is not precision mode)
+     MoveToolMode m_currentMode {MoveSelectedLayer};
+ 
+     int m_resolution {0};
+diff --git a/plugins/tools/basictools/strokes/move_selection_stroke_strategy.cpp b/plugins/tools/basictools/strokes/move_selection_stroke_strategy.cpp
+index 7542959..d74187d 100644
+--- a/plugins/tools/basictools/strokes/move_selection_stroke_strategy.cpp
++++ b/plugins/tools/basictools/strokes/move_selection_stroke_strategy.cpp
+@@ -25,11 +25,15 @@
+ MoveSelectionStrokeStrategy::MoveSelectionStrokeStrategy(KisPaintLayerSP paintLayer,
+                                                          KisSelectionSP selection,
+                                                          KisUpdatesFacade *updatesFacade,
+-                                                         KisStrokeUndoFacade *undoFacade)
+-    : KisStrokeStrategyUndoCommandBased(kundo2_i18n("Move Selection"), false, undoFacade),
++                                                         KisStrokeUndoFacade *undoFacade,
++                                                         bool keepSource)
++    : KisStrokeStrategyUndoCommandBased(keepSource ? kundo2_i18n("Duplicate Selection")
++                                                   : kundo2_i18n("Move Selection"),
++                                        false, undoFacade),
+       m_paintLayer(paintLayer),
+       m_selection(selection),
+-      m_updatesFacade(updatesFacade)
++      m_updatesFacade(updatesFacade),
++      m_keepSource(keepSource)
+ {
+     /**
+      * Selection might have some update projection jobs pending, so we should ensure
+@@ -45,7 +49,8 @@ MoveSelectionStrokeStrategy::MoveSelectionStrokeStrategy(const MoveSelectionStro
+       KisStrokeStrategyUndoCommandBased(rhs),
+       m_paintLayer(rhs.m_paintLayer),
+       m_selection(rhs.m_selection),
+-      m_updatesFacade(rhs.m_updatesFacade)
++      m_updatesFacade(rhs.m_updatesFacade),
++      m_keepSource(rhs.m_keepSource)
+ {
+ }
+ 
+@@ -70,11 +75,13 @@ void MoveSelectionStrokeStrategy::initStrokeCallback()
+     gc.bitBlt(copyRect.topLeft(), paintDevice, copyRect);
+     gc.end();
+ 
+-    KisTransaction cutTransaction(name(), paintDevice);
+-    paintDevice->clearSelection(m_selection);
+-    runAndSaveCommand(KUndo2CommandSP(cutTransaction.endAndTake()),
+-                      KisStrokeJobData::SEQUENTIAL,
+-                      KisStrokeJobData::NORMAL);
++    if (!m_keepSource) {
++        KisTransaction cutTransaction(name(), paintDevice);
++        paintDevice->clearSelection(m_selection);
++        runAndSaveCommand(KUndo2CommandSP(cutTransaction.endAndTake()),
++                          KisStrokeJobData::SEQUENTIAL,
++                          KisStrokeJobData::NORMAL);
++    }
+ 
+     KisIndirectPaintingSupport *indirect =
+         static_cast<KisIndirectPaintingSupport*>(m_paintLayer.data());
+diff --git a/plugins/tools/basictools/strokes/move_selection_stroke_strategy.h b/plugins/tools/basictools/strokes/move_selection_stroke_strategy.h
+index 178d715..88c7740 100644
+--- a/plugins/tools/basictools/strokes/move_selection_stroke_strategy.h
++++ b/plugins/tools/basictools/strokes/move_selection_stroke_strategy.h
+@@ -37,10 +37,13 @@ public:
+     };
+ 
+ public:
++    /// Krita Nova (patch 40): with \p keepSource the selected pixels are
++    /// copied instead of cut (Alt+drag with the Move tool, like Photoshop)
+     MoveSelectionStrokeStrategy(KisPaintLayerSP paintLayer,
+                                 KisSelectionSP selection,
+                                 KisUpdatesFacade *updatesFacade,
+-                                KisStrokeUndoFacade *undoFacade);
++                                KisStrokeUndoFacade *undoFacade,
++                                bool keepSource = false);
+ 
+     void initStrokeCallback() override;
+     void finishStrokeCallback() override;
+@@ -63,6 +66,7 @@ private:
+     QPoint m_finalOffset;
+     QPoint m_initialDeviceOffset;
+     QPoint m_initialSelectionOffset;
++    bool m_keepSource {false};
+ };
+ 
+ #endif /* __MOVE_SELECTION_STROKE_STRATEGY_H */
