@@ -1,0 +1,438 @@
+Krita Nova 34 - HSV Adjustment per color range, like Photoshop's Hue/Saturation
+
+Filter > Adjust > HSV/HSL Adjustment (Ctrl+U) gets a "Colors:" box above the
+sliders: Master (all colors, as before) or one color range - Reds, Yellows,
+Greens, Cyans, Blues, Magentas (Alt+2 .. Alt+8, as in Photoshop). The three
+sliders show and change the chosen range; every range keeps its own values,
+and they all apply together. Reset resets every range.
+
+How a range applies (kis_hsv_adjustment.cpp, KisHSVAdjustment): its hue /
+saturation / value-lightness-intensity-luma adjustments are added to Master's,
+weighted by how close the pixel's own hue is to the range's center (0, 60,
+120, 180, 240, 300 degrees): fully within 15 degrees, fading out over the next
+30 (Photoshop's default range widths), so neighbouring ranges blend. Grays are
+in no range. The result goes through the existing HSV/HSL/HSI/HSY formulas
+(compatibility mode too).
+
+Color ranges are for the hue based models (HSV, HSL, HSI, HSY) without
+Colorize; for YUV or Colorize the box is disabled and Master is used.
+
+Configuration: "h", "s", "v" stay Master's (old presets and documents load as
+before); the ranges are "h_1".."v_6" (1 = Reds ... 6 = Magentas), and "range"
+is the one shown. The transformation gets them as "rangeH", "rangeS", "rangeV"
+(six values each, only when one is not zero).
+diff --git a/plugins/color/colorspaceextensions/kis_hsv_adjustment.cpp b/plugins/color/colorspaceextensions/kis_hsv_adjustment.cpp
+index 810d0d2..aeab1dd 100644
+--- a/plugins/color/colorspaceextensions/kis_hsv_adjustment.cpp
++++ b/plugins/color/colorspaceextensions/kis_hsv_adjustment.cpp
+@@ -386,18 +386,54 @@ public:
+ 
+                 } else {
+ 
++                    // Krita Nova (patch 34): adjustments of one color range (Reds,
++                    // Yellows ... Magentas, like Photoshop's Hue/Saturation) add to
++                    // the master ones, weighted by how close the pixel's own hue is
++                    // to the range: full within 15 degrees of its center, fading out
++                    // over the next 30 degrees. Grays are not in any color range.
++                    float adjH = m_adj_h;
++                    float adjS = m_adj_s;
++                    float adjV = m_adj_v;
++                    if (m_hasRanges) {
++                        const float rr = SCALE_TO_FLOAT(src->red);
++                        const float rg = SCALE_TO_FLOAT(src->green);
++                        const float rb = SCALE_TO_FLOAT(src->blue);
++                        const float rM = qMax(rr, qMax(rg, rb));
++                        const float rm = qMin(rr, qMin(rg, rb));
++                        const float rc = rM - rm;
++                        if (rc > 1e-6f) {
++                            float hue;
++                            if (rr == rM) hue = (rg - rb) / rc;
++                            else if (rg == rM) hue = 2.0f + (rb - rr) / rc;
++                            else hue = 4.0f + (rr - rg) / rc;
++                            hue = normalizeAngleDegrees(hue * 60.0f);
++                            for (int i = 0; i < 6; ++i) {
++                                float d = std::abs(hue - 60.0f * i);
++                                if (d > 180.0f) d = 360.0f - d;
++                                const float w = qBound(0.0f, (45.0f - d) / 30.0f, 1.0f);
++                                if (w > 0.0f) {
++                                    adjH += w * m_rangeH[i];
++                                    adjS += w * m_rangeS[i];
++                                    adjV += w * m_rangeV[i];
++                                }
++                            }
++                            adjH = qBound(-1.0f, adjH, 1.0f);
++                            adjS = qBound(-1.0f, adjS, 1.0f);
++                            adjV = qBound(-1.0f, adjV, 1.0f);
++                        }
++                    }
+                     if (m_type == 0) {
+                         if (!m_compatibilityMode) {
+                             r = SCALE_TO_FLOAT(src->red);
+                             g = SCALE_TO_FLOAT(src->green);
+                             b = SCALE_TO_FLOAT(src->blue);
+-                            HSVTransform(&r, &g, &b, m_adj_h, m_adj_s, m_adj_v, HSVPolicy());
++                            HSVTransform(&r, &g, &b, adjH, adjS, adjV, HSVPolicy());
+                         } else {
+                             RGBToHSV(SCALE_TO_FLOAT(src->red), SCALE_TO_FLOAT(src->green), SCALE_TO_FLOAT(src->blue), &h, &s, &v);
+-                            h += m_adj_h * 180;
++                            h += adjH * 180;
+                             h = normalizeAngleDegrees(h);
+-                            s += m_adj_s;
+-                            v += m_adj_v;
++                            s += adjS;
++                            v += adjV;
+                             HSVToRGB(h, s, v, &r, &g, &b);
+                         }
+                     } else if (m_type == 1) {
+@@ -406,17 +442,17 @@ public:
+                             r = SCALE_TO_FLOAT(src->red);
+                             g = SCALE_TO_FLOAT(src->green);
+                             b = SCALE_TO_FLOAT(src->blue);
+-                            HSVTransform(&r, &g, &b, m_adj_h, m_adj_s, m_adj_v, HSLPolicy());
++                            HSVTransform(&r, &g, &b, adjH, adjS, adjV, HSLPolicy());
+                         } else {
+                             RGBToHSL(SCALE_TO_FLOAT(src->red), SCALE_TO_FLOAT(src->green), SCALE_TO_FLOAT(src->blue), &h, &s, &v);
+ 
+-                            h += m_adj_h * 180;
++                            h += adjH * 180;
+                             h = normalizeAngleDegrees(h);
+-                            s *= (m_adj_s + 1.0);
+-                            if (m_adj_v < 0) {
+-                                v *= (m_adj_v + 1.0);
++                            s *= (adjS + 1.0);
++                            if (adjV < 0) {
++                                v *= (adjV + 1.0);
+                             } else {
+-                                v += (m_adj_v * (1.0 - v));
++                                v += (adjV * (1.0 - v));
+                             }
+                             HSLToRGB(h, s, v, &r, &g, &b);
+                         }
+@@ -426,7 +462,7 @@ public:
+                             r = SCALE_TO_FLOAT(src->red);
+                             g = SCALE_TO_FLOAT(src->green);
+                             b = SCALE_TO_FLOAT(src->blue);
+-                            HSVTransform(&r, &g, &b, m_adj_h, m_adj_s, m_adj_v, HCIPolicy());
++                            HSVTransform(&r, &g, &b, adjH, adjS, adjV, HCIPolicy());
+                         } else {
+                             qreal red = SCALE_TO_FLOAT(src->red);
+                             qreal green = SCALE_TO_FLOAT(src->green);
+@@ -435,10 +471,10 @@ public:
+                             RGBToHCI(red, green, blue, &hue, &sat, &intensity);
+ 
+                             hue *= 360.0;
+-                            hue += m_adj_h * 180;
++                            hue += adjH * 180;
+                             hue = normalizeAngleDegrees(hue);
+-                            sat *= (m_adj_s + 1.0);
+-                            intensity += m_adj_v;
++                            sat *= (adjS + 1.0);
++                            intensity += adjV;
+ 
+                             HCIToRGB(hue/360.0, sat, intensity, &red, &green, &blue);
+ 
+@@ -452,7 +488,7 @@ public:
+                             r = SCALE_TO_FLOAT(src->red);
+                             g = SCALE_TO_FLOAT(src->green);
+                             b = SCALE_TO_FLOAT(src->blue);
+-                            HSVTransform(&r, &g, &b, m_adj_h, m_adj_s, m_adj_v, HCYPolicy(lumaR, lumaG, lumaB));
++                            HSVTransform(&r, &g, &b, adjH, adjS, adjV, HCYPolicy(lumaR, lumaG, lumaB));
+                         } else {
+                             qreal red = SCALE_TO_FLOAT(src->red);
+                             qreal green = SCALE_TO_FLOAT(src->green);
+@@ -461,10 +497,10 @@ public:
+                             RGBToHCY(red, green, blue, &hue, &sat, &luma, lumaR, lumaG, lumaB);
+ 
+                             hue *= 360.0;
+-                            hue += m_adj_h * 180;
++                            hue += adjH * 180;
+                             hue = normalizeAngleDegrees(hue);
+-                            sat *= (m_adj_s + 1.0);
+-                            luma += m_adj_v;
++                            sat *= (adjS + 1.0);
++                            luma += adjV;
+ 
+                             HCYToRGB(hue/360.0, sat, luma, &red, &green, &blue, lumaR, lumaG, lumaB);
+                             r = red;
+@@ -551,13 +587,20 @@ public:
+     QList<QString> parameters() const override
+     {
+       QList<QString> list;
+-      list << "h" << "s" << "v" << "type" << "colorize" << "lumaRed" << "lumaGreen"<< "lumaBlue" << "compatibilityMode";
++      list << "h" << "s" << "v" << "type" << "colorize" << "lumaRed" << "lumaGreen"<< "lumaBlue" << "compatibilityMode"
++           << "rangeH" << "rangeS" << "rangeV";
+       return list;
+     }
+ 
+     int parameterId(const QString& name) const override
+     {
+-        if (name == "h") {
++        if (name == "rangeH") {
++            return 9;
++        } else if (name == "rangeS") {
++            return 10;
++        } else if (name == "rangeV") {
++            return 11;
++        } else if (name == "h") {
+             return 0;
+         } else if (name == "s") {
+             return 1;
+@@ -619,6 +662,21 @@ public:
+         case 8:
+             m_compatibilityMode = parameter.toBool();
+             break;
++        case 9:
++        case 10:
++        case 11: {
++            // the six color ranges: Reds, Yellows, Greens, Cyans, Blues, Magentas
++            float *target = id == 9 ? m_rangeH : (id == 10 ? m_rangeS : m_rangeV);
++            const QVariantList values = parameter.toList();
++            for (int i = 0; i < 6; ++i) {
++                target[i] = i < values.size() ? values[i].toFloat() : 0.0f;
++            }
++            m_hasRanges = false;
++            for (int i = 0; i < 6; ++i) {
++                if (m_rangeH[i] != 0.0f || m_rangeS[i] != 0.0f || m_rangeV[i] != 0.0f) m_hasRanges = true;
++            }
++            break;
++        }
+         default:
+             KIS_ASSERT_RECOVER_NOOP(false && "Unknown parameter ID. Ignored!");
+             ;
+@@ -627,6 +685,10 @@ public:
+ 
+ private:
+ 
++    float m_rangeH[6] {0, 0, 0, 0, 0, 0};
++    float m_rangeS[6] {0, 0, 0, 0, 0, 0};
++    float m_rangeV[6] {0, 0, 0, 0, 0, 0};
++    bool m_hasRanges {false};
+     double m_adj_h, m_adj_s, m_adj_v;
+     qreal m_lumaRed, m_lumaGreen, m_lumaBlue;
+     int m_type;
+diff --git a/plugins/filters/colorsfilters/kis_hsv_adjustment_filter.cpp b/plugins/filters/colorsfilters/kis_hsv_adjustment_filter.cpp
+index ccaab9e..16ecadc 100644
+--- a/plugins/filters/colorsfilters/kis_hsv_adjustment_filter.cpp
++++ b/plugins/filters/colorsfilters/kis_hsv_adjustment_filter.cpp
+@@ -26,6 +26,10 @@
+ 
+ #include "kis_signals_blocker.h"
+ 
++#include <QComboBox>
++#include <QLabel>
++#include <QShortcut>
++
+ namespace {
+ 
+ enum class SLIDER_TYPE {
+@@ -248,6 +252,11 @@ SliderSettings sliderSetting(SLIDER_TYPE type) {
+     return SLIDER_TABLE[static_cast<int>(type)];
+ }
+ 
++/// Krita Nova (patch 34): Master plus the six color ranges of Photoshop's
++/// Hue/Saturation (Reds, Yellows, Greens, Cyans, Blues, Magentas); range i
++/// (1..6) is centered on hue (i - 1) * 60 degrees.
++const int COLOR_RANGE_COUNT = 6;
++
+ }
+ 
+ KisHSVAdjustmentFilter::KisHSVAdjustmentFilter()
+@@ -283,6 +292,27 @@ KoColorTransformation *KisHSVAdjustmentFilter::createTransformation(const KoColo
+         params["lumaGreen"] = cs->lumaCoefficients()[1];
+         params["lumaBlue"] = cs->lumaCoefficients()[2];
+         params["compatibilityMode"] = compatibilityMode;
++
++        // Krita Nova (patch 34): the color ranges (Reds ... Magentas), for the
++        // hue based models without Colorize
++        if (!colorize && type <= 3) {
++            QVariantList rangeH, rangeS, rangeV;
++            bool any = false;
++            for (int i = 1; i <= COLOR_RANGE_COUNT; ++i) {
++                const int h = config->getInt(QString("h_%1").arg(i), 0);
++                const int s = config->getInt(QString("s_%1").arg(i), 0);
++                const int v = config->getInt(QString("v_%1").arg(i), 0);
++                any = any || h || s || v;
++                rangeH << sliderSetting(sliderSet[0]).scale(false, h);
++                rangeS << sliderSetting(sliderSet[1]).scale(false, s);
++                rangeV << sliderSetting(sliderSet[2]).scale(false, v);
++            }
++            if (any) {
++                params["rangeH"] = rangeH;
++                params["rangeS"] = rangeS;
++                params["rangeV"] = rangeV;
++            }
++        }
+     }
+     return cs->createColorTransformation("hsv_adjustment", params);
+ }
+@@ -306,6 +336,37 @@ KisHSVConfigWidget::KisHSVConfigWidget(QWidget *parent, Qt::WindowFlags f)
+     m_page = new Ui_WdgHSVAdjustment();
+     m_page->setupUi(this);
+ 
++    // Krita Nova (patch 34): which colors the sliders adjust, like Photoshop's
++    // Hue/Saturation: Master (all) or one color range (Alt+2 .. Alt+8)
++    for (auto &values : m_rangeValues) {
++        values = {0, 0, 0};
++    }
++    m_cmbRange = new QComboBox(this);
++    m_cmbRange->setObjectName(QStringLiteral("cmbRange"));
++    const QStringList rangeNames = {
++        i18nc("Hue/saturation: adjust all colors", "Master"),
++        i18nc("Hue/saturation color range", "Reds"),
++        i18nc("Hue/saturation color range", "Yellows"),
++        i18nc("Hue/saturation color range", "Greens"),
++        i18nc("Hue/saturation color range", "Cyans"),
++        i18nc("Hue/saturation color range", "Blues"),
++        i18nc("Hue/saturation color range", "Magentas"),
++    };
++    for (int i = 0; i < rangeNames.size(); ++i) {
++        m_cmbRange->addItem(rangeNames[i]);
++        m_cmbRange->setItemData(i, QKeySequence(Qt::ALT | (Qt::Key_2 + i)).toString(QKeySequence::NativeText),
++                                Qt::ToolTipRole);
++        QShortcut *shortcut = new QShortcut(QKeySequence(Qt::ALT | (Qt::Key_2 + i)), this);
++        shortcut->setContext(Qt::WidgetWithChildrenShortcut);
++        connect(shortcut, &QShortcut::activated, this, [this, i]() {
++            if (m_cmbRange->isEnabled()) m_cmbRange->setCurrentIndex(i);
++        });
++    }
++    m_cmbRange->setToolTip(i18n("The colors the sliders adjust: all of them (Master), or one color range"));
++    QLabel *rangeLabel = new QLabel(i18nc("Hue/saturation: which colors to adjust", "Colors:"), this);
++    m_page->formLayout->insertRow(2, rangeLabel, m_cmbRange);
++    connect(m_cmbRange, SIGNAL(currentIndexChanged(int)), this, SLOT(slotRangeChanged(int)));
++
+     connect(m_page->cmbType, SIGNAL(activated(int)), this, SLOT(configureSliderLimitsAndLabels()));
+     connect(m_page->chkColorize, SIGNAL(toggled(bool)), this, SLOT(configureSliderLimitsAndLabels()));
+     connect(m_page->chkCompatibilityMode, SIGNAL(toggled(bool)), SIGNAL(sigConfigurationItemChanged()));
+@@ -337,9 +398,18 @@ KisHSVConfigWidget::~KisHSVConfigWidget()
+ KisPropertiesConfigurationSP KisHSVConfigWidget::configuration() const
+ {
+     KisColorTransformationConfigurationSP c = new KisColorTransformationConfiguration(KisHSVAdjustmentFilter::id().id(), 0, KisGlobalResourcesInterface::instance());
+-    c->setProperty("h", m_page->hSlider->value());
+-    c->setProperty("s", m_page->sSlider->value());
+-    c->setProperty("v", m_page->vSlider->value());
++    // the sliders show the range being edited; the others keep their values
++    std::array<std::array<int, 3>, 7> values = m_rangeValues;
++    values[m_currentRange] = {m_page->hSlider->value(), m_page->sSlider->value(), m_page->vSlider->value()};
++    c->setProperty("h", values[0][0]);
++    c->setProperty("s", values[0][1]);
++    c->setProperty("v", values[0][2]);
++    for (int i = 1; i <= COLOR_RANGE_COUNT; ++i) {
++        c->setProperty(QString("h_%1").arg(i), values[i][0]);
++        c->setProperty(QString("s_%1").arg(i), values[i][1]);
++        c->setProperty(QString("v_%1").arg(i), values[i][2]);
++    }
++    c->setProperty("range", m_currentRange);
+     c->setProperty("type", m_page->cmbType->currentIndex());
+     c->setProperty("colorize", m_page->chkColorize->isChecked());
+     c->setProperty("compatibilityMode", m_page->chkCompatibilityMode->isChecked());
+@@ -351,12 +421,51 @@ void KisHSVConfigWidget::setConfiguration(const KisPropertiesConfigurationSP con
+     const int type = config->getInt("type", 1);
+     m_page->cmbType->setCurrentIndex(type);
+     m_page->chkColorize->setChecked(config->getBool("colorize", false));
+-    m_page->hSlider->setValue(config->getInt("h", 0));
+-    m_page->sSlider->setValue(config->getInt("s", 0));
+-    m_page->vSlider->setValue(config->getInt("v", 0));
++
++    m_rangeValues[0] = {config->getInt("h", 0), config->getInt("s", 0), config->getInt("v", 0)};
++    for (int i = 1; i <= COLOR_RANGE_COUNT; ++i) {
++        m_rangeValues[i] = {config->getInt(QString("h_%1").arg(i), 0),
++                            config->getInt(QString("s_%1").arg(i), 0),
++                            config->getInt(QString("v_%1").arg(i), 0)};
++    }
++    // show Master first while the limits are set up; the slider ranges of
++    // the color ranges are the (relative) ones of Master without Colorize
++    m_currentRange = 0;
++    {
++        KisSignalsBlocker blocker(m_cmbRange);
++        m_cmbRange->setCurrentIndex(0);
++    }
++    m_page->hSlider->setValue(m_rangeValues[0][0]);
++    m_page->sSlider->setValue(m_rangeValues[0][1]);
++    m_page->vSlider->setValue(m_rangeValues[0][2]);
+     m_page->chkCompatibilityMode->setChecked(config->getInt("compatibilityMode", true));
+ 
+     configureSliderLimitsAndLabels();
++
++    const int range = qBound(0, config->getInt("range", 0), COLOR_RANGE_COUNT);
++    if (range != 0 && m_cmbRange->isEnabled()) {
++        m_cmbRange->setCurrentIndex(range);
++    }
++}
++
++void KisHSVConfigWidget::slotRangeChanged(int index)
++{
++    if (index < 0 || index > COLOR_RANGE_COUNT || index == m_currentRange) return;
++
++    m_rangeValues[m_currentRange] = {m_page->hSlider->value(), m_page->sSlider->value(), m_page->vSlider->value()};
++    m_currentRange = index;
++    {
++        KisSignalsBlocker blocker(m_page->hSlider, m_page->sSlider, m_page->vSlider);
++        m_page->hSlider->setValue(m_rangeValues[index][0]);
++        m_page->sSlider->setValue(m_rangeValues[index][1]);
++        m_page->vSlider->setValue(m_rangeValues[index][2]);
++        m_page->hSpinBox->setValue(m_page->hSlider->value());
++        m_page->sSpinBox->setValue(m_page->sSlider->value());
++        m_page->vSpinBox->setValue(m_page->vSlider->value());
++    }
++    recolorSliders();
++    // nothing changed in the image, but the shown range is part of the configuration
++    Q_EMIT sigConfigurationItemChanged();
+ }
+ 
+ void KisHSVConfigWidget::configureSliderLimitsAndLabels()
+@@ -366,6 +475,13 @@ void KisHSVConfigWidget::configureSliderLimitsAndLabels()
+     const std::array<SLIDER_TYPE, 3> sliderSet = SLIDER_SETS[m_page->cmbType->currentIndex()];
+     const bool colorize = m_page->chkColorize->isChecked();
+ 
++    // color ranges only for the hue based models without Colorize: back to Master
++    const bool rangesAvailable = !colorize && m_page->cmbType->currentIndex() <= 3;
++    if (!rangesAvailable && m_currentRange != 0) {
++        m_cmbRange->setCurrentIndex(0); // stores the range's values, shows Master's
++    }
++    m_cmbRange->setEnabled(rangesAvailable);
++
+     // Prevent the sliders from recoloring when setValue is triggered in apply()
+     // Since some values will be invalid while inside this function if colorize is changed
+     KisSignalsBlocker blocker(m_page->hSlider, m_page->sSlider, m_page->vSlider);
+@@ -403,6 +519,11 @@ void KisHSVConfigWidget::resetFilter()
+ {
+     const std::array<SLIDER_TYPE, 3> sliderSet = SLIDER_SETS[m_page->cmbType->currentIndex()];
+ 
++    // reset resets every color range too
++    for (auto &values : m_rangeValues) {
++        values = {0, 0, 0};
++    }
++
+     sliderSetting(sliderSet[0]).reset(m_page->hSlider);
+     sliderSetting(sliderSet[1]).reset(m_page->sSlider);
+     sliderSetting(sliderSet[2]).reset(m_page->vSlider);
+diff --git a/plugins/filters/colorsfilters/kis_hsv_adjustment_filter.h b/plugins/filters/colorsfilters/kis_hsv_adjustment_filter.h
+index 05337df..b31dbb2 100644
+--- a/plugins/filters/colorsfilters/kis_hsv_adjustment_filter.h
++++ b/plugins/filters/colorsfilters/kis_hsv_adjustment_filter.h
+@@ -14,6 +14,10 @@
+ #include "ui_wdg_hsv_adjustment.h"
+ #include "filter/kis_color_transformation_filter.h"
+ 
++#include <array>
++
++class QComboBox;
++
+ class QWidget;
+ class KoColorTransformation;
+ 
+@@ -61,9 +65,14 @@ private Q_SLOTS:
+     void configureSliderLimitsAndLabels();
+     void resetFilter();
+     void recolorSliders();
++    void slotRangeChanged(int index);
+ 
+ private:
+     bool m_prevColorize;
++    // Krita Nova (patch 34): Master (0) and the color ranges Reds .. Magentas (1..6)
++    QComboBox *m_cmbRange {nullptr};
++    int m_currentRange {0};
++    std::array<std::array<int, 3>, 7> m_rangeValues;
+ };
+ 
+ #endif
