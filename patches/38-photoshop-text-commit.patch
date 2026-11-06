@@ -1,0 +1,136 @@
+Krita Nova 38 - Photoshop-style committing of text (text tool, part 3)
+
+Krita's text tool already creates point text with a click and a wrapping
+text box with a drag, and edits a text clicked on (also on other layers).
+What changes, to work like Photoshop's type tool:
+
+- Esc commits the text being edited (deselects it; the tool stays, ready for
+  the next text). A drag in progress is still cancelled by Esc.
+- Ctrl+Enter, or Enter on the keypad, commits as well.
+- Shift+click on a text other than the one being edited starts a new text
+  there, instead of editing that text.
+- A text that was created but never typed into is removed when editing it
+  ends (as an undoable "Remove Empty Text"). Text in a shape keeps its frame.
+
+SvgTextTool: commitText(), removeIfEmpty() (run once the selection change is
+over, never while a command is being added), and the key / press handling.
+diff --git a/plugins/tools/svgtexttool/SvgTextTool.cpp b/plugins/tools/svgtexttool/SvgTextTool.cpp
+index 17a32ae..ab23c4c 100644
+--- a/plugins/tools/svgtexttool/SvgTextTool.cpp
++++ b/plugins/tools/svgtexttool/SvgTextTool.cpp
+@@ -51,6 +51,8 @@
+ #include <KoSelection.h>
+ #include <KoShapeManager.h>
+ #include <KoShapeController.h>
++#include <QTimer>
++#include <kundo2magicstring.h>
+ #include <KoShapeRegistry.h>
+ #include <KoShapeFactoryBase.h>
+ #include <KoPointerEvent.h>
+@@ -448,6 +450,31 @@ KoSvgTextProperties SvgTextTool::propertiesForNewText() const
+     return props;
+ }
+ 
++void SvgTextTool::commitText()
++{
++    // done with this text: deselect it; the tool stays for the next one
++    if (koSelection()) {
++        koSelection()->deselectAll();
++    }
++    repaintDecorations();
++}
++
++void SvgTextTool::removeIfEmpty(KoSvgTextShape *shape)
++{
++    // Krita Nova (patch 38): like Photoshop, a text that was created but never
++    // typed into goes away when editing it ends
++    if (!shape || !canvas() || !canvas()->shapeManager()) return;
++    if (!canvas()->shapeManager()->shapes().contains(shape)) return;
++    if (!shape->plainText().isEmpty()) return;
++    if (koSelection() && koSelection()->isSelected(shape)) return;
++    if (!shape->shapesInside().isEmpty()) return; // text in a shape: leave its frame alone
++    KUndo2Command *command = canvas()->shapeController()->removeShape(shape);
++    if (command) {
++        command->setText(kundo2_i18n("Remove Empty Text"));
++        canvas()->addCommand(command);
++    }
++}
++
+ void SvgTextTool::slotShapeSelectionChanged()
+ {
+     QList<KoShape *> shapes = koSelection()->selectedEditableShapes();
+@@ -475,6 +502,14 @@ void SvgTextTool::slotShapeSelectionChanged()
+         return;
+     }
+     KoSvgTextShape *const shape = selectedShape();
++    if (shape != m_textCursor.shape() && m_textCursor.shape()) {
++        // the text that was being edited: remove it if nothing was typed,
++        // once the selection change is over (not in the middle of an undo)
++        KoSvgTextShape *previous = m_textCursor.shape();
++        if (previous->plainText().isEmpty() && !m_textCursor.isAddingCommand() && !m_strategyAddingCommand) {
++            QTimer::singleShot(0, this, [this, previous]() { removeIfEmpty(previous); });
++        }
++    }
+     if (shape != m_textCursor.shape() || shape == nullptr) {
+         m_textCursor.setShape(shape);
+         m_textOnPathHelper.setShape(shape);
+@@ -870,7 +905,18 @@ void SvgTextTool::mousePressEvent(KoPointerEvent *event)
+     QPainterPath hoverPath = KisToolUtils::shapeHoverInfoCrossLayer(canvas(), event->point, shapeType);
+     bool crossLayerPossible = !hoverPath.isEmpty() && shapeType == KoSvgTextShape_SHAPEID;
+ 
+-    if (!selectedShape && !hoveredShape && !hoveredFlowShape && !crossLayerPossible) {
++    // Krita Nova (patch 38): like Photoshop, Shift+click on a text other than the
++    // one being edited starts a new text there instead of editing that one
++    const bool newTextOverText = (event->modifiers() & Qt::ShiftModifier)
++            && hoveredShape && hoveredShape != selectedShape;
++
++    if (newTextOverText) {
++        canvas()->shapeManager()->selection()->deselectAll();
++        QPointF point = canvas()->snapGuide()->snap(event->point, event->modifiers());
++        m_interactionStrategy.reset(new SvgCreateTextStrategy(this, point));
++        m_dragging = DragMode::Create;
++        event->accept();
++    } else if (!selectedShape && !hoveredShape && !hoveredFlowShape && !crossLayerPossible) {
+         QPointF point = canvas()->snapGuide()->snap(event->point, event->modifiers());
+         m_interactionStrategy.reset(new SvgCreateTextStrategy(this, point));
+         m_dragging = DragMode::Create;
+@@ -1089,7 +1135,23 @@ void SvgTextTool::keyPressEvent(QKeyEvent *event)
+         event->accept();
+         return;
+     } else if (event->key() == Qt::Key_Escape) {
+-        requestStrokeEnd();
++        // Krita Nova (patch 38): like Photoshop, Esc commits the text being
++        // edited (a drag in progress is cancelled first)
++        if (m_interactionStrategy) {
++            requestStrokeEnd();
++        } else if (selectedShape()) {
++            commitText();
++            event->accept();
++            return;
++        }
++    } else if (selectedShape()
++               && (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)
++               && ((event->modifiers() & Qt::ControlModifier)
++                   || (event->key() == Qt::Key_Enter && (event->modifiers() & Qt::KeypadModifier)))) {
++        // Krita Nova (patch 38): Ctrl+Enter (or Enter on the keypad) commits, like Photoshop
++        commitText();
++        event->accept();
++        return;
+     } else if (selectedShape()) {
+         m_textCursor.keyPressEvent(event);
+     }
+diff --git a/plugins/tools/svgtexttool/SvgTextTool.h b/plugins/tools/svgtexttool/SvgTextTool.h
+index 3face95..4a6020a 100644
+--- a/plugins/tools/svgtexttool/SvgTextTool.h
++++ b/plugins/tools/svgtexttool/SvgTextTool.h
+@@ -155,6 +155,10 @@ private Q_SLOTS:
+      * called when the canvas selection is changed.
+      */
+     void slotShapeSelectionChanged();
++    /// Krita Nova (patch 38): end editing the text (Esc, Ctrl+Enter)
++    void commitText();
++    /// Krita Nova (patch 38): remove a text nothing was typed into
++    void removeIfEmpty(KoSvgTextShape *shape);
+ 
+     /**
+      * @brief updateCursor
