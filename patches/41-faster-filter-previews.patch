@@ -1,0 +1,363 @@
+Krita Nova 41 - faster filter and adjustment previews
+
+The preview of the filter dialog (Filter > ..., Adjust > ...) filters only
+the visible part of the canvas while you change the settings:
+
+- The part is the canvas' region of interest: the visible area plus a
+  margin of a quarter of it on each side. Panning or zooming so that an
+  unfiltered part becomes visible previews again; OK filters the whole layer
+  (and the other selected frames, if enabled).
+- Only for filters that work in patches (supportsThreading()): those give
+  the same result for any split of the layer, so the visible part looks
+  exactly like the final result. The others, and wrap-around mode, still
+  preview everything. Zoomed out, the preview keeps using the lower level of
+  detail as before.
+- KisFilterStrokeStrategy::setPreviewRect(), KisFilterManager::apply(config,
+  previewRect) / isPartialPreview(), KisDlgFilter::previewArea().
+
+Color adjustments (Hue/Saturation, Levels, Curves, Brightness/Contrast,
+Color Balance, Desaturate, Posterize, ... - every KisColorTransformationFilter,
+also in filter masks and adjustment layers) transform a run of four or more
+equal pixels once and copy the result: transparent areas and flat colors
+cost almost nothing now.
+diff --git a/libs/image/filter/kis_color_transformation_filter.cc b/libs/image/filter/kis_color_transformation_filter.cc
+index cdf6452..328052c 100644
+--- a/libs/image/filter/kis_color_transformation_filter.cc
++++ b/libs/image/filter/kis_color_transformation_filter.cc
+@@ -8,6 +8,7 @@
+ 
+ #include <KoColorTransformation.h>
+ #include <KoUpdater.h>
++#include <cstring>
+ 
+ #include <kis_processing_information.h>
+ #include <kis_paint_device.h>
+@@ -50,10 +51,49 @@ void KisColorTransformationFilter::processImpl(KisPaintDeviceSP device,
+ 
+     KisSequentialIteratorProgress it(device, applyRect, progressUpdater);
+ 
++    // Krita Nova: a color transformation is a function of the pixel alone, so
++    // a run of equal pixels (transparent areas, flat colors - most of a
++    // drawing) needs only one transformation, the rest is a copy of it
++    const int pixelSize = cs->pixelSize();
++    const int minRun = 4;
++
+     int conseq = it.nConseqPixels();
+     while (it.nextPixels(conseq)) {
+         conseq = it.nConseqPixels();
+-        colorTransformation->transform(it.oldRawData(), it.rawData(), conseq);
++
++        const quint8 *src = it.oldRawData();
++        quint8 *dst = it.rawData();
++
++        // works in place too: the pixels at i and after are read before
++        // anything at i or after is written
++        int batchStart = 0;
++        int i = 0;
++        while (i < conseq) {
++            const quint8 *first = src + i * pixelSize;
++            int j = i + 1;
++            while (j < conseq && memcmp(src + j * pixelSize, first, pixelSize) == 0) {
++                ++j;
++            }
++            if (j - i >= minRun) {
++                if (i > batchStart) {
++                    colorTransformation->transform(src + batchStart * pixelSize,
++                                                   dst + batchStart * pixelSize,
++                                                   i - batchStart);
++                }
++                quint8 *firstDst = dst + i * pixelSize;
++                colorTransformation->transform(first, firstDst, 1);
++                for (int k = i + 1; k < j; ++k) {
++                    memcpy(dst + k * pixelSize, firstDst, pixelSize);
++                }
++                batchStart = j;
++            }
++            i = j;
++        }
++        if (conseq > batchStart) {
++            colorTransformation->transform(src + batchStart * pixelSize,
++                                           dst + batchStart * pixelSize,
++                                           conseq - batchStart);
++        }
+     }
+ 
+     if (!colorTransformationConfiguration) {
+diff --git a/libs/ui/dialogs/kis_dlg_filter.cpp b/libs/ui/dialogs/kis_dlg_filter.cpp
+index 589caaa..50fc339 100644
+--- a/libs/ui/dialogs/kis_dlg_filter.cpp
++++ b/libs/ui/dialogs/kis_dlg_filter.cpp
+@@ -24,6 +24,8 @@
+ #include "kis_filter_manager.h"
+ #include "ui_wdgfilterdialog.h"
+ #include "kis_canvas2.h"
++#include "kis_coordinates_converter.h"
++#include <kis_image.h>
+ #include "kis_signal_compressor.h"
+ #include <kis_icon_utils.h>
+ 
+@@ -56,6 +58,7 @@ struct KisDlgFilter::Private {
+     // dialog is open
+     QScopedPointer<KisInputActionGroupsMaskGuard> blockModifyingActionsGuard;
+     KisSignalCompressor updateCompressor;
++    QRect previewArea; ///< Krita Nova: the part the running preview filters, empty = all
+ };
+ 
+ KisDlgFilter::KisDlgFilter(KisViewManager *view, KisNodeSP node, KisFilterManager *filterManager, QWidget *parent) :
+@@ -115,6 +118,12 @@ KisDlgFilter::KisDlgFilter(KisViewManager *view, KisNodeSP node, KisFilterManage
+     restoreGeometry(KisConfig(true).readEntry("filterdialog/geometry", QByteArray()));
+     connect(&d->updateCompressor, SIGNAL(timeout()), this, SLOT(updatePreview()));
+ 
++    // Krita Nova: the preview filters only the visible area, see previewArea()
++    if (d->view->canvasBase()) {
++        connect(d->view->canvasBase(), SIGNAL(sigRegionOfInterestChanged(QRect)),
++                this, SLOT(slotRegionOfInterestChanged()));
++    }
++
+ }
+ 
+ KisDlgFilter::~KisDlgFilter()
+@@ -139,7 +148,7 @@ void KisDlgFilter::setDialogTitle(KisFilterSP filter)
+     setWindowTitle(filter.isNull() ? i18nc("@title:window", "Filter") : i18nc("@title:window", "Filter: %1", filter->name()));
+ }
+ 
+-void KisDlgFilter::startApplyingFilter(KisFilterConfigurationSP config)
++void KisDlgFilter::startApplyingFilter(KisFilterConfigurationSP config, const QRect &previewRect)
+ {
+     if (!d->uiFilterDialog.filterSelection->configuration()) return;
+ 
+@@ -147,7 +156,40 @@ void KisDlgFilter::startApplyingFilter(KisFilterConfigurationSP config)
+         config->setChannelFlags(qobject_cast<KisPaintLayer*>(d->node.data())->channelLockFlags());
+     }
+ 
+-    d->filterManager->apply(config);
++    d->previewArea = previewRect;
++    d->filterManager->apply(config, previewRect);
++}
++
++QRect KisDlgFilter::previewArea() const
++{
++    // Krita Nova: while previewing, filter only what can be seen (plus the
++    // margin of the canvas' region of interest); OK filters everything
++    KisCanvas2 *canvas = d->view->canvasBase();
++    KisImageSP image = d->view->image();
++    if (!canvas || !image) return QRect();
++
++    const QRect roi = canvas->regionOfInterest() & image->bounds();
++    if (roi.isEmpty() || roi == image->bounds()) return QRect();
++
++    // the visible part must be in it (the region of interest is updated late)
++    const QRect visible = canvas->coordinatesConverter()->widgetRectInImagePixels().toAlignedRect() & image->bounds();
++    if (!roi.contains(visible)) return QRect();
++    return roi;
++}
++
++void KisDlgFilter::slotRegionOfInterestChanged()
++{
++    if (!d->uiFilterDialog.checkBoxPreview->isChecked()) return;
++    if (!d->filterManager->isPartialPreview()) return;
++
++    KisCanvas2 *canvas = d->view->canvasBase();
++    KisImageSP image = d->view->image();
++    if (!canvas || !image) return;
++
++    const QRect visible = canvas->coordinatesConverter()->widgetRectInImagePixels().toAlignedRect() & image->bounds();
++    if (!d->previewArea.contains(visible)) {
++        d->updateCompressor.start();
++    }
+ }
+ 
+ void KisDlgFilter::updatePreview()
+@@ -161,7 +203,7 @@ void KisDlgFilter::updatePreview()
+ 
+     if (d->uiFilterDialog.checkBoxPreview->isChecked()) {
+         KisFilterConfigurationSP config(d->uiFilterDialog.filterSelection->configuration());
+-        startApplyingFilter(config);
++        startApplyingFilter(config, previewArea());
+     }
+ 
+     d->uiFilterDialog.buttonBox->button(QDialogButtonBox::Ok)->setEnabled(true);
+@@ -179,7 +221,8 @@ void KisDlgFilter::slotFilterWidgetSizeChanged()
+ 
+ void KisDlgFilter::slotOnAccept()
+ {
+-    if (!d->filterManager->isStrokeRunning()) {
++    // Krita Nova: a preview of the visible area only is filtered again, whole
++    if (!d->filterManager->isStrokeRunning() || d->filterManager->isPartialPreview()) {
+         KisFilterConfigurationSP config(d->uiFilterDialog.filterSelection->configuration());
+         startApplyingFilter(config);
+     }
+diff --git a/libs/ui/dialogs/kis_dlg_filter.h b/libs/ui/dialogs/kis_dlg_filter.h
+index 027ebfa..4f0af52 100644
+--- a/libs/ui/dialogs/kis_dlg_filter.h
++++ b/libs/ui/dialogs/kis_dlg_filter.h
+@@ -42,13 +42,17 @@ public Q_SLOTS:
+     void adjustSize();
+ 
+ private:
+-    void startApplyingFilter(KisFilterConfigurationSP config);
++    void startApplyingFilter(KisFilterConfigurationSP config, const QRect &previewRect = QRect());
++    /// Krita Nova: the canvas area to preview (visible part + margin), empty = all
++    QRect previewArea() const;
+     void setDialogTitle(KisFilterSP f);
+ 
+ 
+ private Q_SLOTS:
+     void slotFilterWidgetSizeChanged();
+     void updatePreview();
++    /// Krita Nova: panned or zoomed: preview again when new parts became visible
++    void slotRegionOfInterestChanged();
+ 
+ private:
+     struct Private;
+diff --git a/libs/ui/kis_filter_manager.cc b/libs/ui/kis_filter_manager.cc
+index 3b13a81..12d65a6 100644
+--- a/libs/ui/kis_filter_manager.cc
++++ b/libs/ui/kis_filter_manager.cc
+@@ -61,6 +61,7 @@ struct KisFilterManager::Private {
+     KisFilterStrokeStrategy::IdleBarrierData::IdleBarrierCookie idleBarrierCookie;
+ 
+     bool filterAllSelectedFrames = false;
++    bool partialPreview = false; ///< Krita Nova: the running stroke filters only a part
+ 
+     KisSignalMapper actionsMapper;
+ 
+@@ -266,7 +267,7 @@ void KisFilterManager::showFilterDialog(const QString &filterId, KisFilterConfig
+     }
+ }
+ 
+-void KisFilterManager::apply(KisFilterConfigurationSP _filterConfig)
++void KisFilterManager::apply(KisFilterConfigurationSP _filterConfig, const QRect &previewRect)
+ {
+     KisFilterConfigurationSP filterConfig = _filterConfig->cloneWithResourcesSnapshot();
+ 
+@@ -305,6 +306,9 @@ void KisFilterManager::apply(KisFilterConfigurationSP _filterConfig)
+         KConfigGroup group( KSharedConfig::openConfig(), "filterdialog");
+         strategy->setForceLodModeIfPossible(group.readEntry("forceLodMode", true));
+     }
++    strategy->setPreviewRect(previewRect);
++    // (only filters working in patches filter a part, see KisFilterStrokeStrategy)
++    d->partialPreview = !previewRect.isEmpty() && filter->supportsThreading();
+ 
+     d->currentStrokeId =
+         image->startStroke(strategy);
+@@ -384,6 +388,11 @@ bool KisFilterManager::isStrokeRunning() const
+     return bool(d->currentStrokeId);
+ }
+ 
++bool KisFilterManager::isPartialPreview() const
++{
++    return d->currentStrokeId && d->partialPreview;
++}
++
+ bool KisFilterManager::isIdle() const
+ {
+     return !d->idleBarrierCookie;
+diff --git a/libs/ui/kis_filter_manager.h b/libs/ui/kis_filter_manager.h
+index 354b72c..5ad9851 100644
+--- a/libs/ui/kis_filter_manager.h
++++ b/libs/ui/kis_filter_manager.h
+@@ -9,6 +9,7 @@
+ #define _KIS_FILTER_MANAGER_
+ 
+ #include <QObject>
++#include <QRect>
+ #include <kritaui_export.h>
+ #include <kis_types.h>
+ 
+@@ -34,7 +35,13 @@ public:
+     void setup(KisKActionCollection * ac, KisActionManager *actionManager);
+     void updateGUI();
+ 
+-    void apply(KisFilterConfigurationSP filterConfig);
++    /**
++     * Krita Nova: a non-empty \p previewRect (image pixels) filters only that
++     * part, for a fast preview of the visible canvas area
++     */
++    void apply(KisFilterConfigurationSP filterConfig, const QRect &previewRect = QRect());
++    //! Krita Nova: the running stroke filters only a part (a preview)
++    bool isPartialPreview() const;
+     void finish();
+     //! Cancel current running stroke
+     void cancelRunningStroke();
+diff --git a/libs/ui/tool/strokes/kis_filter_stroke_strategy.cpp b/libs/ui/tool/strokes/kis_filter_stroke_strategy.cpp
+index dd0e098..483d197 100644
+--- a/libs/ui/tool/strokes/kis_filter_stroke_strategy.cpp
++++ b/libs/ui/tool/strokes/kis_filter_stroke_strategy.cpp
+@@ -40,7 +40,7 @@ struct KisFilterStrokeStrategy::Private {
+         , updatesFacade(rhs.updatesFacade)
+         , levelOfDetail(0)
+         , cancelledUpdates(rhs.cancelledUpdates)
+-
++        , previewRect(rhs.previewRect)
+     {
+         KIS_ASSERT_RECOVER_RETURN(!rhs.levelOfDetail);
+     }
+@@ -57,6 +57,7 @@ struct KisFilterStrokeStrategy::Private {
+     ExternalCancelUpdatesStorageSP cancelledUpdates;
+     QRect nextExternalUpdateRect;
+     bool hasBeenLodCloned = false;
++    QRect previewRect; ///< Krita Nova: filter only this part (level of detail 0), empty = all
+ };
+ 
+ struct SubTaskSharedData {
+@@ -175,6 +176,11 @@ KisFilterStrokeStrategy::~KisFilterStrokeStrategy()
+     delete m_d;
+ }
+ 
++void KisFilterStrokeStrategy::setPreviewRect(const QRect &rect)
++{
++    m_d->previewRect = rect;
++}
++
+ void KisFilterStrokeStrategy::initStrokeCallback()
+ {
+     KisStrokeStrategyUndoCommandBased::initStrokeCallback();
+@@ -205,7 +211,11 @@ void KisFilterStrokeStrategy::doStrokeCallback(KisStrokeJobData *data)
+         QSharedPointer<SubTaskSharedData> shared( new SubTaskSharedData(m_d->image, m_d->node, m_d->levelOfDetail,
+                                                                         m_d->activeSelection, m_d->filter, m_d->filterConfig, filterFrameData) );
+         QSharedPointer<KisProcessingVisitor::ProgressHelper> progress( new KisProcessingVisitor::ProgressHelper(m_d->node) );
+-        addJobSequential(jobs, [this, shared, progress](){
++        // Krita Nova: the preview of the filter dialog filters only what is visible
++        const QRect previewRect =
++            m_d->previewRect.isEmpty() || filterFrameData->frameTime != -1 ?
++                QRect() : KisLodTransform(m_d->levelOfDetail).map(m_d->previewRect);
++        addJobSequential(jobs, [this, shared, progress, previewRect](){
+             // Switch time if necessary..
+             if (shared->shouldSwitchTime()) {
+                 runAndSaveCommand( toQShared( new KisLayerUtils::SwitchFrameCommand(shared->image(), shared->frameTime(), false, shared->storage()) )
+@@ -225,6 +235,14 @@ void KisFilterStrokeStrategy::doStrokeCallback(KisStrokeJobData *data)
+             shared->processRect = shared->filter()->changedRect(shared->filterDeviceBounds, shared->filterConfig(), shared->levelOfDetail());
+             shared->processRect &= shared->targetDevice()->defaultBounds()->bounds();
+ 
++            // Krita Nova: a part is exact only for filters that work in patches
++            // (the result of a patch does not depend on the rest of the rect)
++            if (!previewRect.isEmpty() &&
++                    shared->filter()->supportsThreading() &&
++                    !shared->targetDevice()->defaultBounds()->wrapAroundMode()) {
++                shared->processRect &= previewRect;
++            }
++
+             //If we're dealing with some kind of transparency mask, we will create a compositionSourceDevice instead.
+             //  Carry over from commit ca810f85 ...
+             if (shared->selection() ||
+diff --git a/libs/ui/tool/strokes/kis_filter_stroke_strategy.h b/libs/ui/tool/strokes/kis_filter_stroke_strategy.h
+index 7a36992..a67dd0e 100644
+--- a/libs/ui/tool/strokes/kis_filter_stroke_strategy.h
++++ b/libs/ui/tool/strokes/kis_filter_stroke_strategy.h
+@@ -89,6 +89,15 @@ public:
+ 
+     ~KisFilterStrokeStrategy() override;
+ 
++    /**
++     * Krita Nova: filter only this part of the image (image pixels, level of
++     * detail 0), e.g. the visible canvas area while the filter dialog
++     * previews. Used only for filters that support threading: they give the
++     * same result for any split into patches, so a part is exact. An empty
++     * rect (the default) filters everything.
++     */
++    void setPreviewRect(const QRect &rect);
++
+ 
+     void initStrokeCallback() override;
+     void doStrokeCallback(KisStrokeJobData *data) override;
