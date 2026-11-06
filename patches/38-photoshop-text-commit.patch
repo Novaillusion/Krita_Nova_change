@@ -15,7 +15,7 @@ What changes, to work like Photoshop's type tool:
 SvgTextTool: commitText(), removeIfEmpty() (run once the selection change is
 over, never while a command is being added), and the key / press handling.
 diff --git a/plugins/tools/svgtexttool/SvgTextTool.cpp b/plugins/tools/svgtexttool/SvgTextTool.cpp
-index 17a32ae..ab23c4c 100644
+index e947e7e..bc8f96a 100644
 --- a/plugins/tools/svgtexttool/SvgTextTool.cpp
 +++ b/plugins/tools/svgtexttool/SvgTextTool.cpp
 @@ -51,6 +51,8 @@
@@ -27,7 +27,7 @@ index 17a32ae..ab23c4c 100644
  #include <KoShapeRegistry.h>
  #include <KoShapeFactoryBase.h>
  #include <KoPointerEvent.h>
-@@ -448,6 +450,31 @@ KoSvgTextProperties SvgTextTool::propertiesForNewText() const
+@@ -441,6 +443,31 @@ KoSvgTextProperties SvgTextTool::propertiesForNewText() const
      return props;
  }
  
@@ -59,7 +59,7 @@ index 17a32ae..ab23c4c 100644
  void SvgTextTool::slotShapeSelectionChanged()
  {
      QList<KoShape *> shapes = koSelection()->selectedEditableShapes();
-@@ -475,6 +502,14 @@ void SvgTextTool::slotShapeSelectionChanged()
+@@ -468,6 +495,14 @@ void SvgTextTool::slotShapeSelectionChanged()
          return;
      }
      KoSvgTextShape *const shape = selectedShape();
@@ -74,7 +74,7 @@ index 17a32ae..ab23c4c 100644
      if (shape != m_textCursor.shape() || shape == nullptr) {
          m_textCursor.setShape(shape);
          m_textOnPathHelper.setShape(shape);
-@@ -870,7 +905,18 @@ void SvgTextTool::mousePressEvent(KoPointerEvent *event)
+@@ -863,7 +898,18 @@ void SvgTextTool::mousePressEvent(KoPointerEvent *event)
      QPainterPath hoverPath = KisToolUtils::shapeHoverInfoCrossLayer(canvas(), event->point, shapeType);
      bool crossLayerPossible = !hoverPath.isEmpty() && shapeType == KoSvgTextShape_SHAPEID;
  
@@ -94,7 +94,7 @@ index 17a32ae..ab23c4c 100644
          QPointF point = canvas()->snapGuide()->snap(event->point, event->modifiers());
          m_interactionStrategy.reset(new SvgCreateTextStrategy(this, point));
          m_dragging = DragMode::Create;
-@@ -1089,7 +1135,23 @@ void SvgTextTool::keyPressEvent(QKeyEvent *event)
+@@ -1082,7 +1128,23 @@ void SvgTextTool::keyPressEvent(QKeyEvent *event)
          event->accept();
          return;
      } else if (event->key() == Qt::Key_Escape) {

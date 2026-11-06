@@ -288,24 +288,10 @@ index 137feaf..1973fe6 100644
      </qresource>
  </RCC>
 diff --git a/plugins/tools/svgtexttool/SvgTextTool.cpp b/plugins/tools/svgtexttool/SvgTextTool.cpp
-index 3453592..17a32ae 100644
+index 3453592..e947e7e 100644
 --- a/plugins/tools/svgtexttool/SvgTextTool.cpp
 +++ b/plugins/tools/svgtexttool/SvgTextTool.cpp
-@@ -185,6 +185,13 @@ void SvgTextTool::activate(const QSet<KoShape *> &shapes)
-     if (canvas2) {
-         canvas2->setCurrentShapeManagerOwnerShape(nullptr);
-         canvas2->viewManager()->textPropertyManager()->setTextPropertiesInterface(m_textCursor.textPropertyInterface());
-+        // Krita Nova (patch 37): the options bar edits the Character panel's text
-+        if (QDockWidget *characterPanel = canvas2->viewManager()->mainWindow()->dockWidget("NovaTextCharacter")) {
-+            if (optionWidget->errors().isEmpty() && optionWidget->rootObject()) {
-+                optionWidget->rootObject()->setProperty("novaPanel", QVariant::fromValue(static_cast<QObject *>(characterPanel)));
-+                optionWidget->rootObject()->setProperty("novaObserver", characterPanel->property("canvasObserver"));
-+            }
-+        }
-         QDockWidget *docker = canvas2->viewManager()->mainWindow()->dockWidget("TextProperties");
-         if (docker && m_optionManager) {
-             m_optionManager->setTextPropertiesOpen(docker->isVisible());
-@@ -266,6 +273,13 @@ QWidget *SvgTextTool::createOptionWidget()
+@@ -266,6 +266,13 @@ QWidget *SvgTextTool::createOptionWidget()
      connect(m_optionManager->optionsModel(), SIGNAL(pasteRichtTextByDefaultChanged(bool)), this, SLOT(slotUpdateTextPasteBehaviour()));
      const KisCanvas2 *canvas2 = qobject_cast<const KisCanvas2 *>(this->canvas());
      if (canvas2 && canvas2->viewManager()->mainWindow()) {
