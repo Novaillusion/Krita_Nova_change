@@ -1,0 +1,70 @@
+Krita Nova 33 - image size, rotation and zoom back in the top bar (Android)
+
+Patch 16 parks the status bar's image size / memory, canvas rotation and zoom
+widgets in a "KritaNovaStatusItems" widget, and patch 15 moves that to the
+right end of the top bar - but only once, when the brush toolbar is arranged
+for the Brush Panel. The widget only exists after the status bar has been set
+up; when the toolbars were arranged first, it was never moved and the info
+was missing from the UI.
+
+KisMainWindow.cpp: ensureStatusItemsInTopBar() moves it (with the spacer
+before it) to the top bar if it isn't there yet and shows it. It runs when the
+brush toolbar is arranged, as before, and again every time the Brush Panel is
+placed - after the window is shown and whenever a document is opened or
+switched to - so it ends up in the top bar whichever comes first.
+diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
+index 876300e..c4124ad 100644
+--- a/libs/ui/KisMainWindow.cpp
++++ b/libs/ui/KisMainWindow.cpp
+@@ -536,6 +536,26 @@ private:
+     qreal m_pressPos {0.0};
+ };
+ 
++/// Image size, canvas rotation and zoom from the status bar (KisStatusBar parks
++/// them in the "KritaNovaStatusItems" widget on Android), at the right end of the
++/// top bar. The widget only exists once the status bar has been set up, which
++/// can be after the toolbars were arranged, so this is tried again whenever the
++/// Brush Panel is placed (patch 33); it does nothing once they are there.
++void ensureStatusItemsInTopBar(QMainWindow *mainWindow)
++{
++    if (!mainWindow) return;
++    QWidget *statusItems = mainWindow->findChild<QWidget *>(QStringLiteral("KritaNovaStatusItems"));
++    KisToolBar *topBar = mainWindow->findChild<KisToolBar *>(QStringLiteral("mainToolBar"));
++    if (!statusItems || !topBar) return;
++    if (statusItems->parentWidget() != topBar) {
++        QWidget *spacer = new QWidget(topBar);
++        spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
++        topBar->addWidget(spacer);
++        topBar->addWidget(statusItems);
++    }
++    if (!statusItems->isVisible()) statusItems->show();
++}
++
+ /// Turn the brush toolbar's horizontal groups into a narrow column with
+ /// vertical size and opacity sliders (done once per toolbar).
+ void adaptBrushToolBarForPanel(KisToolBar *toolBar, QMainWindow *mainWindow)
+@@ -562,15 +582,7 @@ void adaptBrushToolBarForPanel(KisToolBar *toolBar, QMainWindow *mainWindow)
+             }
+         }
+ 
+-        // Image size, canvas rotation and zoom from the status bar (KisStatusBar
+-        // parks them in this widget on Android), at the right end of the top bar
+-        if (QWidget *statusItems = mainWindow->findChild<QWidget *>(QStringLiteral("KritaNovaStatusItems"))) {
+-            QWidget *spacer = new QWidget(topBar);
+-            spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+-            topBar->addWidget(spacer);
+-            topBar->addWidget(statusItems);
+-            statusItems->show();
+-        }
++        ensureStatusItemsInTopBar(mainWindow);
+     }
+ 
+     // Size and opacity are the panel's own vertical sliders
+@@ -942,6 +954,7 @@ private:
+     void place(bool force)
+     {
+         if (!m_dock || !m_mainWindow) return;
++        ensureStatusItemsInTopBar(m_mainWindow);
+         if (m_userHidden || onWelcomePage()) {
+             m_dock->hide();
+             return;
