@@ -1,0 +1,361 @@
+Krita Nova 37 - the text tool's options bar (text tool, part 2)
+
+Like Photoshop's options bar, the text tool's Tool Options now start with:
+font family, style, size, align left / center / right, text color, and
+buttons that show the Character and Paragraph panels. It edits the same text
+as the Character panel (patch 36): the selected characters while some are
+selected, otherwise the whole text (or the defaults for new text). It flows
+into as many rows as it needs, so it fits the Tool Options docker as well as
+the tool options toolbar. Krita's own text tool options stay below it.
+
+- qml/NovaTextOptionsBar.qml (text properties docker plugin): the bar.
+- NovaTextPanelDock: canvasObserver property (the panel's text property
+  models) and showPanel(id), for the bar.
+- SvgTextToolOptions.qml: loads the bar at the top when the tool gives it the
+  Character panel's observer; SvgTextTool::createOptionWidget() does that
+  when the Character panel (NovaTextCharacter) exists.
+diff --git a/plugins/dockers/textproperties/NovaTextPanelDock.cpp b/plugins/dockers/textproperties/NovaTextPanelDock.cpp
+index 80e2d04..36c3af5 100644
+--- a/plugins/dockers/textproperties/NovaTextPanelDock.cpp
++++ b/plugins/dockers/textproperties/NovaTextPanelDock.cpp
+@@ -98,15 +98,25 @@ void NovaTextPanelDock::pickTextColor()
+ }
+ 
+ void NovaTextPanelDock::showMoreOptions()
++{
++    showPanel(QStringLiteral("TextProperties"));
++}
++
++void NovaTextPanelDock::showPanel(const QString &dockId)
+ {
+     QMainWindow *mainWindow = m_viewManager ? static_cast<QMainWindow *>(m_viewManager->mainWindow()) : nullptr;
+     if (!mainWindow) return;
+-    if (QDockWidget *dock = mainWindow->findChild<QDockWidget *>(QStringLiteral("TextProperties"))) {
++    if (QDockWidget *dock = mainWindow->findChild<QDockWidget *>(dockId)) {
+         dock->show();
+         dock->raise();
+     }
+ }
+ 
++QObject *NovaTextPanelDock::canvasObserverObject() const
++{
++    return m_observer;
++}
++
+ void NovaTextPanelDock::slotCanvasResourceChanged(int key, const QVariant &value)
+ {
+     Q_UNUSED(value);
+diff --git a/plugins/dockers/textproperties/NovaTextPanelDock.h b/plugins/dockers/textproperties/NovaTextPanelDock.h
+index 6242e5d..86f995d 100644
+--- a/plugins/dockers/textproperties/NovaTextPanelDock.h
++++ b/plugins/dockers/textproperties/NovaTextPanelDock.h
+@@ -29,6 +29,9 @@ class NovaTextPanelDock : public QDockWidget, public KisMainwindowObserver
+     Q_OBJECT
+     /// the text color: the foreground color, which the text tool uses for text
+     Q_PROPERTY(QColor textColor READ textColor NOTIFY textColorChanged)
++    /// Krita Nova (patch 37): for the text tool's options bar, which edits the
++    /// same text as this panel
++    Q_PROPERTY(QObject *canvasObserver READ canvasObserverObject CONSTANT)
+ 
+ public:
+     NovaTextPanelDock(const QString &title, const QString &qmlSource, const QString &observerName);
+@@ -40,11 +43,14 @@ public:
+     void unsetCanvas() override;
+ 
+     QColor textColor() const;
++    QObject *canvasObserverObject() const;
+ 
+     /// choose the text color (sets the foreground color)
+     Q_INVOKABLE void pickTextColor();
+     /// show the Text Properties docker, with all of Krita's text options
+     Q_INVOKABLE void showMoreOptions();
++    /// show a docker by id (NovaTextCharacter, NovaTextParagraph, TextProperties)
++    Q_INVOKABLE void showPanel(const QString &dockId);
+ 
+ Q_SIGNALS:
+     void textColorChanged();
+diff --git a/plugins/dockers/textproperties/qml/NovaTextOptionsBar.qml b/plugins/dockers/textproperties/qml/NovaTextOptionsBar.qml
+new file mode 100644
+index 0000000..9935203
+--- /dev/null
++++ b/plugins/dockers/textproperties/qml/NovaTextOptionsBar.qml
+@@ -0,0 +1,196 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++import QtQuick 2.15
++import QtQuick.Controls 2.15
++import QtQuick.Layouts 1.12
++import org.krita.flake.text 1.0
++import org.krita.components 1.0 as Kis
++
++/**
++ * Krita Nova (patch 37): the text tool's options bar, like Photoshop's:
++ * font family, style, size, alignment, color, and buttons for the Character
++ * and Paragraph panels. Shown at the top of the text tool's Tool Options
++ * (SvgTextToolOptions.qml loads it), with the Character panel's canvas
++ * observer, so it edits the same text the panels do. It flows into rows, so
++ * it fits both the Tool Options docker and the tool options toolbar.
++ */
++Flow {
++    id: root;
++    spacing: 4;
++
++    property TextPropertiesCanvasObserver canvasObserver: null;
++    /// NovaTextPanelDock of the Character panel: text color, panels
++    property QtObject panel: null;
++
++    property KoSvgTextPropertiesModel props: canvasObserver
++                                             ? ((canvasObserver.characterProperties.enabled
++                                                 && canvasObserver.characterProperties.spanSelection)
++                                                ? canvasObserver.characterProperties
++                                                : canvasObserver.textProperties)
++                                             : null;
++    property KoSvgTextPropertiesModel paragraphProps: canvasObserver ? canvasObserver.textProperties : null;
++    property double dpi: canvasObserver ? canvasObserver.dpi : 72.0;
++    property bool blockSignals: false;
++
++    Kis.FontFunctions {
++        id: fontFunctions;
++    }
++
++    FontStyleModel {
++        id: stylesModel;
++    }
++
++    function refreshFamilyAndStyle() {
++        if (!props) return;
++        blockSignals = true;
++        let families = props.fontFamilies;
++        if (families.length > 0) {
++            let name = fontFunctions.wwsFontFamilyName(families[0]);
++            if (name !== familyCmb.modelWrapper.resourceFilename) {
++                familyCmb.modelWrapper.currentTag = 0;
++                familyCmb.modelWrapper.currentIndex = -1;
++            }
++            familyCmb.resourceName = name;
++        }
++        stylesModel.setFromTextPropertiesModel(props);
++        styleCmb.currentIndex = stylesModel.rowForStyle(props.fontWeight, props.fontWidth,
++                                                        props.fontStyle.style, props.fontStyle.value);
++        blockSignals = false;
++    }
++
++    onPropsChanged: refreshFamilyAndStyle();
++    Component.onCompleted: refreshFamilyAndStyle();
++
++    Connections {
++        target: root.props;
++        ignoreUnknownSignals: true;
++        function onFontFamiliesChanged() { root.refreshFamilyAndStyle(); }
++        function onFontWeightChanged() { root.refreshFamilyAndStyle(); }
++        function onFontWidthChanged() { root.refreshFamilyAndStyle(); }
++        function onFontStyleChanged() { root.refreshFamilyAndStyle(); }
++    }
++
++    function anchorIs(anchor) {
++        return paragraphProps ? paragraphProps.textAnchor === anchor : false;
++    }
++    function setAnchor(anchor, align) {
++        if (!paragraphProps) return;
++        paragraphProps.textAnchor = anchor;
++        // keep justified text justified, otherwise align like the anchor
++        if (paragraphProps.textAlignAll !== KoSvgText.AlignJustify) {
++            paragraphProps.textAlignAll = align;
++        }
++    }
++
++    FontResourceDropdown {
++        id: familyCmb;
++        width: 170;
++        locales: canvasObserver ? canvasObserver.locales : [];
++        enabled: root.props !== null;
++        onActivated: {
++            if (root.blockSignals || !root.props) return;
++            let families = root.props.fontFamilies.slice();
++            if (families.length > 0) {
++                families[0] = resourceName;
++            } else {
++                families = [resourceName];
++            }
++            root.props.fontFamilies = families;
++        }
++    }
++
++    SqueezedComboBox {
++        id: styleCmb;
++        width: 110;
++        model: stylesModel;
++        textRole: "display";
++        enabled: root.props !== null;
++        onActivated: {
++            if (root.blockSignals || !root.props) return;
++            var weight = stylesModel.weightValue(currentIndex);
++            var width = stylesModel.widthValue(currentIndex);
++            var styleMode = stylesModel.styleModeValue(currentIndex);
++            var styleVal = stylesModel.slantValue(currentIndex);
++            var axesValues = stylesModel.axesValues(currentIndex);
++            root.props.fontWeight = weight;
++            root.props.fontWidth = width;
++            root.props.fontStyle.style = styleMode;
++            if (styleMode === CssFontStyleModel.StyleOblique) {
++                root.props.fontStyle.value = styleVal;
++            }
++            root.props.axisValues = axesValues;
++        }
++    }
++
++    NovaLengthField {
++        width: 150;
++        symbol: "tT";
++        toolTipText: i18nc("@info:tooltip", "Font size");
++        textProperties: root.props;
++        lengthModel: root.props ? root.props.fontSize : null;
++        dpi: root.dpi;
++        isFontSize: true;
++        allowPercentage: true;
++    }
++
++    Row {
++        spacing: 1;
++        NovaToggle {
++            icon.source: "qrc:///16_light_format-justify-left.svg";
++            icon.color: palette.text;
++            tip: i18nc("@info:tooltip", "Align left");
++            active: root.anchorIs(KoSvgText.AnchorStart);
++            onActivated: root.setAnchor(KoSvgText.AnchorStart, KoSvgText.AlignStart);
++        }
++        NovaToggle {
++            icon.source: "qrc:///16_light_format-justify-center.svg";
++            icon.color: palette.text;
++            tip: i18nc("@info:tooltip", "Center");
++            active: root.anchorIs(KoSvgText.AnchorMiddle);
++            onActivated: root.setAnchor(KoSvgText.AnchorMiddle, KoSvgText.AlignCenter);
++        }
++        NovaToggle {
++            icon.source: "qrc:///16_light_format-justify-right.svg";
++            icon.color: palette.text;
++            tip: i18nc("@info:tooltip", "Align right");
++            active: root.anchorIs(KoSvgText.AnchorEnd);
++            onActivated: root.setAnchor(KoSvgText.AnchorEnd, KoSvgText.AlignEnd);
++        }
++    }
++
++    Rectangle {
++        width: 34;
++        height: 22;
++        radius: 3;
++        color: root.panel ? root.panel.textColor : "black";
++        border.color: palette.mid;
++        border.width: 1;
++        MouseArea {
++            anchors.fill: parent;
++            cursorShape: Qt.PointingHandCursor;
++            onClicked: if (root.panel) root.panel.pickTextColor();
++        }
++        ToolTip.text: i18nc("@info:tooltip", "Text color");
++        ToolTip.visible: colorHover.hovered;
++        HoverHandler {
++            id: colorHover;
++        }
++    }
++
++    Row {
++        spacing: 1;
++        NovaToggle {
++            text: "A";
++            tip: i18nc("@info:tooltip", "Show the Character panel");
++            onActivated: if (root.panel) root.panel.showPanel("NovaTextCharacter");
++        }
++        NovaToggle {
++            text: "¶";
++            tip: i18nc("@info:tooltip", "Show the Paragraph panel");
++            onActivated: if (root.panel) root.panel.showPanel("NovaTextParagraph");
++        }
++    }
++}
+diff --git a/plugins/dockers/textproperties/textproperties.qrc b/plugins/dockers/textproperties/textproperties.qrc
+index 137feaf..1973fe6 100644
+--- a/plugins/dockers/textproperties/textproperties.qrc
++++ b/plugins/dockers/textproperties/textproperties.qrc
+@@ -66,5 +66,6 @@
+         <file alias="NovaLengthField.qml">qml/NovaLengthField.qml</file>
+         <file alias="NovaLeadingField.qml">qml/NovaLeadingField.qml</file>
+         <file alias="NovaToggle.qml">qml/NovaToggle.qml</file>
++        <file alias="NovaTextOptionsBar.qml">qml/NovaTextOptionsBar.qml</file>
+     </qresource>
+ </RCC>
+diff --git a/plugins/tools/svgtexttool/SvgTextTool.cpp b/plugins/tools/svgtexttool/SvgTextTool.cpp
+index 3453592..17a32ae 100644
+--- a/plugins/tools/svgtexttool/SvgTextTool.cpp
++++ b/plugins/tools/svgtexttool/SvgTextTool.cpp
+@@ -185,6 +185,13 @@ void SvgTextTool::activate(const QSet<KoShape *> &shapes)
+     if (canvas2) {
+         canvas2->setCurrentShapeManagerOwnerShape(nullptr);
+         canvas2->viewManager()->textPropertyManager()->setTextPropertiesInterface(m_textCursor.textPropertyInterface());
++        // Krita Nova (patch 37): the options bar edits the Character panel's text
++        if (QDockWidget *characterPanel = canvas2->viewManager()->mainWindow()->dockWidget("NovaTextCharacter")) {
++            if (optionWidget->errors().isEmpty() && optionWidget->rootObject()) {
++                optionWidget->rootObject()->setProperty("novaPanel", QVariant::fromValue(static_cast<QObject *>(characterPanel)));
++                optionWidget->rootObject()->setProperty("novaObserver", characterPanel->property("canvasObserver"));
++            }
++        }
+         QDockWidget *docker = canvas2->viewManager()->mainWindow()->dockWidget("TextProperties");
+         if (docker && m_optionManager) {
+             m_optionManager->setTextPropertiesOpen(docker->isVisible());
+@@ -266,6 +273,13 @@ QWidget *SvgTextTool::createOptionWidget()
+     connect(m_optionManager->optionsModel(), SIGNAL(pasteRichtTextByDefaultChanged(bool)), this, SLOT(slotUpdateTextPasteBehaviour()));
+     const KisCanvas2 *canvas2 = qobject_cast<const KisCanvas2 *>(this->canvas());
+     if (canvas2 && canvas2->viewManager()->mainWindow()) {
++        // Krita Nova (patch 37): the options bar edits the Character panel's text
++        if (QDockWidget *characterPanel = canvas2->viewManager()->mainWindow()->dockWidget("NovaTextCharacter")) {
++            if (optionWidget->errors().isEmpty() && optionWidget->rootObject()) {
++                optionWidget->rootObject()->setProperty("novaPanel", QVariant::fromValue(static_cast<QObject *>(characterPanel)));
++                optionWidget->rootObject()->setProperty("novaObserver", characterPanel->property("canvasObserver"));
++            }
++        }
+         QDockWidget *docker = canvas2->viewManager()->mainWindow()->dockWidget("TextProperties");
+         m_optionManager->setShowTextPropertyButton((docker));
+         if (docker) {
+diff --git a/plugins/tools/svgtexttool/SvgTextToolOptions.qml b/plugins/tools/svgtexttool/SvgTextToolOptions.qml
+index 53c960c..78283d7 100644
+--- a/plugins/tools/svgtexttool/SvgTextToolOptions.qml
++++ b/plugins/tools/svgtexttool/SvgTextToolOptions.qml
+@@ -15,6 +15,12 @@ Control {
+ 
+     property SvgTextToolOptionsManager manager: SvgTextToolOptionsManager{};
+ 
++    // Krita Nova (patch 37): the options bar (font, style, size, alignment,
++    // color) of the Character panel's text, set by SvgTextTool when the
++    // Character panel (NovaTextCharacter) exists
++    property QtObject novaPanel: null;
++    property QtObject novaObserver: null;
++
+     onManagerChanged: {
+         if (typeof manager == "undefined") return;
+         textType.updateTextTypes();
+@@ -63,6 +69,22 @@ Control {
+         id: childColumn;
+         width: parent.width;
+ 
++        Loader {
++            id: novaOptionsBar;
++            Layout.fillWidth: true;
++            active: toolOptionsControl.novaObserver !== null;
++            source: "qrc:/NovaTextOptionsBar.qml";
++            onLoaded: {
++                item.width = Qt.binding(function() { return novaOptionsBar.width; });
++                item.canvasObserver = toolOptionsControl.novaObserver;
++                item.panel = toolOptionsControl.novaPanel;
++            }
++        }
++        Kis.ToolSeparatorBase {
++            Layout.fillWidth: true;
++            visible: novaOptionsBar.active;
++        }
++
+         Label {
+             text: i18nc("@label:group", "Create New Texts with...");
+             Layout.fillWidth: true;
