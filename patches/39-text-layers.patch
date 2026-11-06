@@ -18,7 +18,7 @@ krita-nova-text-layer-name (the name the tool gave them).
 SvgTextTool::updateTextLayerName() renames, removeIfEmpty() removes the layer
 of an empty text.
 diff --git a/plugins/tools/svgtexttool/SvgCreateTextStrategy.cpp b/plugins/tools/svgtexttool/SvgCreateTextStrategy.cpp
-index 1e1e36c..7ff588c 100644
+index 1e1e36c..b6a7436 100644
 --- a/plugins/tools/svgtexttool/SvgCreateTextStrategy.cpp
 +++ b/plugins/tools/svgtexttool/SvgCreateTextStrategy.cpp
 @@ -26,6 +26,17 @@
@@ -67,7 +67,7 @@ index 1e1e36c..7ff588c 100644
 +        // above the current layer (a mask: above its layer), in the same group
 +        KisNodeSP layerNode = current;
 +        if (!layerNode->inherits("KisLayer") && layerNode->parent()) layerNode = layerNode->parent();
-+        if (layerNode != image->rootLayer() && layerNode->parent()) {
++        if (layerNode.data() != image->rootLayer().data() && layerNode->parent()) {
 +            parentNode = layerNode->parent();
 +            above = layerNode;
 +        }
