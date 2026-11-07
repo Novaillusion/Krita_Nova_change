@@ -47,7 +47,7 @@ index 6130d17..cf3a406 100644
  
  install(TARGETS kritaphotoshopbrushes DESTINATION ${KRITA_PLUGIN_INSTALL_DIR})
 diff --git a/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.cpp b/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.cpp
-index 4e9ec70..c8f0cf3 100644
+index 4e9ec70..6b783b4 100644
 --- a/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.cpp
 +++ b/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.cpp
 @@ -16,6 +16,7 @@
@@ -58,16 +58,15 @@ index 4e9ec70..c8f0cf3 100644
  #include <cstring>
  
  #include <klocalizedstring.h>
-@@ -37,6 +38,8 @@
+@@ -37,6 +38,7 @@
  #include <kis_abr_brush_collection.h>
  #include <kis_abr_brush.h>
  #include <kis_png_brush.h>
-+#include <KisResourceCacheDb.h>
 +#include "KisProcreateBrushReader.h"
  #include <QHash>
  
  #include <brushengine/kis_paintop_preset.h>
-@@ -506,118 +509,113 @@ KisAbrPresetImporter::ParsedFile KisAbrPresetImporter::parse(const QByteArray &d
+@@ -506,118 +508,113 @@ KisAbrPresetImporter::ParsedFile KisAbrPresetImporter::parse(const QByteArray &d
      return result;
  }
  
@@ -275,7 +274,7 @@ index 4e9ec70..c8f0cf3 100644
          if (usedNames.contains(name)) {
              int n = 2;
              while (usedNames.contains(QString("%1 (%2)").arg(name).arg(n))) n++;
-@@ -627,30 +625,19 @@ KisAbrPresetImporter::Result KisAbrPresetImporter::importData(const QString &fil
+@@ -627,30 +624,19 @@ KisAbrPresetImporter::Result KisAbrPresetImporter::importData(const QString &fil
  
          // the tip
          KisBrushSP brush;
@@ -310,7 +309,7 @@ index 4e9ec70..c8f0cf3 100644
                  brush->setScale(info.diameter / tipSize);
              }
              brush->setAngle(qDegreesToRadians(info.angle));
-@@ -698,13 +685,15 @@ KisAbrPresetImporter::Result KisAbrPresetImporter::importData(const QString &fil
+@@ -698,13 +684,15 @@ KisAbrPresetImporter::Result KisAbrPresetImporter::importData(const QString &fil
          scatter.write(settings.data());
  
          KisOpacityOptionData opacity;
@@ -327,7 +326,7 @@ index 4e9ec70..c8f0cf3 100644
          // the preset
          KisPaintOpPresetSP preset(new KisPaintOpPreset());
          preset->setName(name);
-@@ -722,39 +711,324 @@ KisAbrPresetImporter::Result KisAbrPresetImporter::importData(const QString &fil
+@@ -722,39 +710,329 @@ KisAbrPresetImporter::Result KisAbrPresetImporter::importData(const QString &fil
          added.append(preset);
      }
  
@@ -623,21 +622,26 @@ index 4e9ec70..c8f0cf3 100644
 +        return result;
 +    }
 +
-+    // its presets: they also go into a category named after the file
-+    QVector<int> ids;
-+    const QString base2 = KisResourceLocator::instance()->resourceLocationBase();
-+    QString relative = location;
-+    if (!base2.isEmpty() && relative.startsWith(base2)) relative = relative.mid(base2.length());
-+    Q_FOREACH (const QString &candidate, QStringList({relative, storageName, '/' + storageName, location})) {
-+        ids = KisResourceCacheDb::resourcesForStorage(ResourceType::PaintOpPresets, candidate);
-+        if (!ids.isEmpty()) break;
-+    }
-+
++    // its presets: they also go into a category named after the file (the
++    // bundle's own presets in the database: same file name and contents)
 +    KisResourceModel presets(ResourceType::PaintOpPresets);
 +    QVector<KoResourceSP> resources;
-+    Q_FOREACH (int id, ids) {
-+        KoResourceSP resource = presets.resourceForId(id);
-+        if (resource) resources << resource;
++    KisResourceStorage storage(location);
++    if (storage.valid()) {
++        QSharedPointer<KisResourceStorage::ResourceIterator> it = storage.resources(ResourceType::PaintOpPresets);
++        while (it && it->hasNext()) {
++            it->next();
++            KoResourceSP inBundle = it->resource();
++            if (!inBundle) continue;
++            const QString fileName = QFileInfo(it->url()).fileName();
++            const QString md5 = inBundle->md5Sum();
++            Q_FOREACH (const KoResourceSP &resource, presets.resourcesForMD5(md5)) {
++                if (resource && QFileInfo(resource->filename()).fileName() == fileName) {
++                    resources << resource;
++                    break;
++                }
++            }
++        }
 +    }
 +    tagPresets(base, resources);
 +
