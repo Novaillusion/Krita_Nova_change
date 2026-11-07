@@ -1,0 +1,42 @@
+Krita Nova 44 - tool shortcuts in the toolbox tooltips
+
+Hovering a tool in the toolbox shows its keyboard shortcut after its name,
+e.g. "Freehand Brush Tool (B)"; several shortcuts are listed with commas.
+Changing a shortcut (Configure Krita > Keyboard Shortcuts, or a shortcut
+profile) updates the tooltip.
+
+KoToolBoxButton::setDataFromToolAction().
+diff --git a/libs/ui/toolbox/KoToolBoxButton.cpp b/libs/ui/toolbox/KoToolBoxButton.cpp
+index c99c79c..95f1795 100644
+--- a/libs/ui/toolbox/KoToolBoxButton.cpp
++++ b/libs/ui/toolbox/KoToolBoxButton.cpp
+@@ -63,7 +63,28 @@ void KoToolBoxButton::setDataFromToolAction(QAction *action)
+         setToolTip(m_toolAction->toolTip());
+         return;
+     }
+-    setToolTip(action->toolTip());
++
++    // Krita Nova: the tooltip shows the tool's keyboard shortcut(s) too,
++    // e.g. "Freehand Brush Tool (B)"; follows changed shortcuts
++    QStringList keys;
++    Q_FOREACH (const QKeySequence &shortcut, action->shortcuts()) {
++        const QString text = shortcut.toString(QKeySequence::NativeText);
++        if (!text.isEmpty() && !keys.contains(text)) {
++            keys << text;
++        }
++    }
++
++    QString tip = action->toolTip();
++    if (tip.isEmpty()) {
++        tip = m_toolAction->toolTip();
++    }
++    if (!keys.isEmpty()) {
++        const QString shortcutText = keys.join(i18nc("separator between keyboard shortcuts", ", "));
++        if (!tip.contains(shortcutText)) {
++            tip = i18nc("tool tooltip: %1 tool name, %2 keyboard shortcut", "%1 (%2)", tip, shortcutText);
++        }
++    }
++    setToolTip(tip);
+ }
+ 
+ void KoToolBoxButton::slotUpdateActionData()

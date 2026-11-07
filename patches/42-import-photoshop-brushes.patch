@@ -1,0 +1,1137 @@
+Krita Nova 42 - import Photoshop brushes (.abr) as ready-to-use brushes
+
+The brush presets (the presets popup of the brush panel / toolbar, the Brush
+Presets docker and the brush editor's preset list) get an "Import Photoshop
+Brushes..." button. It opens one or more .abr files and makes every brush of
+a file a Pixel brush preset, tagged with the file's name:
+
+- The tips are imported as Krita always did (the .abr is copied into the
+  resource folder and becomes a storage of brush tips); importing the same
+  file again reuses it, a different file with the same name gets "name (2)".
+- From the brush settings of the file (the "desc" section of Photoshop 6+
+  brush files): name; the tip (round computed tips become auto brushes with
+  their hardness and roundness, sampled tips use their imported tip, scaled
+  to the brush's diameter); angle, roundness, spacing; Shape Dynamics: size
+  jitter and size control (fade, pen pressure, pen tilt, stylus wheel) with
+  its minimum diameter, angle jitter and angle control (also rotation,
+  initial direction, direction); Scattering (amount, both axes, control);
+  Transfer: opacity and flow jitter and control.
+- Not imported: texture, dual brush, color dynamics, count, noise, wet edges.
+- Files without settings (Photoshop 5 and older, or tips only) get one preset
+  per tip.
+
+New plugin plugins/extensions/photoshopbrushes: the action
+"import_photoshop_brushes" (Settings category) and KisAbrPresetImporter (a
+reader for Photoshop's action descriptors and the preset builder, using the
+paintop option data of libpaintop). KisPresetChooser: the button triggers
+that action.
+diff --git a/libs/ui/widgets/kis_preset_chooser.cpp b/libs/ui/widgets/kis_preset_chooser.cpp
+index 382f62d..d03da39 100644
+--- a/libs/ui/widgets/kis_preset_chooser.cpp
++++ b/libs/ui/widgets/kis_preset_chooser.cpp
+@@ -30,6 +30,12 @@
+ #include <KisResourceTypes.h>
+ #include <KisTagFilterResourceProxyModel.h>
+ #include <QEvent>
++#include <QPushButton>
++#include <KisPart.h>
++#include <KisMainWindow.h>
++#include <KisViewManager.h>
++#include <kis_action_manager.h>
++#include <kis_action.h>
+ #include "kis_preset_stroke_renderer.h"
+ 
+ #include <brushengine/kis_paintop_settings.h>
+@@ -232,6 +238,22 @@ KisPresetChooser::KisPresetChooser(QWidget *parent)
+     m_chooser->showImportExportBtns(false);
+     layout->addWidget(m_chooser);
+ 
++    // Krita Nova: Photoshop brushes (.abr) become ready-to-use presets
++    // (the "import_photoshop_brushes" action of the photoshopbrushes plugin)
++    QPushButton *importPhotoshop = new QPushButton(KisIconUtils::loadIcon("document-import-16"),
++                                                   i18n("Import Photoshop Brushes..."), this);
++    importPhotoshop->setObjectName("importPhotoshopBrushes");
++    importPhotoshop->setToolTip(i18n("Import a Photoshop brush file (.abr): each brush becomes a ready-to-use brush with its settings"));
++    connect(importPhotoshop, &QPushButton::clicked, this, []() {
++        KisMainWindow *mainWindow = KisPart::instance()->currentMainwindow();
++        KisViewManager *viewManager = mainWindow ? mainWindow->viewManager() : nullptr;
++        KisAction *action = viewManager ? viewManager->actionManager()->actionByName("import_photoshop_brushes") : nullptr;
++        if (action) {
++            action->trigger();
++        }
++    });
++    layout->addWidget(importPhotoshop);
++
+     connect(m_chooser, SIGNAL(resourceSelected(KoResourceSP )),
+             this, SLOT(slotResourceWasSelected(KoResourceSP )));
+ 
+diff --git a/plugins/extensions/CMakeLists.txt b/plugins/extensions/CMakeLists.txt
+index e9ba03f..235d52a 100644
+--- a/plugins/extensions/CMakeLists.txt
++++ b/plugins/extensions/CMakeLists.txt
+@@ -17,6 +17,7 @@ add_subdirectory( qmic )
+ add_subdirectory( buginfo )
+ add_subdirectory( samplescreencolor )
+ add_subdirectory( dbexplorer )
++add_subdirectory( photoshopbrushes )
+ 
+ if (ANDROID)
+     add_subdirectory( spensettings )
+diff --git a/plugins/extensions/photoshopbrushes/CMakeLists.txt b/plugins/extensions/photoshopbrushes/CMakeLists.txt
+new file mode 100644
+index 0000000..08e49f2
+--- /dev/null
++++ b/plugins/extensions/photoshopbrushes/CMakeLists.txt
+@@ -0,0 +1,20 @@
++set(kritaphotoshopbrushes_SOURCES
++    PhotoshopBrushes.cpp
++    KisAbrPresetImporter.cpp
++)
++
++kis_add_library(kritaphotoshopbrushes MODULE ${kritaphotoshopbrushes_SOURCES})
++
++target_link_libraries(kritaphotoshopbrushes
++    PRIVATE
++        kritaui
++        kritaresources
++        kritalibbrush
++        kritalibpaintop
++        Qt${QT_MAJOR_VERSION}::Core
++        Qt${QT_MAJOR_VERSION}::Widgets
++        Qt${QT_MAJOR_VERSION}::Xml
++)
++
++install(TARGETS kritaphotoshopbrushes DESTINATION ${KRITA_PLUGIN_INSTALL_DIR})
++install(FILES photoshopbrushes.action DESTINATION ${KDE_INSTALL_DATADIR}/krita/actions)
+diff --git a/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.cpp b/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.cpp
+new file mode 100644
+index 0000000..9d34bd1
+--- /dev/null
++++ b/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.cpp
+@@ -0,0 +1,730 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "KisAbrPresetImporter.h"
++
++#include <QBuffer>
++#include <QDomDocument>
++#include <QFile>
++#include <QFileInfo>
++#include <QPainter>
++#include <QRegularExpression>
++#include <QSet>
++#include <QVariant>
++#include <QtEndian>
++#include <QtMath>
++#include <cstring>
++
++#include <klocalizedstring.h>
++#include <kis_debug.h>
++
++#include <KisResourceModel.h>
++#include <KisResourceTypes.h>
++#include <KisStorageModel.h>
++#include <KisResourceLocator.h>
++#include <KisResourceStorage.h>
++#include <KisTagModel.h>
++#include <KisTagResourceModel.h>
++#include <KisGlobalResourcesInterface.h>
++#include <KoResourcePaths.h>
++
++#include <kis_brush.h>
++#include <kis_auto_brush.h>
++#include <kis_circle_mask_generator.h>
++#include <kis_abr_brush_collection.h>
++#include <kis_abr_brush.h>
++
++#include <brushengine/kis_paintop_preset.h>
++#include <brushengine/kis_paintop_registry.h>
++#include <brushengine/kis_paintop_settings.h>
++
++#include <KisSizeOptionData.h>
++#include <KisStandardOptionData.h>
++#include <KisScatterOptionData.h>
++
++namespace {
++
++// ---------------------------------------------------------------------------
++// Reading Photoshop's action descriptors (the "desc" section of an .abr)
++// ---------------------------------------------------------------------------
++
++class Reader
++{
++public:
++    Reader(const QByteArray &data) : m_data(data) {}
++
++    bool failed() const { return m_failed; }
++    int pos() const { return m_pos; }
++    void seek(int pos) { if (pos < 0 || pos > m_data.size()) fail(); else m_pos = pos; }
++    int size() const { return m_data.size(); }
++
++    bool has(int bytes) {
++        if (m_failed || bytes < 0 || m_pos + bytes > m_data.size()) {
++            fail();
++            return false;
++        }
++        return true;
++    }
++
++    quint8 u8() {
++        if (!has(1)) return 0;
++        return quint8(m_data[m_pos++]);
++    }
++    quint16 u16() {
++        if (!has(2)) return 0;
++        const quint16 v = qFromBigEndian<quint16>(m_data.constData() + m_pos);
++        m_pos += 2;
++        return v;
++    }
++    quint32 u32() {
++        if (!has(4)) return 0;
++        const quint32 v = qFromBigEndian<quint32>(m_data.constData() + m_pos);
++        m_pos += 4;
++        return v;
++    }
++    qint64 i64() {
++        if (!has(8)) return 0;
++        const qint64 v = qFromBigEndian<qint64>(m_data.constData() + m_pos);
++        m_pos += 8;
++        return v;
++    }
++    double f64() {
++        if (!has(8)) return 0.0;
++        const quint64 bits = qFromBigEndian<quint64>(m_data.constData() + m_pos);
++        m_pos += 8;
++        double v;
++        memcpy(&v, &bits, sizeof(v));
++        return v;
++    }
++    QByteArray bytes(int n) {
++        if (!has(n)) return QByteArray();
++        const QByteArray v = m_data.mid(m_pos, n);
++        m_pos += n;
++        return v;
++    }
++    QString fixed4() { return QString::fromLatin1(bytes(4)); }
++
++    /// a key / class id: a length, or 0 for a four character id
++    QString id() {
++        quint32 n = u32();
++        if (n == 0) n = 4;
++        if (n > 4096) { fail(); return QString(); }
++        return QString::fromLatin1(bytes(int(n)));
++    }
++
++    QString unicode() {
++        const quint32 n = u32();
++        if (n > (1u << 20) || !has(int(n) * 2)) { fail(); return QString(); }
++        QString s;
++        s.reserve(int(n));
++        for (quint32 i = 0; i < n; i++) {
++            s.append(QChar(u16()));
++        }
++        while (s.endsWith(QChar(0))) s.chop(1);
++        return s;
++    }
++
++    void fail() { m_failed = true; }
++
++private:
++    const QByteArray &m_data;
++    int m_pos = 0;
++    bool m_failed = false;
++};
++
++QVariant readItem(Reader &r, int depth);
++
++QVariantMap readDescriptor(Reader &r, int depth)
++{
++    QVariantMap result;
++    if (depth > 32) { r.fail(); return result; }
++
++    r.unicode(); // name
++    result.insert("_class", r.id());
++    const quint32 count = r.u32();
++    if (count > 100000) { r.fail(); return result; }
++
++    for (quint32 i = 0; i < count && !r.failed(); i++) {
++        const QString key = r.id();
++        result.insert(key, readItem(r, depth + 1));
++    }
++    return result;
++}
++
++/// skips a reference ("obj "), keeps nothing of it
++void skipReference(Reader &r)
++{
++    const quint32 count = r.u32();
++    for (quint32 i = 0; i < count && !r.failed(); i++) {
++        const QString type = r.fixed4();
++        if (type == "prop") {
++            r.unicode(); r.id(); r.id();
++        } else if (type == "Clss") {
++            r.unicode(); r.id();
++        } else if (type == "Enmr") {
++            r.unicode(); r.id(); r.id(); r.id();
++        } else if (type == "rele") {
++            r.unicode(); r.id(); r.u32();
++        } else if (type == "Idnt" || type == "indx") {
++            r.u32();
++        } else if (type == "name") {
++            r.unicode(); r.id(); r.unicode();
++        } else {
++            r.fail();
++        }
++    }
++}
++
++QVariant readItem(Reader &r, int depth)
++{
++    const QString type = r.fixed4();
++
++    if (type == "Objc" || type == "GlbO") {
++        return readDescriptor(r, depth);
++    } else if (type == "VlLs") {
++        const quint32 count = r.u32();
++        if (count > 100000) { r.fail(); return QVariant(); }
++        QVariantList list;
++        for (quint32 i = 0; i < count && !r.failed(); i++) {
++            list.append(readItem(r, depth + 1));
++        }
++        return list;
++    } else if (type == "doub") {
++        return r.f64();
++    } else if (type == "UntF") {
++        r.fixed4(); // unit: #Pxl, #Prc, #Ang, ...
++        return r.f64();
++    } else if (type == "UnFl") {
++        r.fixed4();
++        const quint32 count = r.u32();
++        if (!r.has(int(count) * 8)) return QVariant();
++        QVariantList list;
++        for (quint32 i = 0; i < count; i++) list.append(r.f64());
++        return list;
++    } else if (type == "TEXT") {
++        return r.unicode();
++    } else if (type == "enum") {
++        r.id();          // type
++        return r.id();   // value
++    } else if (type == "long") {
++        return int(qint32(r.u32()));
++    } else if (type == "comp") {
++        return r.i64();
++    } else if (type == "bool") {
++        return bool(r.u8());
++    } else if (type == "type" || type == "GlbC") {
++        r.unicode();
++        return r.id();
++    } else if (type == "tdta" || type == "alis") {
++        const quint32 n = r.u32();
++        r.bytes(int(n));
++        return QVariant();
++    } else if (type == "obj ") {
++        skipReference(r);
++        return QVariant();
++    }
++
++    // an unknown type cannot be skipped: the rest cannot be read
++    r.fail();
++    return QVariant();
++}
++
++qreal number(const QVariantMap &map, const QString &key, qreal defaultValue)
++{
++    const QVariant v = map.value(key);
++    bool ok = false;
++    const qreal result = v.toDouble(&ok);
++    return ok ? result : defaultValue;
++}
++
++bool boolean(const QVariantMap &map, const QString &key, bool defaultValue)
++{
++    return map.contains(key) ? map.value(key).toBool() : defaultValue;
++}
++
++KisAbrPresetImporter::Variation variation(const QVariantMap &brush, const QString &key)
++{
++    KisAbrPresetImporter::Variation result;
++    const QVariantMap v = brush.value(key).toMap();
++    if (v.isEmpty()) return result;
++    result.control = int(number(v, "bVTy", 0));
++    result.fadeSteps = qMax(1, int(number(v, "fStp", 25)));
++    result.jitter = qBound(0.0, number(v, "jitter", 0.0) / 100.0, 1.0);
++    return result;
++}
++
++KisAbrPresetImporter::BrushInfo brushInfo(const QVariantMap &preset)
++{
++    KisAbrPresetImporter::BrushInfo info;
++    info.name = preset.value("Nm  ").toString().trimmed();
++
++    const QVariantMap tip = preset.value("Brsh").toMap();
++    info.computed = tip.value("_class").toString() == "computedBrush";
++    info.sampleUuid = tip.value("sampledData").toString();
++    info.diameter = qMax(1.0, number(tip, "Dmtr", 25.0));
++    info.angle = number(tip, "Angl", 0.0);
++    info.roundness = qBound(0.01, number(tip, "Rndn", 100.0) / 100.0, 1.0);
++    info.hardness = qBound(0.0, number(tip, "Hrdn", 100.0) / 100.0, 1.0);
++    info.spacing = qBound(0.01, number(tip, "Spcn", 25.0) / 100.0, 10.0);
++
++    info.tipDynamics = boolean(preset, "useTipDynamics", false);
++    info.size = variation(preset, "szVr");
++    info.minimumDiameter = qBound(0.0, number(preset, "minimumDiameter", 0.0) / 100.0, 1.0);
++    info.angleVariation = variation(preset, "angleDynamics");
++
++    info.scatterOn = boolean(preset, "useScatter", false);
++    {
++        const QVariantMap v = preset.value("scatterDynamics").toMap();
++        info.scatter.control = int(number(v, "bVTy", 0));
++        info.scatter.fadeSteps = qMax(1, int(number(v, "fStp", 25)));
++        info.scatter.jitter = qBound(0.0, number(v, "jitter", 0.0) / 100.0, 10.0);
++    }
++    info.scatterBothAxes = boolean(preset, "bothAxes", false);
++
++    info.paintDynamics = boolean(preset, "usePaintDynamics", false);
++    info.opacity = variation(preset, "opVr");
++    info.flow = variation(preset, "prVr");
++    return info;
++}
++
++// ---------------------------------------------------------------------------
++// Building Krita's settings
++// ---------------------------------------------------------------------------
++
++QString curveString(qreal y0, qreal y1)
++{
++    return QString("0,%1;1,%2;").arg(qBound(0.0, y0, 1.0)).arg(qBound(0.0, y1, 1.0));
++}
++
++void resetSensors(KisCurveOptionData &data)
++{
++    for (KisSensorData *sensor : data.sensors()) {
++        sensor->isActive = false;
++    }
++    data.useCurve = true;
++    data.useSameCurve = false;
++    data.curveMode = 0; // multiply
++    data.strengthValue = 1.0;
++}
++
++/**
++ * A size-like option (size, opacity, flow): the control scales from
++ * \p minimum (no pressure, start of the fade, ...) to 1, the jitter takes
++ * up to `jitter` off at random
++ */
++void applySizeLike(KisCurveOptionData &data, const KisAbrPresetImporter::Variation &v, qreal minimum)
++{
++    resetSensors(data);
++    KisKritaSensorData &s = data.sensorStruct();
++
++    switch (v.control) {
++    case 1: // fade
++        s.sensorFade.isActive = true;
++        s.sensorFade.length = v.fadeSteps;
++        s.sensorFade.curve = curveString(1.0, minimum);
++        break;
++    case 2: // pen pressure
++        s.sensorPressure.isActive = true;
++        s.sensorPressure.curve = curveString(minimum, 1.0);
++        break;
++    case 3: // pen tilt
++        s.sensorTiltElevation.isActive = true;
++        s.sensorTiltElevation.curve = curveString(minimum, 1.0);
++        break;
++    case 4: // stylus wheel
++        s.sensorTangentialPressure.isActive = true;
++        s.sensorTangentialPressure.curve = curveString(minimum, 1.0);
++        break;
++    default:
++        break;
++    }
++
++    if (v.jitter > 0.0) {
++        s.sensorFuzzyPerDab.isActive = true;
++        s.sensorFuzzyPerDab.curve = curveString(1.0 - v.jitter, 1.0);
++    }
++}
++
++/// rotation: the control turns the tip, the jitter turns it at random by up to +-jitter * 180 degrees
++bool applyRotation(KisCurveOptionData &data, const KisAbrPresetImporter::Variation &v)
++{
++    resetSensors(data);
++    KisKritaSensorData &s = data.sensorStruct();
++    bool any = false;
++
++    switch (v.control) {
++    case 1:
++        s.sensorFade.isActive = true;
++        s.sensorFade.length = v.fadeSteps;
++        any = true;
++        break;
++    case 2:
++        s.sensorPressure.isActive = true;
++        any = true;
++        break;
++    case 3:
++        s.sensorTiltDirection.isActive = true;
++        any = true;
++        break;
++    case 4:
++        s.sensorTangentialPressure.isActive = true;
++        any = true;
++        break;
++    case 5:
++        s.sensorRotation.isActive = true;
++        any = true;
++        break;
++    case 6:
++        s.sensorDrawingAngle.isActive = true;
++        s.sensorDrawingAngle.lockedAngleMode = true;
++        any = true;
++        break;
++    case 7:
++        s.sensorDrawingAngle.isActive = true;
++        any = true;
++        break;
++    default:
++        break;
++    }
++
++    if (v.jitter > 0.0) {
++        // fuzzy is additive: curve value c gives a turn of (2c - 1) * 180 degrees
++        s.sensorFuzzyPerDab.isActive = true;
++        s.sensorFuzzyPerDab.curve = curveString(0.5 - 0.5 * v.jitter, 0.5 + 0.5 * v.jitter);
++        any = true;
++    }
++
++    data.isChecked = any;
++    return any;
++}
++
++QString brushDefinition(KisBrushSP brush)
++{
++    QDomDocument doc;
++    QDomElement element = doc.createElement("Brush");
++    brush->toXML(doc, element);
++    doc.appendChild(element);
++    return doc.toString();
++}
++
++QImage thumbnailFor(KisBrushSP brush)
++{
++    QImage thumbnail(200, 200, QImage::Format_ARGB32);
++    thumbnail.fill(Qt::white);
++
++    QImage tip = brush->image();
++    if (tip.isNull()) tip = brush->brushTipImage();
++    if (tip.isNull()) return thumbnail;
++
++    const QImage scaled = tip.scaled(170, 170, Qt::KeepAspectRatio, Qt::SmoothTransformation);
++    QPainter p(&thumbnail);
++    p.drawImage((thumbnail.width() - scaled.width()) / 2, (thumbnail.height() - scaled.height()) / 2, scaled);
++    return thumbnail;
++}
++
++/// a name for the copy in the resource folder: free, or an earlier copy of the same file
++QString storageNameFor(const QString &fileName, const QByteArray &data, bool *alreadyThere)
++{
++    const QString dir = KoResourcePaths::getAppDataLocation();
++    QString base = QFileInfo(fileName).completeBaseName();
++    if (base.isEmpty()) base = "photoshop-brushes";
++    // Krita names the tips "<base>_<index>": no '_' trouble with the base itself
++    *alreadyThere = false;
++
++    for (int i = 1; i < 1000; i++) {
++        const QString name = i == 1 ? base + ".abr" : QString("%1 (%2).abr").arg(base).arg(i);
++        QFile existing(dir + '/' + name);
++        if (!existing.exists()) return name;
++        if (existing.open(QIODevice::ReadOnly) && existing.size() == data.size() && existing.readAll() == data) {
++            *alreadyThere = true;
++            return name;
++        }
++    }
++    return QString();
++}
++
++KisBrushSP tipByName(KisResourceModel &brushes, const QString &name)
++{
++    const QVector<KoResourceSP> found = brushes.resourcesForName(name);
++    for (const KoResourceSP &resource : found) {
++        KisBrushSP brush = resource.dynamicCast<KisBrush>();
++        if (brush && brush->valid()) {
++            return brush->clone().dynamicCast<KisBrush>();
++        }
++    }
++    return KisBrushSP();
++}
++
++} // namespace
++
++KisAbrPresetImporter::ParsedFile KisAbrPresetImporter::parse(const QByteArray &data)
++{
++    ParsedFile result;
++    Reader r(data);
++
++    result.version = r.u16();
++    r.u16(); // subversion
++    if (r.failed()) {
++        result.error = i18n("The file is too short to be a Photoshop brush file.");
++        return result;
++    }
++
++    if (result.version == 1 || result.version == 2) {
++        // no settings in these old files, the tips have names of their own
++        result.ok = true;
++        return result;
++    }
++    if (result.version < 6 || result.version > 10) {
++        result.error = i18n("This version of Photoshop brush files (%1) is not supported.", result.version);
++        return result;
++    }
++
++    QByteArray samples;
++    QByteArray descriptor;
++
++    while (r.pos() + 12 <= r.size() && !r.failed()) {
++        const QString signature = r.fixed4();
++        const QString key = r.fixed4();
++        const quint32 length = r.u32();
++        if (signature != "8BIM" || !r.has(int(length))) break;
++
++        if (key == "samp") samples = r.bytes(int(length));
++        else if (key == "desc") descriptor = r.bytes(int(length));
++        else r.seek(r.pos() + int(length));
++    }
++
++    // the samples: each starts with its length and its id (a Pascal string)
++    {
++        Reader s(samples);
++        while (s.pos() + 4 < s.size() && !s.failed()) {
++            const quint32 length = s.u32();
++            const int next = s.pos() + int((length + 3) & ~3u);
++            const int idLength = s.u8();
++            result.sampleUuids.append(QString::fromLatin1(s.bytes(idLength)));
++            if (next > s.size()) break;
++            s.seek(next);
++        }
++    }
++
++    if (!descriptor.isEmpty()) {
++        Reader d(descriptor);
++        d.u32(); // descriptor version (16)
++        const QVariantMap root = readDescriptor(d, 0);
++        if (d.failed()) {
++            warnKrita << "Photoshop brushes: could not read the brush settings, importing the tips only";
++        } else {
++            const QVariantList list = root.value("Brsh").toList();
++            for (const QVariant &item : list) {
++                const QVariantMap preset = item.toMap();
++                if (preset.value("_class").toString() != "brushPreset" && !preset.contains("Brsh")) continue;
++                result.brushes.append(brushInfo(preset));
++            }
++        }
++    }
++
++    result.ok = true;
++    return result;
++}
++
++KisAbrPresetImporter::Result KisAbrPresetImporter::importData(const QString &fileName, const QByteArray &data)
++{
++    Result result;
++
++    const ParsedFile parsed = parse(data);
++    if (!parsed.ok) {
++        result.error = parsed.error;
++        return result;
++    }
++
++    // 1. the tips: the .abr becomes a storage in the resource folder
++    bool alreadyThere = false;
++    const QString storageName = storageNameFor(fileName, data, &alreadyThere);
++    if (storageName.isEmpty()) {
++        result.error = i18n("Could not find a free file name in the resource folder.");
++        return result;
++    }
++    const QString storageLocation = KoResourcePaths::getAppDataLocation() + '/' + storageName;
++
++    if (!alreadyThere || !KisResourceLocator::instance()->hasStorage(storageLocation)) {
++        KisStorageModel storageModel;
++        if (!alreadyThere && !storageModel.importStorageData(storageName, KisStorageModel::None, data)) {
++            result.error = i18n("Could not import the brush tips of %1.", fileName);
++            return result;
++        }
++        if (alreadyThere && !KisResourceLocator::instance()->hasStorage(storageLocation)) {
++            KisResourceStorageSP storage = QSharedPointer<KisResourceStorage>::create(storageLocation);
++            if (!storage->valid() || !KisResourceLocator::instance()->addStorage(storageLocation, storage)) {
++                result.error = i18n("Could not import the brush tips of %1.", fileName);
++                return result;
++            }
++        }
++    }
++
++    const QString base = QFileInfo(storageName).completeBaseName();
++    result.tagName = base;
++
++    KisResourceModel brushes(ResourceType::Brushes);
++
++    // 2. the brushes to make: from the settings, or one per tip
++    QVector<BrushInfo> infos = parsed.brushes;
++    QVector<KisBrushSP> tips;
++
++    if (infos.isEmpty()) {
++        if (!parsed.sampleUuids.isEmpty()) {
++            for (int i = 0; i < parsed.sampleUuids.size(); i++) {
++                BrushInfo info;
++                info.computed = false;
++                info.sampleUuid = parsed.sampleUuids[i];
++                info.name = i18n("%1 %2", base, i + 1);
++                infos.append(info);
++            }
++        } else {
++            // version 1 / 2: the names Krita gave the tips
++            KisAbrBrushCollection collection(storageLocation);
++            collection.load();
++            QStringList names = collection.brushesMap()->keys();
++            for (const QString &name : names) {
++                BrushInfo info;
++                info.computed = false;
++                info.name = name;
++                info.sampleUuid = QStringLiteral("name:") + name;
++                infos.append(info);
++            }
++        }
++    }
++
++    KisResourceModel presets(ResourceType::PaintOpPresets);
++    QVector<KoResourceSP> added;
++    QSet<QString> usedNames;
++    const KoID paintbrush("paintbrush");
++
++    for (int i = 0; i < infos.size(); i++) {
++        const BrushInfo &info = infos[i];
++        QString name = info.name.isEmpty() ? i18n("%1 %2", base, i + 1) : info.name;
++        if (usedNames.contains(name)) {
++            int n = 2;
++            while (usedNames.contains(QString("%1 (%2)").arg(name).arg(n))) n++;
++            name = QString("%1 (%2)").arg(name).arg(n);
++        }
++        usedNames.insert(name);
++
++        // the tip
++        KisBrushSP brush;
++        qreal ratio = 1.0; // roundness of a sampled tip (a computed one has it in its shape)
++
++        if (info.computed) {
++            KisCircleMaskGenerator *shape = new KisCircleMaskGenerator(info.diameter, info.roundness,
++                                                                       qMax(0.01, info.hardness),
++                                                                       qMax(0.01, info.hardness),
++                                                                       2, true);
++            brush = KisBrushSP(new KisAutoBrush(shape, qDegreesToRadians(info.angle), 0.0));
++        } else {
++            QString tipName;
++            if (info.sampleUuid.startsWith("name:")) {
++                tipName = info.sampleUuid.mid(5);
++            } else {
++                const int index = parsed.sampleUuids.indexOf(info.sampleUuid);
++                if (index >= 0) tipName = QString("%1_%2").arg(base).arg(index + 1);
++            }
++            brush = tipName.isEmpty() ? KisBrushSP() : tipByName(brushes, tipName);
++            if (!brush) {
++                result.skipped << name;
++                continue;
++            }
++            const QImage tip = brush->brushTipImage();
++            const int tipSize = qMax(tip.width(), tip.height());
++            if (tipSize > 0 && !parsed.brushes.isEmpty()) {
++                brush->setScale(info.diameter / tipSize);
++            }
++            brush->setAngle(qDegreesToRadians(info.angle));
++            ratio = info.roundness;
++        }
++        brush->setSpacing(info.spacing);
++        brush->setAutoSpacing(false, 1.0);
++
++        // the settings
++        KisPaintOpSettingsSP settings =
++            KisPaintOpRegistry::instance()->createSettings(paintbrush, KisGlobalResourcesInterface::instance());
++        if (!settings) {
++            result.error = i18n("The Pixel brush engine is not available.");
++            return result;
++        }
++        settings->setProperty("brush_definition", brushDefinition(brush));
++
++        KisSizeOptionData size;
++        applySizeLike(size, info.tipDynamics ? info.size : Variation(), info.minimumDiameter);
++        size.write(settings.data());
++
++        KisRotationOptionData rotation;
++        applyRotation(rotation, info.tipDynamics ? info.angleVariation : Variation());
++        rotation.write(settings.data());
++
++        KisRatioOptionData ratioOption;
++        resetSensors(ratioOption);
++        ratioOption.isChecked = ratio < 0.999;
++        ratioOption.strengthValue = ratio;
++        ratioOption.write(settings.data());
++
++        KisScatterOptionData scatter;
++        resetSensors(scatter);
++        scatter.isChecked = info.scatterOn && info.scatter.jitter > 0.0;
++        scatter.strengthValue = qMin(5.0, info.scatter.jitter);
++        scatter.axisX = info.scatterBothAxes;
++        scatter.axisY = true;
++        if (info.scatter.control == 2) {
++            scatter.sensorStruct().sensorPressure.isActive = true;
++        } else if (info.scatter.control == 1) {
++            scatter.sensorStruct().sensorFade.isActive = true;
++            scatter.sensorStruct().sensorFade.length = info.scatter.fadeSteps;
++            scatter.sensorStruct().sensorFade.curve = curveString(1.0, 0.0);
++        }
++        scatter.write(settings.data());
++
++        KisOpacityOptionData opacity;
++        applySizeLike(opacity, info.paintDynamics ? info.opacity : Variation(), 0.0);
++        opacity.write(settings.data());
++
++        KisFlowOptionData flow;
++        applySizeLike(flow, info.paintDynamics ? info.flow : Variation(), 0.0);
++        flow.write(settings.data());
++
++        // the preset
++        KisPaintOpPresetSP preset(new KisPaintOpPreset());
++        preset->setName(name);
++        preset->setPaintOp(paintbrush);
++        preset->setSettings(settings);
++        preset->setImage(thumbnailFor(brush));
++        preset->setFilename(QString(name).replace(QRegularExpression("[\\\\/:*?\"<>|]"), "_") + preset->defaultFileExtension());
++        preset->setValid(true);
++
++        if (!presets.addResourceDeduplicateFileName(preset)) {
++            result.skipped << name;
++            continue;
++        }
++        added.append(preset);
++    }
++
++    // 3. a tag named after the file
++    if (!added.isEmpty()) {
++        KisTagModel tagModel(ResourceType::PaintOpPresets);
++        KisTagSP tag = tagModel.tagForUrl(result.tagName);
++        if (!tag) {
++            tag = tagModel.addTag(result.tagName, false, added);
++        } else {
++            QVector<int> ids;
++            for (const KoResourceSP &resource : added) ids << resource->resourceId();
++            KisTagResourceModel tagResources(ResourceType::PaintOpPresets);
++            tagResources.tagResources(tag, ids);
++        }
++    }
++
++    result.presets = added.size();
++    result.ok = added.size() > 0;
++    if (!result.ok && result.error.isEmpty()) {
++        result.error = i18n("No brushes could be made from %1.", fileName);
++    }
++    return result;
++}
+diff --git a/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.h b/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.h
+new file mode 100644
+index 0000000..5d74ba1
+--- /dev/null
++++ b/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.h
+@@ -0,0 +1,93 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef KIS_ABR_PRESET_IMPORTER_H
++#define KIS_ABR_PRESET_IMPORTER_H
++
++#include <QByteArray>
++#include <QString>
++#include <QStringList>
++#include <QVector>
++
++/**
++ * Krita Nova: imports a Photoshop brush file (.abr) as ready-to-use pixel
++ * brush presets.
++ *
++ * The brush tips are imported the way Krita always did (the .abr file is
++ * copied into the resource folder and becomes a storage of brush tips). Then
++ * every brush of the file becomes a preset of the Pixel brush engine with the
++ * settings of the Photoshop brush that Krita can do: tip shape (computed round
++ * tips become auto brushes), size, angle, roundness, hardness, spacing, the
++ * size / angle jitter and their controls (pen pressure, tilt, fade, ...),
++ * scatter, and opacity / flow jitter and controls ("Transfer"). Texture, dual
++ * brush, color dynamics, count, noise and wet edges are left out.
++ *
++ * The presets get a tag named after the file.
++ */
++class KisAbrPresetImporter
++{
++public:
++    /// a Photoshop "brVr" (brush variation): a control and a jitter
++    struct Variation {
++        /// 0 off, 1 fade, 2 pen pressure, 3 pen tilt, 4 stylus wheel,
++        /// 5 rotation, 6 initial direction, 7 direction
++        int control = 0;
++        int fadeSteps = 25;
++        qreal jitter = 0.0; ///< 0..1
++    };
++
++    /// one Photoshop brush preset, as read from the "desc" section
++    struct BrushInfo {
++        QString name;
++        bool computed = true;      ///< a round tip made from settings (else a sampled tip)
++        QString sampleUuid;        ///< for a sampled tip: which sample
++        qreal diameter = 25.0;     ///< pixels
++        qreal angle = 0.0;         ///< degrees, counterclockwise
++        qreal roundness = 1.0;     ///< 0..1
++        qreal hardness = 1.0;      ///< 0..1 (computed tips)
++        qreal spacing = 0.25;      ///< of the diameter
++
++        bool tipDynamics = false;
++        Variation size;
++        qreal minimumDiameter = 0.0; ///< 0..1
++        Variation angleVariation;
++
++        bool scatterOn = false;
++        Variation scatter;         ///< jitter: 0..10 (1000 %)
++        bool scatterBothAxes = false;
++
++        bool paintDynamics = false;
++        Variation opacity;
++        Variation flow;
++    };
++
++    struct ParsedFile {
++        bool ok = false;
++        QString error;
++        int version = 0;
++        QStringList sampleUuids;   ///< in file order (Krita names tip i "<file>_<i+1>")
++        QVector<BrushInfo> brushes; ///< empty: the file has no brush settings
++    };
++
++    struct Result {
++        bool ok = false;
++        QString error;
++        QString tagName;
++        int presets = 0;
++        QStringList skipped;       ///< brushes that could not be made
++    };
++
++    /// reads the samples' ids and the brush settings of an .abr file
++    static ParsedFile parse(const QByteArray &data);
++
++    /**
++     * Imports \p data (the contents of the .abr file called \p fileName).
++     * Must be called from the GUI thread.
++     */
++    static Result importData(const QString &fileName, const QByteArray &data);
++};
++
++#endif // KIS_ABR_PRESET_IMPORTER_H
+diff --git a/plugins/extensions/photoshopbrushes/PhotoshopBrushes.cpp b/plugins/extensions/photoshopbrushes/PhotoshopBrushes.cpp
+new file mode 100644
+index 0000000..0191b27
+--- /dev/null
++++ b/plugins/extensions/photoshopbrushes/PhotoshopBrushes.cpp
+@@ -0,0 +1,118 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "PhotoshopBrushes.h"
++
++#include <QFile>
++#include <QFileInfo>
++#include <QMessageBox>
++#include <QStandardPaths>
++#include <QUrl>
++
++#include <klocalizedstring.h>
++#include <kpluginfactory.h>
++
++#include <KisViewManager.h>
++#include <KoFileDialog.h>
++#include <kis_action.h>
++#include <KisCursorOverrideLock.h>
++
++#include "KisAbrPresetImporter.h"
++
++K_PLUGIN_FACTORY_WITH_JSON(PhotoshopBrushesFactory, "kritaphotoshopbrushes.json", registerPlugin<PhotoshopBrushes>();)
++
++namespace {
++
++/// the name of the picked file; on Android a content:// URI, the name is its last part
++QString displayFileName(const QString &location)
++{
++    QString name = QFileInfo(location).fileName();
++    if (location.startsWith("content://")) {
++        name = QUrl::fromPercentEncoding(location.toUtf8());
++        name = name.section('/', -1).section(':', -1);
++    }
++    if (!name.endsWith(".abr", Qt::CaseInsensitive)) {
++        name += ".abr";
++    }
++    return name;
++}
++
++} // namespace
++
++PhotoshopBrushes::PhotoshopBrushes(QObject *parent, const QVariantList &)
++    : KisActionPlugin(parent)
++{
++    KisAction *action = createAction("import_photoshop_brushes");
++    connect(action, SIGNAL(triggered()), this, SLOT(slotImport()));
++}
++
++PhotoshopBrushes::~PhotoshopBrushes()
++{
++}
++
++void PhotoshopBrushes::slotImport()
++{
++    QWidget *parent = viewManager()->mainWindowAsQWidget();
++
++    KoFileDialog dialog(parent, KoFileDialog::OpenFiles, "ImportPhotoshopBrushes");
++    dialog.setCaption(i18n("Import Photoshop Brushes"));
++    dialog.setDefaultDir(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation));
++    dialog.setMimeTypeFilters({"image/x-adobe-brushlibrary"});
++
++    const QStringList files = dialog.filenames();
++    if (files.isEmpty()) return;
++
++    QStringList done;
++    QStringList problems;
++
++    for (const QString &location : files) {
++        if (location.isEmpty()) continue;
++        const QString name = displayFileName(location);
++
++        QFile file(location);
++        if (!file.open(QIODevice::ReadOnly)) {
++            problems << i18n("%1: could not open the file.", name);
++            continue;
++        }
++        const QByteArray data = file.readAll();
++        file.close();
++
++        KisAbrPresetImporter::Result result;
++        {
++            KisCursorOverrideLock cursorLock(Qt::BusyCursor);
++            result = KisAbrPresetImporter::importData(name, data);
++        }
++
++        if (result.ok) {
++            done << i18np("%2: 1 brush (tag \"%3\")", "%2: %1 brushes (tag \"%3\")",
++                          result.presets, name, result.tagName);
++        } else {
++            problems << QString("%1: %2").arg(name, result.error);
++        }
++        if (!result.skipped.isEmpty()) {
++            problems << i18n("%1: could not make %2", name, result.skipped.join(", "));
++        }
++    }
++
++    QString message;
++    if (!done.isEmpty()) {
++        message += i18n("Imported:") + "\n" + done.join("\n");
++        message += "\n\n" + i18n("Photoshop's texture, dual brush, color dynamics, count, noise and wet edges "
++                                 "are not part of the imported brushes.");
++    }
++    if (!problems.isEmpty()) {
++        if (!message.isEmpty()) message += "\n\n";
++        message += i18n("Problems:") + "\n" + problems.join("\n");
++    }
++
++    if (problems.isEmpty()) {
++        QMessageBox::information(parent, i18nc("@title:window", "Import Photoshop Brushes"), message);
++    } else {
++        QMessageBox::warning(parent, i18nc("@title:window", "Import Photoshop Brushes"), message);
++    }
++}
++
++#include "PhotoshopBrushes.moc"
+diff --git a/plugins/extensions/photoshopbrushes/PhotoshopBrushes.h b/plugins/extensions/photoshopbrushes/PhotoshopBrushes.h
+new file mode 100644
+index 0000000..79cb04f
+--- /dev/null
++++ b/plugins/extensions/photoshopbrushes/PhotoshopBrushes.h
+@@ -0,0 +1,28 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef PHOTOSHOP_BRUSHES_H
++#define PHOTOSHOP_BRUSHES_H
++
++#include <QVariant>
++#include <KisActionPlugin.h>
++
++/**
++ * Krita Nova: the "import_photoshop_brushes" action (the Import Photoshop
++ * Brushes button of the brush presets): imports .abr files as presets
++ */
++class PhotoshopBrushes : public KisActionPlugin
++{
++    Q_OBJECT
++public:
++    PhotoshopBrushes(QObject *parent, const QVariantList &);
++    ~PhotoshopBrushes() override;
++
++private Q_SLOTS:
++    void slotImport();
++};
++
++#endif // PHOTOSHOP_BRUSHES_H
+diff --git a/plugins/extensions/photoshopbrushes/kritaphotoshopbrushes.json b/plugins/extensions/photoshopbrushes/kritaphotoshopbrushes.json
+new file mode 100644
+index 0000000..2aa4327
+--- /dev/null
++++ b/plugins/extensions/photoshopbrushes/kritaphotoshopbrushes.json
+@@ -0,0 +1,9 @@
++{
++    "Id": "Photoshop Brushes Import Plugin",
++    "Type": "Service",
++    "X-KDE-Library": "kritaphotoshopbrushes",
++    "X-KDE-ServiceTypes": [
++        "Krita/ViewPlugin"
++    ],
++    "X-Krita-Version": "28"
++}
+diff --git a/plugins/extensions/photoshopbrushes/photoshopbrushes.action b/plugins/extensions/photoshopbrushes/photoshopbrushes.action
+new file mode 100644
+index 0000000..8cf713e
+--- /dev/null
++++ b/plugins/extensions/photoshopbrushes/photoshopbrushes.action
+@@ -0,0 +1,18 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<ActionCollection version="2" name="Krita">
++  <Actions category="Settings">
++    <text>Settings</text>
++    <Action name="import_photoshop_brushes">
++      <icon>document-import-16</icon>
++      <text>Import &amp;Photoshop Brushes...</text>
++      <whatsThis>Imports a Photoshop brush file (.abr) as ready-to-use brushes with their settings</whatsThis>
++      <toolTip>Import Photoshop brushes (.abr) as ready-to-use brushes</toolTip>
++      <iconText>Import Photoshop Brushes</iconText>
++      <activationFlags>0</activationFlags>
++      <activationConditions>0</activationConditions>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip></statusTip>
++    </Action>
++  </Actions>
++</ActionCollection>

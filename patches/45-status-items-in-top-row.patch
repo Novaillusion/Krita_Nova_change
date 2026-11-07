@@ -1,0 +1,74 @@
+Krita Nova 45 - image size, rotation and zoom in the top bar, for good (Android)
+
+Patch 33 put the "KritaNovaStatusItems" widget (image size / memory, canvas
+rotation, zoom) into the top bar's toolbar (mainToolBar) as a toolbar widget.
+KXMLGUI manages that toolbar's actions and could drop it again; the info was
+then gone from the UI for the rest of the session (it was also looked up with
+findChild(), which no longer finds a widget that lost its parent).
+
+ensureStatusItemsInTopBar() now gets the widget from KisStatusBar
+(topBarItemsWidget(), public now; it creates it if the status bar has not yet)
+and puts it into the top bar row itself, next to the toolbar (the toolbar
+stretches, so the info sits at the right end of the row). It still runs
+whenever the Brush Panel is placed, and waits until the toolbar is in the top
+bar row.
+diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
+index c4124ad..04e1a36 100644
+--- a/libs/ui/KisMainWindow.cpp
++++ b/libs/ui/KisMainWindow.cpp
+@@ -544,14 +544,31 @@ private:
+ void ensureStatusItemsInTopBar(QMainWindow *mainWindow)
+ {
+     if (!mainWindow) return;
+-    QWidget *statusItems = mainWindow->findChild<QWidget *>(QStringLiteral("KritaNovaStatusItems"));
++
++    // from the status bar itself: if it ever lost its parent, findChild()
++    // would not find it any more
++    QWidget *statusItems = nullptr;
++    KisMainWindow *kisMainWindow = qobject_cast<KisMainWindow *>(mainWindow);
++    if (kisMainWindow && kisMainWindow->viewManager() && kisMainWindow->viewManager()->statusBar()) {
++        statusItems = kisMainWindow->viewManager()->statusBar()->topBarItemsWidget();
++    }
++    if (!statusItems) {
++        statusItems = mainWindow->findChild<QWidget *>(QStringLiteral("KritaNovaStatusItems"));
++    }
+     KisToolBar *topBar = mainWindow->findChild<KisToolBar *>(QStringLiteral("mainToolBar"));
+     if (!statusItems || !topBar) return;
+-    if (statusItems->parentWidget() != topBar) {
+-        QWidget *spacer = new QWidget(topBar);
+-        spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+-        topBar->addWidget(spacer);
+-        topBar->addWidget(statusItems);
++
++    // Patch 33 fix: next to the top bar's toolbar, in the top bar row itself -
++    // not inside the toolbar: KXMLGUI manages the toolbar's actions and could
++    // drop a widget added there (the info then vanished for good). The
++    // toolbar stretches, so this ends up at the right end of the row.
++    QWidget *row = topBar->parentWidget();
++    QBoxLayout *layout = row && row != mainWindow ? qobject_cast<QBoxLayout *>(row->layout()) : nullptr;
++    if (!layout) return; // the toolbar is not in the top bar row yet, tried again later
++
++    if (statusItems->parentWidget() != row || layout->indexOf(statusItems) < 0) {
++        statusItems->setParent(row);
++        layout->addWidget(statusItems, 0, Qt::AlignVCenter);
+     }
+     if (!statusItems->isVisible()) statusItems->show();
+ }
+diff --git a/libs/ui/kis_statusbar.h b/libs/ui/kis_statusbar.h
+index ce972c4..2f40794 100644
+--- a/libs/ui/kis_statusbar.h
++++ b/libs/ui/kis_statusbar.h
+@@ -117,8 +117,12 @@ private:
+ 
+     // Krita Nova (Android): image size, rotation and zoom live in the top bar
+     QPointer<QWidget> m_topBarItems;
+-    QWidget *topBarItemsWidget();
+     bool isTopBarItem(QWidget *widget) const;
++public:
++    /// Krita Nova (Android): the widget holding image size, rotation and zoom
++    /// (KisMainWindow puts it at the right end of the top bar)
++    QWidget *topBarItemsWidget();
++private:
+ 
+     KSqueezedTextLabel *m_statusBarStatusLabel {nullptr};
+     KSqueezedTextLabel *m_statusBarProfileLabel {nullptr};

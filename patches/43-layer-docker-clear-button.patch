@@ -1,0 +1,81 @@
+Krita Nova 43 - Clear button in the Layers docker
+
+The Layers docker gets a "Clear" button right after "Duplicate", with the
+eraser icon (draw-eraser). It triggers Edit > Clear ("clear"): clears the
+active layer, or only the selected area when there is a selection; it is
+enabled and disabled together with that action.
+
+LayerBox.cpp / WdgLayerBox.ui: bnClear.
+diff --git a/plugins/dockers/layerdocker/LayerBox.cpp b/plugins/dockers/layerdocker/LayerBox.cpp
+index 0d4c566..ccb93d3 100644
+--- a/plugins/dockers/layerdocker/LayerBox.cpp
++++ b/plugins/dockers/layerdocker/LayerBox.cpp
+@@ -199,6 +199,7 @@ LayerBox::LayerBox()
+     m_wdgLayerBox->bnLower->setIconSize(QSize(22, 22));
+     m_wdgLayerBox->bnProperties->setIconSize(QSize(22, 22));
+     m_wdgLayerBox->bnDuplicate->setIconSize(QSize(22, 22));
++    m_wdgLayerBox->bnClear->setIconSize(QSize(22, 22));
+ 
+     m_wdgLayerBox->bnLower->setEnabled(false);
+     m_wdgLayerBox->bnRaise->setEnabled(false);
+@@ -500,6 +501,8 @@ void LayerBox::setViewManager(KisViewManager* kisview)
+     connect(m_wdgLayerBox->bnAdd, SIGNAL(clicked()), this, SLOT(slotAddLayerBnClicked()));
+ 
+     connectActionToButton(kisview, m_wdgLayerBox->bnDuplicate, "duplicatelayer");
++    // Krita Nova: clears the layer, or the selected area (Edit > Clear)
++    connectActionToButton(kisview, m_wdgLayerBox->bnClear, "clear");
+ 
+     KisActionManager *actionManager = kisview->actionManager();
+ 
+@@ -1308,6 +1311,7 @@ void LayerBox::slotUpdateIcons() {
+     m_wdgLayerBox->bnLower->setIcon(KisIconUtils::loadIcon("arrowdown"));
+     m_wdgLayerBox->bnProperties->setIcon(KisIconUtils::loadIcon("properties"));
+     m_wdgLayerBox->bnDuplicate->setIcon(KisIconUtils::loadIcon("duplicatelayer"));
++    m_wdgLayerBox->bnClear->setIcon(KisIconUtils::loadIcon("draw-eraser"));
+     m_wdgLayerBox->configureLayerDockerToolbar->setIcon(KisIconUtils::loadIcon("view-choose"));
+ 
+     // call child function about needing to update icons
+diff --git a/plugins/dockers/layerdocker/WdgLayerBox.ui b/plugins/dockers/layerdocker/WdgLayerBox.ui
+index 3e1d256..6e33737 100644
+--- a/plugins/dockers/layerdocker/WdgLayerBox.ui
++++ b/plugins/dockers/layerdocker/WdgLayerBox.ui
+@@ -229,6 +229,31 @@
+        </property>
+       </widget>
+      </item>
++     <item>
++      <widget class="QToolButton" name="bnClear">
++       <property name="minimumSize">
++        <size>
++         <width>28</width>
++         <height>28</height>
++        </size>
++       </property>
++       <property name="toolTip">
++        <string>Clear the layer (only the selected area when there is a selection)</string>
++       </property>
++       <property name="text">
++        <string>...</string>
++       </property>
++       <property name="iconSize">
++        <size>
++         <width>22</width>
++         <height>22</height>
++        </size>
++       </property>
++       <property name="autoRaise">
++        <bool>true</bool>
++       </property>
++      </widget>
++     </item>
+      <item>
+       <widget class="QToolButton" name="bnLower">
+        <property name="minimumSize">
+@@ -385,6 +410,7 @@
+  <tabstops>
+   <tabstop>cmbComposite</tabstop>
+   <tabstop>bnDuplicate</tabstop>
++  <tabstop>bnClear</tabstop>
+   <tabstop>bnLower</tabstop>
+   <tabstop>bnRaise</tabstop>
+   <tabstop>bnProperties</tabstop>

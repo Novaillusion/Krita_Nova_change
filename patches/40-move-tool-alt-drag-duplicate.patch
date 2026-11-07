@@ -9,9 +9,9 @@ the original where it was:
 - Otherwise the layers the Move tool would move (the selected layers, the
   layer under the cursor or its group, depending on the tool's mode) are
   duplicated - each copy right above its original, named "<name> copy" - the
-  copies become the selected layers (as soon as the document has them) and
-  the drag moves them. Duplicating
-  ("Duplicate") and moving are two undo steps.
+  drag moves the copies (they are added without being activated: activating
+  a layer ends the move) and they become the selected layers when the drag is
+  released. Duplicating ("Duplicate") and moving are two undo steps.
 - While Alt+dragging, Alt does not slow the movement down (Krita's precision
   mode for Alt stays for normal drags).
 - In input profiles where Alt+click is a canvas shortcut (Photoshop
