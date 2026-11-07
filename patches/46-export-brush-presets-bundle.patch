@@ -1,0 +1,471 @@
+Krita Nova 46 - export brush presets as a bundle
+
+The brush presets (the presets popup of the brush panel / toolbar, the Brush
+Presets docker and the brush editor's preset list) get an "Export Brushes..."
+button next to "Import Brushes...". It saves the presets the list
+shows - the chosen category (and search) - as a Krita resource bundle
+(.bundle):
+
+- with everything they use: brush tips, patterns, gradients, ... (their
+  linked resources, and what those use);
+- the presets keep their category: the bundle tags them with it, so loading
+  the bundle (Settings > Manage Resource Libraries > Import) brings the
+  category back; "All" exports every preset;
+- the bundle is named after the category, with a thumbnail made of the first
+  nine presets;
+- written to a temporary file and copied to the chosen place, which can be a
+  content:// URI on Android.
+
+Photoshop brush plugin: the "export_brush_presets" action and
+KisPresetBundleExporter (KoResourceBundle). KisPresetChooser: Import and
+Export side by side; the chooser whose button was pressed is passed to the
+action.
+diff --git a/libs/ui/widgets/kis_preset_chooser.cpp b/libs/ui/widgets/kis_preset_chooser.cpp
+index d03da39..867aaf6 100644
+--- a/libs/ui/widgets/kis_preset_chooser.cpp
++++ b/libs/ui/widgets/kis_preset_chooser.cpp
+@@ -31,6 +31,7 @@
+ #include <KisTagFilterResourceProxyModel.h>
+ #include <QEvent>
+ #include <QPushButton>
++#include <QHBoxLayout>
+ #include <KisPart.h>
+ #include <KisMainWindow.h>
+ #include <KisViewManager.h>
+@@ -239,20 +240,35 @@ KisPresetChooser::KisPresetChooser(QWidget *parent)
+     layout->addWidget(m_chooser);
+ 
+     // Krita Nova: Photoshop brushes (.abr) become ready-to-use presets
+-    // (the "import_photoshop_brushes" action of the photoshopbrushes plugin)
+-    QPushButton *importPhotoshop = new QPushButton(KisIconUtils::loadIcon("document-import-16"),
+-                                                   i18n("Import Photoshop Brushes..."), this);
+-    importPhotoshop->setObjectName("importPhotoshopBrushes");
+-    importPhotoshop->setToolTip(i18n("Import a Photoshop brush file (.abr): each brush becomes a ready-to-use brush with its settings"));
+-    connect(importPhotoshop, &QPushButton::clicked, this, []() {
++    // ("import_photoshop_brushes"), the shown presets can be saved as a bundle
++    // ("export_brush_presets"); both are actions of the photoshopbrushes plugin
++    auto triggerAction = [this](const char *name) {
+         KisMainWindow *mainWindow = KisPart::instance()->currentMainwindow();
+         KisViewManager *viewManager = mainWindow ? mainWindow->viewManager() : nullptr;
+-        KisAction *action = viewManager ? viewManager->actionManager()->actionByName("import_photoshop_brushes") : nullptr;
++        KisAction *action = viewManager ? viewManager->actionManager()->actionByName(name) : nullptr;
+         if (action) {
++            action->setProperty("_kritanova_chooser", QVariant::fromValue<QObject *>(this));
+             action->trigger();
+         }
+-    });
+-    layout->addWidget(importPhotoshop);
++    };
++
++    QPushButton *importPhotoshop = new QPushButton(KisIconUtils::loadIcon("document-import-16"),
++                                                   i18n("Import Brushes..."), this);
++    importPhotoshop->setObjectName("importPhotoshopBrushes");
++    importPhotoshop->setToolTip(i18n("Import a Photoshop brush file (.abr): each brush becomes a ready-to-use brush with its settings"));
++    connect(importPhotoshop, &QPushButton::clicked, this, [triggerAction]() { triggerAction("import_photoshop_brushes"); });
++
++    QPushButton *exportPresets = new QPushButton(KisIconUtils::loadIcon("document-export-16"),
++                                                 i18n("Export Brushes..."), this);
++    exportPresets->setObjectName("exportBrushPresets");
++    exportPresets->setToolTip(i18n("Save the brush presets of the shown category as a bundle, with their brush tips"));
++    connect(exportPresets, &QPushButton::clicked, this, [triggerAction]() { triggerAction("export_brush_presets"); });
++
++    QHBoxLayout *buttonRow = new QHBoxLayout();
++    buttonRow->setContentsMargins(0, 0, 0, 0);
++    buttonRow->addWidget(importPhotoshop, 1);
++    buttonRow->addWidget(exportPresets, 1);
++    layout->addLayout(buttonRow);
+ 
+     connect(m_chooser, SIGNAL(resourceSelected(KoResourceSP )),
+             this, SLOT(slotResourceWasSelected(KoResourceSP )));
+diff --git a/plugins/extensions/photoshopbrushes/CMakeLists.txt b/plugins/extensions/photoshopbrushes/CMakeLists.txt
+index ebf9bcc..6130d17 100644
+--- a/plugins/extensions/photoshopbrushes/CMakeLists.txt
++++ b/plugins/extensions/photoshopbrushes/CMakeLists.txt
+@@ -1,6 +1,7 @@
+ set(kritaphotoshopbrushes_SOURCES
+     PhotoshopBrushes.cpp
+     KisAbrPresetImporter.cpp
++    KisPresetBundleExporter.cpp
+ )
+ 
+ kis_add_library(kritaphotoshopbrushes MODULE ${kritaphotoshopbrushes_SOURCES})
+diff --git a/plugins/extensions/photoshopbrushes/KisPresetBundleExporter.cpp b/plugins/extensions/photoshopbrushes/KisPresetBundleExporter.cpp
+new file mode 100644
+index 0000000..bfc78df
+--- /dev/null
++++ b/plugins/extensions/photoshopbrushes/KisPresetBundleExporter.cpp
+@@ -0,0 +1,145 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "KisPresetBundleExporter.h"
++
++#include <QFileInfo>
++#include <QHash>
++#include <QImage>
++#include <QPainter>
++#include <QRegularExpression>
++#include <QSet>
++
++#include <klocalizedstring.h>
++#include <kis_debug.h>
++
++#include <KoResourceBundle.h>
++#include <KoResourceLoadResult.h>
++#include <KisResourceStorage.h>
++#include <KisResourceTypes.h>
++#include <KisGlobalResourcesInterface.h>
++
++namespace {
++
++/// a 3x3 grid of the first presets' thumbnails
++QImage bundleThumbnail(const QVector<KoResourceSP> &presets)
++{
++    QImage thumbnail(256, 256, QImage::Format_ARGB32);
++    thumbnail.fill(Qt::white);
++    QPainter p(&thumbnail);
++    const int cell = 256 / 3;
++    for (int i = 0; i < presets.size() && i < 9; i++) {
++        const QImage image = presets[i]->image();
++        if (image.isNull()) continue;
++        const QImage scaled = image.scaled(cell - 4, cell - 4, Qt::KeepAspectRatio, Qt::SmoothTransformation);
++        const int x = (i % 3) * cell + (cell - scaled.width()) / 2;
++        const int y = (i / 3) * cell + (cell - scaled.height()) / 2;
++        p.drawImage(x, y, scaled);
++    }
++    return thumbnail;
++}
++
++QString safeName(const QString &name)
++{
++    QString result = name.trimmed();
++    result.replace(QRegularExpression("[\\\\/:*?\"<>|]"), "_");
++    return result.isEmpty() ? QStringLiteral("preset") : result;
++}
++
++} // namespace
++
++KisPresetBundleExporter::Result KisPresetBundleExporter::exportBundle(const QVector<KoResourceSP> &presets,
++                                                                       const QString &title,
++                                                                       KisTagSP tag,
++                                                                       const QString &fileName)
++{
++    Result result;
++    if (presets.isEmpty()) {
++        result.error = i18n("There are no brush presets to export.");
++        return result;
++    }
++
++    KoResourceBundle bundle(fileName);
++    bundle.setMetaData(KisResourceStorage::s_meta_title, title);
++    bundle.setMetaData(KisResourceStorage::s_meta_description,
++                       i18np("1 brush preset exported from Nova Krita", "%1 brush presets exported from Nova Krita",
++                             presets.size()));
++    bundle.setMetaData(KisResourceStorage::s_meta_creator, QStringLiteral("Nova Krita"));
++    bundle.setMetaData(KisResourceStorage::s_meta_initial_creator, QStringLiteral("Nova Krita"));
++    bundle.setThumbnail(bundleThumbnail(presets));
++
++    QVector<KisTagSP> presetTags;
++    if (tag && tag->id() >= 0) {
++        presetTags << tag;
++    }
++
++    // file names in the bundle, per resource type
++    QHash<QString, QSet<QString>> usedNames;
++    QSet<int> addedIds;
++
++    // the presets, then what they use (and what that uses)
++    QList<KoResourceSP> queue;
++    Q_FOREACH (const KoResourceSP &preset, presets) queue << preset;
++    const int presetCount = queue.size();
++    int index = 0;
++
++    while (!queue.isEmpty()) {
++        const KoResourceSP resource = queue.takeFirst();
++        const bool isPreset = index++ < presetCount;
++        if (!resource || !resource->valid() || resource->resourceId() < 0) {
++            if (resource && isPreset) result.skipped << resource->name();
++            continue;
++        }
++        if (addedIds.contains(resource->resourceId())) continue;
++
++        const QString type = resource->resourceType().first;
++        QString nameInBundle;
++
++        if (isPreset) {
++            // presets: named after the preset (like Krita's bundle creator does)
++            const QString suffix = QFileInfo(resource->filename()).suffix();
++            const QString stem = safeName(resource->name());
++            nameInBundle = stem + "." + (suffix.isEmpty() ? QStringLiteral("kpp") : suffix);
++            for (int n = 2; usedNames[type].contains(nameInBundle); n++) {
++                nameInBundle = QString("%1 (%2).%3").arg(stem).arg(n).arg(suffix.isEmpty() ? QStringLiteral("kpp") : suffix);
++            }
++        } else {
++            // tips, patterns, ...: their own file name, presets find them by it
++            nameInBundle = resource->filename();
++            if (usedNames[type].contains(nameInBundle)) {
++                warnKrita << "Brush export: two" << type << "resources are called" << nameInBundle << "- only the first goes into the bundle";
++                continue;
++            }
++        }
++
++        usedNames[type].insert(nameInBundle);
++        addedIds.insert(resource->resourceId());
++        bundle.addResource(type, resource->filename(), isPreset ? presetTags : QVector<KisTagSP>(),
++                           resource->md5Sum(), resource->resourceId(), nameInBundle);
++        if (isPreset) result.presets++;
++        else result.otherResources++;
++
++        Q_FOREACH (const KoResourceLoadResult &linked, resource->linkedResources(KisGlobalResourcesInterface::instance())) {
++            const KoResourceSP linkedResource = linked.resource();
++            if (linkedResource && !addedIds.contains(linkedResource->resourceId())) {
++                queue << linkedResource;
++            }
++        }
++    }
++
++    if (result.presets == 0) {
++        result.error = i18n("None of the brush presets could be exported.");
++        return result;
++    }
++
++    if (!bundle.save()) {
++        result.error = i18n("Could not write the bundle.");
++        return result;
++    }
++
++    result.ok = true;
++    return result;
++}
+diff --git a/plugins/extensions/photoshopbrushes/KisPresetBundleExporter.h b/plugins/extensions/photoshopbrushes/KisPresetBundleExporter.h
+new file mode 100644
+index 0000000..0f366a6
+--- /dev/null
++++ b/plugins/extensions/photoshopbrushes/KisPresetBundleExporter.h
+@@ -0,0 +1,43 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef KIS_PRESET_BUNDLE_EXPORTER_H
++#define KIS_PRESET_BUNDLE_EXPORTER_H
++
++#include <QString>
++#include <QStringList>
++#include <QVector>
++
++#include <KoResource.h>
++#include <KisTag.h>
++
++/**
++ * Krita Nova: saves brush presets as a Krita resource bundle (.bundle), with
++ * everything they use (brush tips, patterns, gradients, ...), so they can be
++ * loaded into any Krita 5+ with Settings > Manage Resource Libraries > Import.
++ * The presets keep the category (tag) they were exported from.
++ */
++class KisPresetBundleExporter
++{
++public:
++    struct Result {
++        bool ok = false;
++        QString error;
++        int presets = 0;
++        int otherResources = 0;
++        QStringList skipped;
++    };
++
++    /**
++     * \p presets: the presets; \p title: the bundle's name; \p tag: the
++     * category to give the presets in the bundle (may be null);
++     * \p fileName: where to write it (a local file)
++     */
++    static Result exportBundle(const QVector<KoResourceSP> &presets, const QString &title,
++                               KisTagSP tag, const QString &fileName);
++};
++
++#endif // KIS_PRESET_BUNDLE_EXPORTER_H
+diff --git a/plugins/extensions/photoshopbrushes/PhotoshopBrushes.cpp b/plugins/extensions/photoshopbrushes/PhotoshopBrushes.cpp
+index 1c81d1c..8c35207 100644
+--- a/plugins/extensions/photoshopbrushes/PhotoshopBrushes.cpp
++++ b/plugins/extensions/photoshopbrushes/PhotoshopBrushes.cpp
+@@ -24,7 +24,15 @@
+ #include <KisTagChooserWidget.h>
+ #include <kis_preset_chooser.h>
+ 
++#include <QDir>
++#include <QRegularExpression>
++#include <QTemporaryDir>
++#include <KisResourceItemChooser.h>
++#include <KisTagFilterResourceProxyModel.h>
++#include <KisResourceModel.h>
++
+ #include "KisAbrPresetImporter.h"
++#include "KisPresetBundleExporter.h"
+ 
+ K_PLUGIN_FACTORY_WITH_JSON(PhotoshopBrushesFactory, "kritaphotoshopbrushes.json", registerPlugin<PhotoshopBrushes>();)
+ 
+@@ -51,6 +59,9 @@ PhotoshopBrushes::PhotoshopBrushes(QObject *parent, const QVariantList &)
+ {
+     KisAction *action = createAction("import_photoshop_brushes");
+     connect(action, SIGNAL(triggered()), this, SLOT(slotImport()));
++
++    m_exportAction = createAction("export_brush_presets");
++    connect(m_exportAction, SIGNAL(triggered()), this, SLOT(slotExport()));
+ }
+ 
+ PhotoshopBrushes::~PhotoshopBrushes()
+@@ -132,4 +143,101 @@ void PhotoshopBrushes::slotImport()
+     }
+ }
+ 
++void PhotoshopBrushes::slotExport()
++{
++    QWidget *parent = viewManager()->mainWindowAsQWidget();
++    const QString caption = i18nc("@title:window", "Export Brush Presets");
++
++    // the preset chooser whose button was pressed (else a visible one)
++    KisPresetChooser *chooser = qobject_cast<KisPresetChooser *>(m_exportAction->property("_kritanova_chooser").value<QObject *>());
++    m_exportAction->setProperty("_kritanova_chooser", QVariant());
++    if (!chooser) {
++        Q_FOREACH (QWidget *widget, QApplication::allWidgets()) {
++            KisPresetChooser *candidate = qobject_cast<KisPresetChooser *>(widget);
++            if (candidate && candidate->isVisible()) {
++                chooser = candidate;
++                break;
++            }
++        }
++    }
++    if (!chooser || !chooser->itemChooser() || !chooser->itemChooser()->tagFilterModel()) {
++        QMessageBox::warning(parent, caption, i18n("Open the brush presets to choose which brushes to export."));
++        return;
++    }
++
++    // what the chooser shows: the chosen category (and search)
++    KisTagFilterResourceProxyModel *model = chooser->itemChooser()->tagFilterModel();
++    QVector<KoResourceSP> presets;
++    for (int row = 0; row < model->rowCount(); row++) {
++        KoResourceSP resource = model->resourceForIndex(model->index(row, 0));
++        if (resource) presets << resource;
++    }
++
++    KisTagSP tag;
++    QString title;
++    if (KisTagChooserWidget *tags = chooser->findChild<KisTagChooserWidget *>()) {
++        tag = tags->currentlySelectedTag();
++        if (tag) title = tag->name();
++    }
++    if (title.isEmpty()) title = i18n("Brushes");
++
++    if (presets.isEmpty()) {
++        QMessageBox::warning(parent, caption, i18n("The category \"%1\" has no brush presets.", title));
++        return;
++    }
++
++    KoFileDialog dialog(parent, KoFileDialog::SaveFile, "ExportBrushPresets");
++    dialog.setCaption(caption);
++    dialog.setDefaultDir(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) + "/" +
++                         QString(title).replace(QRegularExpression("[\\\\/:*?\"<>|]"), "_") + ".bundle");
++    dialog.setMimeTypeFilters({"application/x-krita-bundle"});
++    QString location = dialog.filename();
++    if (location.isEmpty()) return;
++    if (!location.startsWith("content://") && !location.endsWith(".bundle", Qt::CaseInsensitive)) {
++        location += ".bundle";
++    }
++
++    // written to a temporary file first: the destination can be a content://
++    // URI (Android), which the bundle writer cannot open itself
++    QTemporaryDir tempDir;
++    const QString tempFile = tempDir.path() + "/export.bundle";
++
++    KisPresetBundleExporter::Result result;
++    {
++        KisCursorOverrideLock cursorLock(Qt::BusyCursor);
++        result = tempDir.isValid() ? KisPresetBundleExporter::exportBundle(presets, title, tag, tempFile)
++                                   : KisPresetBundleExporter::Result();
++    }
++    if (!tempDir.isValid()) {
++        result.error = i18n("Could not make a temporary file.");
++    }
++
++    if (result.ok) {
++        QFile source(tempFile);
++        QFile target(location);
++        if (!source.open(QIODevice::ReadOnly) || !target.open(QIODevice::WriteOnly | QIODevice::Truncate)
++                || target.write(source.readAll()) != source.size()) {
++            result.ok = false;
++            result.error = i18n("Could not write %1.", location);
++        }
++    }
++
++    if (!result.ok) {
++        QMessageBox::warning(parent, caption, result.error);
++        return;
++    }
++
++    QString message = i18np("Exported 1 brush preset", "Exported %1 brush presets", result.presets);
++    if (result.otherResources > 0) {
++        message += " " + i18np("and 1 brush tip or other resource it uses", "and %1 brush tips and other resources they use",
++                               result.otherResources);
++    }
++    message += ".\n\n" + i18n("Load the bundle into Krita with Settings > Manage Resource Libraries > Import. "
++                                "The brushes then appear in the category \"%1\".", title);
++    if (!result.skipped.isEmpty()) {
++        message += "\n\n" + i18n("Not exported: %1", result.skipped.join(", "));
++    }
++    QMessageBox::information(parent, caption, message);
++}
++
+ #include "PhotoshopBrushes.moc"
+diff --git a/plugins/extensions/photoshopbrushes/PhotoshopBrushes.h b/plugins/extensions/photoshopbrushes/PhotoshopBrushes.h
+index 79cb04f..9aa71e7 100644
+--- a/plugins/extensions/photoshopbrushes/PhotoshopBrushes.h
++++ b/plugins/extensions/photoshopbrushes/PhotoshopBrushes.h
+@@ -12,7 +12,9 @@
+ 
+ /**
+  * Krita Nova: the "import_photoshop_brushes" action (the Import Photoshop
+- * Brushes button of the brush presets): imports .abr files as presets
++ * Brushes button of the brush presets): imports .abr files as presets;
++ * the "export_brush_presets" action (the Export Brushes button): saves the
++ * shown presets as a bundle
+  */
+ class PhotoshopBrushes : public KisActionPlugin
+ {
+@@ -23,6 +25,10 @@ public:
+ 
+ private Q_SLOTS:
+     void slotImport();
++    void slotExport();
++
++private:
++    class KisAction *m_exportAction {nullptr};
+ };
+ 
+ #endif // PHOTOSHOP_BRUSHES_H
+diff --git a/plugins/extensions/photoshopbrushes/photoshopbrushes.action b/plugins/extensions/photoshopbrushes/photoshopbrushes.action
+index 5ea6f55..23c7ce4 100644
+--- a/plugins/extensions/photoshopbrushes/photoshopbrushes.action
++++ b/plugins/extensions/photoshopbrushes/photoshopbrushes.action
+@@ -14,5 +14,17 @@
+       <isCheckable>false</isCheckable>
+       <statusTip></statusTip>
+     </Action>
++    <Action name="export_brush_presets">
++      <icon>document-export-16</icon>
++      <text>&amp;Export Brush Presets...</text>
++      <whatsThis>Saves the brush presets of the shown category as a bundle, with their brush tips</whatsThis>
++      <toolTip>Export the shown brush presets as a bundle</toolTip>
++      <iconText>Export Brush Presets</iconText>
++      <activationFlags>0</activationFlags>
++      <activationConditions>0</activationConditions>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip></statusTip>
++    </Action>
+   </Actions>
+ </ActionCollection>

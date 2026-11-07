@@ -1,0 +1,1283 @@
+Krita Nova 47 - Import Brushes: Procreate brushes, Krita presets and bundles
+
+"Import Brushes..." (patch 42) opens more than Photoshop brushes now:
+
+- Procreate .brush / .brushset (zip archives): every brush becomes a Pixel
+  brush preset, in a category named after the file. From Brush.archive (an
+  NSKeyedArchiver binary property list): name, size (paintSize x maxSize),
+  spacing (plotSpacing), opacity (maxOpacity), pen pressure on size and
+  opacity (dynamicsPressureSize / Opacity), size and opacity jitter
+  (dynamicsJitterSize / Opacity), rotation jitter (shapeScatter), scatter
+  (plotJitter). Shape.png becomes a PNG tip (white is paint, or black with
+  shapeInverted; transparent is no paint; at most 1024 px); without one (a
+  shape built into Procreate) the brush gets a round tip. brushset.plist
+  gives the order. Procreate's scales are not published: these mappings
+  follow what is known of them. Not carried over: grain, taper, tilt, speed,
+  wet mixing, blend modes.
+- Krita presets (.kpp): imported into the category "Imported Brushes".
+- Krita bundles (.bundle): installed like Settings > Manage Resource
+  Libraries > Import does; their presets also get a category named after the
+  file. The same bundle again is not installed twice.
+- Without a known extension (Android document names) the format is told by
+  the contents.
+
+KisProcreateBrushReader (zip via QuaZip, binary and XML property lists,
+NSKeyedArchiver references). KisAbrPresetImporter: the preset builder and
+tagging are shared by Photoshop and Procreate brushes; importFile().
+diff --git a/plugins/extensions/photoshopbrushes/CMakeLists.txt b/plugins/extensions/photoshopbrushes/CMakeLists.txt
+index 6130d17..cf3a406 100644
+--- a/plugins/extensions/photoshopbrushes/CMakeLists.txt
++++ b/plugins/extensions/photoshopbrushes/CMakeLists.txt
+@@ -1,6 +1,9 @@
++include_directories(${QUAZIP_INCLUDE_DIRS})
++
+ set(kritaphotoshopbrushes_SOURCES
+     PhotoshopBrushes.cpp
+     KisAbrPresetImporter.cpp
++    KisProcreateBrushReader.cpp
+     KisPresetBundleExporter.cpp
+ )
+ 
+@@ -16,6 +19,7 @@ target_link_libraries(kritaphotoshopbrushes
+         Qt${QT_MAJOR_VERSION}::Core
+         Qt${QT_MAJOR_VERSION}::Widgets
+         Qt${QT_MAJOR_VERSION}::Xml
++        ${QUAZIP_LIBRARIES}
+ )
+ 
+ install(TARGETS kritaphotoshopbrushes DESTINATION ${KRITA_PLUGIN_INSTALL_DIR})
+diff --git a/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.cpp b/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.cpp
+index 4e9ec70..c8f0cf3 100644
+--- a/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.cpp
++++ b/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.cpp
+@@ -16,6 +16,7 @@
+ #include <QVariant>
+ #include <QtEndian>
+ #include <QtMath>
++#include <qnumeric.h>
+ #include <cstring>
+ 
+ #include <klocalizedstring.h>
+@@ -37,6 +38,8 @@
+ #include <kis_abr_brush_collection.h>
+ #include <kis_abr_brush.h>
+ #include <kis_png_brush.h>
++#include <KisResourceCacheDb.h>
++#include "KisProcreateBrushReader.h"
+ #include <QHash>
+ 
+ #include <brushengine/kis_paintop_preset.h>
+@@ -506,118 +509,113 @@ KisAbrPresetImporter::ParsedFile KisAbrPresetImporter::parse(const QByteArray &d
+     return result;
+ }
+ 
+-KisAbrPresetImporter::Result KisAbrPresetImporter::importData(const QString &fileName, const QByteArray &data)
+-{
+-    Result result;
++namespace {
+ 
+-    const ParsedFile parsed = parse(data);
+-    if (!parsed.ok) {
+-        result.error = parsed.error;
+-        return result;
++/**
++ * A PNG brush tip in the resource folder for \p tipImage (white background,
++ * black is paint), called \p fileStem; an earlier import's tip with the same
++ * name and image is reused. A clone, to be scaled / turned for one preset.
++ */
++KisBrushSP storePngTip(KisResourceModel &brushes, QHash<QString, KisBrushSP> &cache,
++                       const QString &fileStem, const QImage &tipImage)
++{
++    if (cache.contains(fileStem)) {
++        KisBrushSP tip = cache.value(fileStem);
++        return tip ? tip->clone().dynamicCast<KisBrush>() : KisBrushSP();
+     }
+-
+-    // 1. the tips: decoded by Krita's .abr reader, kept as PNG brush tips in
+-    // the resource folder ("<file>_<n>.png"). Not the .abr itself as a
+-    // storage of tips: those cannot be saved into a bundle, so exported
+-    // brushes would arrive without their tips.
+-    QString base = QFileInfo(fileName).completeBaseName().trimmed();
+-    if (base.isEmpty()) base = QStringLiteral("photoshop-brushes");
+-    result.tagName = base;
+-
+-    KisAbrBrushCollection collection(base + ".abr");
+-    {
+-        QByteArray copy = data;
+-        QBuffer buffer(&copy);
+-        buffer.open(QIODevice::ReadOnly);
+-        if (!collection.loadFromDevice(&buffer)) {
+-            result.error = i18n("Could not read the brush tips of %1.", fileName);
+-            return result;
++    cache.insert(fileStem, KisBrushSP());
++    if (tipImage.isNull()) return KisBrushSP();
++
++    const QImage tipGray = tipImage.convertToFormat(QImage::Format_Grayscale8);
++    const QString pngName = QString(fileStem).replace(QRegularExpression("[\\\\/:*?\"<>|]"), "_") + ".png";
++    KisBrushSP stored;
++
++    Q_FOREACH (const KoResourceSP &resource, brushes.resourcesForFilename(pngName)) {
++        KisBrushSP brush = resource.dynamicCast<KisBrush>();
++        if (brush && brush->valid()
++                && brush->brushTipImage().convertToFormat(QImage::Format_Grayscale8) == tipGray) {
++            stored = brush;
++            break;
+         }
+     }
+ 
+-    KisResourceModel brushes(ResourceType::Brushes);
+-    QHash<QString, KisBrushSP> storedTips;
+-
+-    // the PNG tip for Krita's tip "<base>_<n>" (reused from an earlier import of the file)
+-    auto storedTip = [&](const QString &abrName) -> KisBrushSP {
+-        if (storedTips.contains(abrName)) {
+-            KisBrushSP tip = storedTips.value(abrName);
+-            return tip ? tip->clone().dynamicCast<KisBrush>() : KisBrushSP();
+-        }
+-        storedTips.insert(abrName, KisBrushSP());
+-
+-        KisAbrBrushSP abr = collection.brushByName(abrName);
+-        if (!abr) return KisBrushSP();
+-        const QImage tipImage = abr->brushTipImage();
+-        if (tipImage.isNull()) return KisBrushSP();
+-        const QImage tipGray = tipImage.convertToFormat(QImage::Format_Grayscale8);
+-
+-        const QString pngName = QString(abrName).replace(QRegularExpression("[\\\\/:*?\"<>|]"), "_") + ".png";
+-        KisBrushSP stored;
+-
+-        Q_FOREACH (const KoResourceSP &resource, brushes.resourcesForFilename(pngName)) {
+-            KisBrushSP brush = resource.dynamicCast<KisBrush>();
+-            if (brush && brush->valid()
+-                    && brush->brushTipImage().convertToFormat(QImage::Format_Grayscale8) == tipGray) {
+-                stored = brush;
+-                break;
+-            }
+-        }
+-
+-        if (!stored) {
+-            QByteArray png;
+-            {
+-                QBuffer buffer(&png);
+-                buffer.open(QIODevice::WriteOnly);
+-                if (!tipGray.save(&buffer, "PNG")) return KisBrushSP();
+-            }
+-            KisBrushSP brush(new KisPngBrush(pngName));
++    if (!stored) {
++        QByteArray png;
++        {
+             QBuffer buffer(&png);
+-            buffer.open(QIODevice::ReadOnly);
+-            if (!brush->loadFromDevice(&buffer, KisGlobalResourcesInterface::instance())) return KisBrushSP();
+-            brush->setName(QString(abrName).replace('_', ' '));
+-            if (!brushes.addResourceDeduplicateFileName(brush)) return KisBrushSP();
+-            stored = brushes.resourceForId(brush->resourceId()).dynamicCast<KisBrush>();
+-            if (!stored) stored = brush;
++            buffer.open(QIODevice::WriteOnly);
++            if (!tipGray.save(&buffer, "PNG")) return KisBrushSP();
+         }
++        KisBrushSP brush(new KisPngBrush(pngName));
++        QBuffer buffer(&png);
++        buffer.open(QIODevice::ReadOnly);
++        if (!brush->loadFromDevice(&buffer, KisGlobalResourcesInterface::instance())) return KisBrushSP();
++        brush->setName(QString(fileStem).replace('_', ' '));
++        if (!brushes.addResourceDeduplicateFileName(brush)) return KisBrushSP();
++        stored = brushes.resourceForId(brush->resourceId()).dynamicCast<KisBrush>();
++        if (!stored) stored = brush;
++    }
+ 
+-        storedTips.insert(abrName, stored);
+-        return stored->clone().dynamicCast<KisBrush>();
+-    };
++    cache.insert(fileStem, stored);
++    return stored->clone().dynamicCast<KisBrush>();
++}
+ 
+-    // 2. the brushes to make: from the settings, or one per tip
+-    QVector<BrushInfo> infos = parsed.brushes;
++/// one preset to make: its settings and its tip (null: a round tip from the settings)
++struct PlannedBrush {
++    KisAbrPresetImporter::BrushInfo info;
++    KisBrushSP tip;
++    bool scaleTip = true; ///< scale the tip to info.diameter
++};
+ 
+-    if (infos.isEmpty()) {
+-        if (!parsed.sampleUuids.isEmpty()) {
+-            for (int i = 0; i < parsed.sampleUuids.size(); i++) {
+-                BrushInfo info;
+-                info.computed = false;
+-                info.sampleUuid = parsed.sampleUuids[i];
+-                info.name = i18n("%1 %2", base, i + 1);
+-                infos.append(info);
+-            }
+-        } else {
+-            // version 1 / 2: the names Krita gave the tips
+-            QStringList names = collection.brushesMap()->keys();
+-            for (const QString &name : names) {
+-                BrushInfo info;
+-                info.computed = false;
+-                info.name = name;
+-                info.sampleUuid = QStringLiteral("name:") + name;
+-                infos.append(info);
+-            }
++/// puts \p presets into the category \p tagName (made if needed) and lets the choosers know
++void tagPresets(const QString &tagName, const QVector<KoResourceSP> &presets)
++{
++    if (presets.isEmpty() || tagName.isEmpty()) return;
++
++    KisTagModel tagModel(ResourceType::PaintOpPresets);
++    KisTagSP tag = tagModel.tagForUrl(tagName);
++    if (tag) {
++        // an earlier import: the new presets join it
++        QVector<int> ids;
++        for (const KoResourceSP &resource : presets) ids << resource->resourceId();
++        KisTagResourceModel tagResources(ResourceType::PaintOpPresets);
++        tagResources.tagResources(tag, ids);
++    } else {
++        tag = tagModel.addTag(tagName, false, presets);
++        if (!tag) {
++            // a deleted (inactive) tag of that name: bring it back with these
++            tag = tagModel.addTag(tagName, true, presets);
+         }
+     }
++    if (!tag) {
++        warnKrita << "Brush import: could not make the tag" << tagName;
++    }
++
++    // The other tag / resource models (the preset choosers) only re-read
++    // the database when a storage changes: tell them, so the new tag and
++    // presets show up right away
++    if (KisStorageModel::instance()) {
++        Q_EMIT KisStorageModel::instance()->storageEnabled(KoResourcePaths::getAppDataLocation());
++    }
++}
++
++/// makes the Pixel brush presets, tagged \p tagName
++KisAbrPresetImporter::Result buildPresets(const QString &tagName, const QVector<PlannedBrush> &planned,
++                                          const QStringList &alreadySkipped)
++{
++    using Variation = KisAbrPresetImporter::Variation;
++    KisAbrPresetImporter::Result result;
++    result.tagName = tagName;
++    result.skipped = alreadySkipped;
+ 
+     KisResourceModel presets(ResourceType::PaintOpPresets);
+     QVector<KoResourceSP> added;
+     QSet<QString> usedNames;
+     const KoID paintbrush("paintbrush");
+ 
+-    for (int i = 0; i < infos.size(); i++) {
+-        const BrushInfo &info = infos[i];
+-        QString name = info.name.isEmpty() ? i18n("%1 %2", base, i + 1) : info.name;
++    for (int i = 0; i < planned.size(); i++) {
++        const KisAbrPresetImporter::BrushInfo &info = planned[i].info;
++        QString name = info.name.isEmpty() ? i18n("%1 %2", tagName, i + 1) : info.name;
+         if (usedNames.contains(name)) {
+             int n = 2;
+             while (usedNames.contains(QString("%1 (%2)").arg(name).arg(n))) n++;
+@@ -627,30 +625,19 @@ KisAbrPresetImporter::Result KisAbrPresetImporter::importData(const QString &fil
+ 
+         // the tip
+         KisBrushSP brush;
+-        qreal ratio = 1.0; // roundness of a sampled tip (a computed one has it in its shape)
++        qreal ratio = 1.0; // roundness of an image tip (a round tip has it in its shape)
+ 
+-        if (info.computed) {
++        if (!planned[i].tip) {
+             KisCircleMaskGenerator *shape = new KisCircleMaskGenerator(info.diameter, info.roundness,
+                                                                        qMax(0.01, info.hardness),
+                                                                        qMax(0.01, info.hardness),
+                                                                        2, true);
+             brush = KisBrushSP(new KisAutoBrush(shape, qDegreesToRadians(info.angle), 0.0));
+         } else {
+-            QString tipName;
+-            if (info.sampleUuid.startsWith("name:")) {
+-                tipName = info.sampleUuid.mid(5);
+-            } else {
+-                const int index = parsed.sampleUuids.indexOf(info.sampleUuid);
+-                if (index >= 0) tipName = QString("%1_%2").arg(base).arg(index + 1);
+-            }
+-            brush = tipName.isEmpty() ? KisBrushSP() : storedTip(tipName);
+-            if (!brush) {
+-                result.skipped << name;
+-                continue;
+-            }
++            brush = planned[i].tip;
+             const QImage tip = brush->brushTipImage();
+             const int tipSize = qMax(tip.width(), tip.height());
+-            if (tipSize > 0 && !parsed.brushes.isEmpty()) {
++            if (tipSize > 0 && planned[i].scaleTip) {
+                 brush->setScale(info.diameter / tipSize);
+             }
+             brush->setAngle(qDegreesToRadians(info.angle));
+@@ -698,13 +685,15 @@ KisAbrPresetImporter::Result KisAbrPresetImporter::importData(const QString &fil
+         scatter.write(settings.data());
+ 
+         KisOpacityOptionData opacity;
+-        applySizeLike(opacity, info.paintDynamics ? info.opacity : Variation(), 0.0);
++        applySizeLike(opacity, info.paintDynamics ? info.opacity : Variation(), info.minimumOpacity);
+         opacity.write(settings.data());
+ 
+         KisFlowOptionData flow;
+         applySizeLike(flow, info.paintDynamics ? info.flow : Variation(), 0.0);
+         flow.write(settings.data());
+ 
++        settings->setPaintOpOpacity(qBound(0.01, info.presetOpacity, 1.0));
++
+         // the preset
+         KisPaintOpPresetSP preset(new KisPaintOpPreset());
+         preset->setName(name);
+@@ -722,39 +711,324 @@ KisAbrPresetImporter::Result KisAbrPresetImporter::importData(const QString &fil
+         added.append(preset);
+     }
+ 
+-    // 3. a tag (a category of the brush presets) named after the file
+-    if (!added.isEmpty()) {
+-        KisTagModel tagModel(ResourceType::PaintOpPresets);
+-        KisTagSP tag = tagModel.tagForUrl(result.tagName);
+-        if (tag) {
+-            // an earlier import of the file: the new presets join it
+-            QVector<int> ids;
+-            for (const KoResourceSP &resource : added) ids << resource->resourceId();
+-            KisTagResourceModel tagResources(ResourceType::PaintOpPresets);
+-            tagResources.tagResources(tag, ids);
++    tagPresets(tagName, added);
++
++    result.presets = added.size();
++    result.ok = added.size() > 0;
++    if (!result.ok && result.error.isEmpty()) {
++        result.error = i18n("No brushes could be made.");
++    }
++    return result;
++}
++
++QString baseNameOf(const QString &fileName, const QString &fallback)
++{
++    const QString base = QFileInfo(fileName).completeBaseName().trimmed();
++    return base.isEmpty() ? fallback : base;
++}
++
++qreal settingOr(const QVariantMap &map, const QString &key, qreal defaultValue)
++{
++    bool ok = false;
++    const qreal v = map.value(key).toDouble(&ok);
++    return ok && qIsFinite(v) ? v : defaultValue;
++}
++
++} // namespace
++
++KisAbrPresetImporter::Result KisAbrPresetImporter::importData(const QString &fileName, const QByteArray &data)
++{
++    Result result;
++
++    const ParsedFile parsed = parse(data);
++    if (!parsed.ok) {
++        result.error = parsed.error;
++        return result;
++    }
++
++    // 1. the tips: decoded by Krita's .abr reader, kept as PNG brush tips in
++    // the resource folder ("<file>_<n>.png"). Not the .abr itself as a
++    // storage of tips: those cannot be saved into a bundle, so exported
++    // brushes would arrive without their tips.
++    const QString base = baseNameOf(fileName, QStringLiteral("photoshop-brushes"));
++
++    KisAbrBrushCollection collection(base + ".abr");
++    {
++        QByteArray copy = data;
++        QBuffer buffer(&copy);
++        buffer.open(QIODevice::ReadOnly);
++        if (!collection.loadFromDevice(&buffer)) {
++            result.error = i18n("Could not read the brush tips of %1.", fileName);
++            return result;
++        }
++    }
++
++    KisResourceModel brushes(ResourceType::Brushes);
++    QHash<QString, KisBrushSP> tipCache;
++    auto tipFor = [&](const QString &abrName) -> KisBrushSP {
++        KisAbrBrushSP abr = collection.brushByName(abrName);
++        return abr ? storePngTip(brushes, tipCache, abrName, abr->brushTipImage()) : KisBrushSP();
++    };
++
++    // 2. the brushes to make: from the settings, or one per tip
++    QVector<BrushInfo> infos = parsed.brushes;
++
++    if (infos.isEmpty()) {
++        if (!parsed.sampleUuids.isEmpty()) {
++            for (int i = 0; i < parsed.sampleUuids.size(); i++) {
++                BrushInfo info;
++                info.computed = false;
++                info.sampleUuid = parsed.sampleUuids[i];
++                info.name = i18n("%1 %2", base, i + 1);
++                infos.append(info);
++            }
+         } else {
+-            tag = tagModel.addTag(result.tagName, false, added);
+-            if (!tag) {
+-                // a deleted (inactive) tag of that name: bring it back with these
+-                tag = tagModel.addTag(result.tagName, true, added);
++            // version 1 / 2: the names Krita gave the tips
++            QStringList names = collection.brushesMap()->keys();
++            for (const QString &name : names) {
++                BrushInfo info;
++                info.computed = false;
++                info.name = name;
++                info.sampleUuid = QStringLiteral("name:") + name;
++                infos.append(info);
+             }
+         }
+-        if (!tag) {
+-            warnKrita << "Photoshop brushes: could not make the tag" << result.tagName;
++    }
++
++    QVector<PlannedBrush> planned;
++    QStringList skipped;
++    for (int i = 0; i < infos.size(); i++) {
++        PlannedBrush plan;
++        plan.info = infos[i];
++        plan.scaleTip = !parsed.brushes.isEmpty();
++        if (!plan.info.computed) {
++            QString tipName;
++            if (plan.info.sampleUuid.startsWith("name:")) {
++                tipName = plan.info.sampleUuid.mid(5);
++            } else {
++                const int index = parsed.sampleUuids.indexOf(plan.info.sampleUuid);
++                if (index >= 0) tipName = QString("%1_%2").arg(base).arg(index + 1);
++            }
++            plan.tip = tipName.isEmpty() ? KisBrushSP() : tipFor(tipName);
++            if (!plan.tip) {
++                skipped << (plan.info.name.isEmpty() ? i18n("%1 %2", base, i + 1) : plan.info.name);
++                continue;
++            }
++        }
++        planned << plan;
++    }
++
++    Result built = buildPresets(base, planned, skipped);
++    if (!built.ok && built.presets == 0 && planned.isEmpty()) {
++        built.error = i18n("No brushes could be made from %1.", fileName);
++    }
++    return built;
++}
++
++KisAbrPresetImporter::Result KisAbrPresetImporter::importProcreate(const QString &fileName, const QByteArray &data)
++{
++    Result result;
++    const KisProcreateBrushReader::Result read = KisProcreateBrushReader::read(data);
++    if (!read.ok) {
++        result.error = read.error;
++        return result;
++    }
++
++    // the category: the file's name, like for Photoshop brushes
++    const QString base = baseNameOf(fileName, read.setName.isEmpty() ? QStringLiteral("procreate-brushes") : read.setName);
++
++    KisResourceModel brushes(ResourceType::Brushes);
++    QHash<QString, KisBrushSP> tipCache;
++    QVector<PlannedBrush> planned;
++    QStringList skipped;
++
++    for (int i = 0; i < read.brushes.size(); i++) {
++        const KisProcreateBrushReader::Brush &source = read.brushes[i];
++        const QVariantMap &s = source.settings;
++        PlannedBrush plan;
++        BrushInfo &info = plan.info;
++
++        info.name = source.name.isEmpty() ? i18n("%1 %2", base, i + 1) : source.name;
++
++        // Procreate's scales are not published: these follow what is known
++        // of them (size 0..1 of the brush's maximum size, fractions elsewhere)
++        const qreal paintSize = qBound(0.0, settingOr(s, "paintSize", 0.5), 1.0);
++        const qreal maxSize = qMax(0.01, settingOr(s, "maxSize", 1.0));
++        info.diameter = qBound(1.0, paintSize * maxSize * 100.0, 1000.0);
++        info.spacing = qBound(0.02, settingOr(s, "plotSpacing", 0.1), 10.0);
++        info.presetOpacity = qBound(0.01, settingOr(s, "maxOpacity", 1.0), 1.0);
++        info.hardness = 1.0;
++
++        // pen pressure and jitter
++        const qreal pressureSize = qBound(0.0, settingOr(s, "dynamicsPressureSize", 0.0), 1.0);
++        const qreal jitterSize = qBound(0.0, settingOr(s, "dynamicsJitterSize", 0.0), 1.0);
++        const qreal rotationJitter = qBound(0.0, settingOr(s, "shapeScatter", 0.0), 1.0);
++        info.tipDynamics = pressureSize > 0.0 || jitterSize > 0.0 || rotationJitter > 0.0;
++        if (pressureSize > 0.0) {
++            info.size.control = 2;
++            info.minimumDiameter = 1.0 - pressureSize;
++        }
++        info.size.jitter = jitterSize;
++        info.angleVariation.jitter = rotationJitter;
++
++        const qreal pressureOpacity = qBound(0.0, settingOr(s, "dynamicsPressureOpacity", 0.0), 1.0);
++        const qreal jitterOpacity = qBound(0.0, settingOr(s, "dynamicsJitterOpacity", 0.0), 1.0);
++        info.paintDynamics = pressureOpacity > 0.0 || jitterOpacity > 0.0;
++        if (pressureOpacity > 0.0) {
++            info.opacity.control = 2;
++            info.minimumOpacity = 1.0 - pressureOpacity;
++        }
++        info.opacity.jitter = jitterOpacity;
++
++        const qreal positionJitter = qBound(0.0, settingOr(s, "plotJitter", 0.0), 5.0);
++        info.scatterOn = positionJitter > 0.0;
++        info.scatter.jitter = positionJitter;
++        info.scatterBothAxes = true;
++
++        // the tip: white is paint (black when "shapeInverted"); Krita's tips: black is paint
++        if (!source.shape.isNull()) {
++            QImage tip = source.shape.convertToFormat(QImage::Format_ARGB32);
++            // transparent parts are no paint
++            QImage gray(tip.size(), QImage::Format_Grayscale8);
++            const bool inverted = s.value("shapeInverted").toBool();
++            for (int y = 0; y < tip.height(); y++) {
++                const QRgb *in = reinterpret_cast<const QRgb *>(tip.constScanLine(y));
++                uchar *out = gray.scanLine(y);
++                for (int x = 0; x < tip.width(); x++) {
++                    const int paint = (inverted ? 255 - qGray(in[x]) : qGray(in[x])) * qAlpha(in[x]) / 255;
++                    out[x] = uchar(255 - paint);
++                }
++            }
++            // Procreate's tips are big (2048 px); Krita scales them anyway
++            if (qMax(gray.width(), gray.height()) > 1024) {
++                gray = gray.scaled(1024, 1024, Qt::KeepAspectRatio, Qt::SmoothTransformation);
++            }
++            plan.tip = storePngTip(brushes, tipCache, QString("%1_%2").arg(base).arg(i + 1), gray);
++            if (!plan.tip) {
++                skipped << info.name;
++                continue;
++            }
++            info.computed = false;
++        } else {
++            info.computed = true; // a round tip (a shape that is built into Procreate)
+         }
+ 
+-        // The other tag / resource models (the preset choosers) only re-read
+-        // the database when a storage changes: tell them, so the new tag and
+-        // presets show up right away
+-        if (KisStorageModel::instance()) {
+-            Q_EMIT KisStorageModel::instance()->storageEnabled(KoResourcePaths::getAppDataLocation());
++        planned << plan;
++    }
++
++    return buildPresets(base, planned, skipped);
++}
++
++KisAbrPresetImporter::Result KisAbrPresetImporter::importKritaPreset(const QString &fileName, const QByteArray &data,
++                                                                     const QString &tagName)
++{
++    Result result;
++    result.tagName = tagName;
++
++    KisResourceModel presets(ResourceType::PaintOpPresets);
++    QByteArray copy = data;
++    QBuffer buffer(&copy);
++    buffer.open(QIODevice::ReadOnly);
++    KoResourceSP resource = presets.importResource(QFileInfo(fileName).fileName(), &buffer, false);
++    if (!resource) {
++        result.error = i18n("Could not import %1 (or a brush preset with this file name is already there).", fileName);
++        return result;
++    }
++
++    tagPresets(tagName, {resource});
++    result.presets = 1;
++    result.ok = true;
++    return result;
++}
++
++KisAbrPresetImporter::Result KisAbrPresetImporter::importBundle(const QString &fileName, const QByteArray &data)
++{
++    Result result;
++    const QString base = baseNameOf(fileName, QStringLiteral("bundle"));
++    result.tagName = base;
++
++    KisStorageModel *storageModel = KisStorageModel::instance();
++    if (!storageModel) {
++        result.error = i18n("Resource libraries are not available.");
++        return result;
++    }
++
++    // a free name in the resource folder, or an earlier copy of the same file
++    const QString dir = KoResourcePaths::getAppDataLocation();
++    QString storageName;
++    bool alreadyThere = false;
++    for (int i = 1; i < 1000 && storageName.isEmpty(); i++) {
++        const QString name = i == 1 ? base + ".bundle" : QString("%1 (%2).bundle").arg(base).arg(i);
++        QFile existing(dir + '/' + name);
++        if (!existing.exists()) {
++            storageName = name;
++        } else if (existing.open(QIODevice::ReadOnly) && existing.size() == data.size() && existing.readAll() == data) {
++            storageName = name;
++            alreadyThere = true;
+         }
+     }
++    if (storageName.isEmpty()) {
++        result.error = i18n("Could not find a free file name in the resource folder.");
++        return result;
++    }
+ 
+-    result.presets = added.size();
+-    result.ok = added.size() > 0;
+-    if (!result.ok && result.error.isEmpty()) {
+-        result.error = i18n("No brushes could be made from %1.", fileName);
++    const QString location = dir + '/' + storageName;
++    if (!alreadyThere && !storageModel->importStorageData(storageName, KisStorageModel::None, data)) {
++        result.error = i18n("Could not import the bundle %1.", fileName);
++        return result;
++    }
++
++    // its presets: they also go into a category named after the file
++    QVector<int> ids;
++    const QString base2 = KisResourceLocator::instance()->resourceLocationBase();
++    QString relative = location;
++    if (!base2.isEmpty() && relative.startsWith(base2)) relative = relative.mid(base2.length());
++    Q_FOREACH (const QString &candidate, QStringList({relative, storageName, '/' + storageName, location})) {
++        ids = KisResourceCacheDb::resourcesForStorage(ResourceType::PaintOpPresets, candidate);
++        if (!ids.isEmpty()) break;
++    }
++
++    KisResourceModel presets(ResourceType::PaintOpPresets);
++    QVector<KoResourceSP> resources;
++    Q_FOREACH (int id, ids) {
++        KoResourceSP resource = presets.resourceForId(id);
++        if (resource) resources << resource;
++    }
++    tagPresets(base, resources);
++
++    result.presets = resources.size();
++    result.ok = true;
++    if (alreadyThere) {
++        result.skipped << i18n("the bundle was already installed");
+     }
+     return result;
+ }
++
++QStringList KisAbrPresetImporter::supportedExtensions()
++{
++    return {"abr", "brush", "brushset", "kpp", "bundle"};
++}
++
++KisAbrPresetImporter::Result KisAbrPresetImporter::importFile(const QString &fileName, const QByteArray &data)
++{
++    QString suffix = QFileInfo(fileName).suffix().toLower();
++    QString name = fileName;
++
++    // no known extension (e.g. an Android document name): by the contents
++    if (!supportedExtensions().contains(suffix)) {
++        if (data.startsWith("\x89PNG")) {
++            suffix = "kpp";
++        } else if (data.startsWith("PK")) {
++            // Krita bundles start with their "mimetype" entry
++            suffix = data.mid(30, 8) == "mimetype" ? "bundle" : "brushset";
++        } else {
++            suffix = "abr";
++        }
++        name = fileName + "." + suffix;
++    }
++
++    if (suffix == "brush" || suffix == "brushset") return importProcreate(name, data);
++    if (suffix == "kpp") return importKritaPreset(name, data, i18n("Imported Brushes"));
++    if (suffix == "bundle") return importBundle(name, data);
++    return importData(name, data);
++}
+diff --git a/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.h b/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.h
+index 5d74ba1..016de83 100644
+--- a/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.h
++++ b/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.h
+@@ -13,8 +13,9 @@
+ #include <QVector>
+ 
+ /**
+- * Krita Nova: imports a Photoshop brush file (.abr) as ready-to-use pixel
+- * brush presets.
++ * Krita Nova: imports brushes as ready-to-use presets: Photoshop (.abr) and
++ * Procreate (.brush, .brushset) brushes become Pixel brush presets; Krita
++ * presets (.kpp) and bundles (.bundle) are installed.
+  *
+  * The brush tips are imported the way Krita always did (the .abr file is
+  * copied into the resource folder and becomes a storage of brush tips). Then
+@@ -61,7 +62,10 @@ public:
+ 
+         bool paintDynamics = false;
+         Variation opacity;
++        qreal minimumOpacity = 0.0; ///< 0..1, the opacity without pen pressure
+         Variation flow;
++
++        qreal presetOpacity = 1.0;  ///< the brush's opacity (Procreate's maximum opacity)
+     };
+ 
+     struct ParsedFile {
+@@ -88,6 +92,21 @@ public:
+      * Must be called from the GUI thread.
+      */
+     static Result importData(const QString &fileName, const QByteArray &data);
++
++    /// a Procreate .brush / .brushset
++    static Result importProcreate(const QString &fileName, const QByteArray &data);
++
++    /// a Krita preset (.kpp), into the category \p tagName
++    static Result importKritaPreset(const QString &fileName, const QByteArray &data, const QString &tagName);
++
++    /// a Krita bundle (.bundle): installed, its presets also get a category named after the file
++    static Result importBundle(const QString &fileName, const QByteArray &data);
++
++    /// any of the above, by the file's extension
++    static Result importFile(const QString &fileName, const QByteArray &data);
++
++    /// the extensions importFile() understands
++    static QStringList supportedExtensions();
+ };
+ 
+ #endif // KIS_ABR_PRESET_IMPORTER_H
+diff --git a/plugins/extensions/photoshopbrushes/KisProcreateBrushReader.cpp b/plugins/extensions/photoshopbrushes/KisProcreateBrushReader.cpp
+new file mode 100644
+index 0000000..f10ec47
+--- /dev/null
++++ b/plugins/extensions/photoshopbrushes/KisProcreateBrushReader.cpp
+@@ -0,0 +1,431 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "KisProcreateBrushReader.h"
++
++#include <QBuffer>
++#include <QDomDocument>
++#include <QHash>
++#include <QMap>
++#include <QStringList>
++#include <QtEndian>
++
++#include <klocalizedstring.h>
++#include <kis_debug.h>
++
++#include <quazip.h>
++#include <quazipfile.h>
++
++#include <cstring>
++
++namespace {
++
++const qint64 MaxEntrySize = 64 * 1024 * 1024; // a tip is a few MB; anything bigger is not a brush
++
++// ---------------------------------------------------------------------------
++// binary property lists
++// ---------------------------------------------------------------------------
++
++class BinaryPlist
++{
++public:
++    BinaryPlist(const QByteArray &data) : m_data(data) {}
++
++    QVariant parse(bool *ok)
++    {
++        *ok = false;
++        if (m_data.size() < 40 || !m_data.startsWith("bplist00")) return QVariant();
++
++        const uchar *trailer = reinterpret_cast<const uchar *>(m_data.constData()) + m_data.size() - 32;
++        m_offsetSize = trailer[6];
++        m_refSize = trailer[7];
++        m_count = qFromBigEndian<quint64>(trailer + 8);
++        const quint64 top = qFromBigEndian<quint64>(trailer + 16);
++        const quint64 tableOffset = qFromBigEndian<quint64>(trailer + 24);
++
++        if (m_offsetSize < 1 || m_offsetSize > 8 || m_refSize < 1 || m_refSize > 8) return QVariant();
++        if (m_count == 0 || m_count > 1000000 || top >= m_count) return QVariant();
++        if (tableOffset + m_count * m_offsetSize > quint64(m_data.size()) - 32) return QVariant();
++
++        m_offsets.resize(int(m_count));
++        for (quint64 i = 0; i < m_count; i++) {
++            m_offsets[int(i)] = readUInt(int(tableOffset + i * m_offsetSize), m_offsetSize);
++        }
++        m_cache.resize(int(m_count));
++        m_state.fill(0, int(m_count));
++
++        const QVariant result = object(top, 0);
++        *ok = !m_failed;
++        return result;
++    }
++
++private:
++    quint64 readUInt(int pos, int size)
++    {
++        if (pos < 0 || pos + size > m_data.size()) { m_failed = true; return 0; }
++        quint64 v = 0;
++        for (int i = 0; i < size; i++) v = (v << 8) | quint8(m_data[pos + i]);
++        return v;
++    }
++
++    /// the length that follows a marker with the low nibble 0xF
++    quint64 length(int &pos, int low)
++    {
++        if (low != 0xF) return quint64(low);
++        if (pos >= m_data.size()) { m_failed = true; return 0; }
++        const quint8 marker = quint8(m_data[pos++]);
++        if ((marker & 0xF0) != 0x10) { m_failed = true; return 0; }
++        const int size = 1 << (marker & 0x0F);
++        const quint64 v = readUInt(pos, size);
++        pos += size;
++        return v;
++    }
++
++    QVariant object(quint64 ref, int depth)
++    {
++        if (m_failed || ref >= m_count || depth > 64) { m_failed = true; return QVariant(); }
++        const int index = int(ref);
++        if (m_state[index] == 2) return m_cache[index];
++        if (m_state[index] == 1) { m_failed = true; return QVariant(); } // a cycle
++        m_state[index] = 1;
++
++        int pos = int(m_offsets[index]);
++        if (pos < 8 || pos >= m_data.size() - 32) { m_failed = true; return QVariant(); }
++        const quint8 marker = quint8(m_data[pos++]);
++        const int high = marker >> 4;
++        const int low = marker & 0x0F;
++        QVariant result;
++
++        switch (high) {
++        case 0x0:
++            result = (marker == 0x09) ? QVariant(true) : (marker == 0x08 ? QVariant(false) : QVariant());
++            break;
++        case 0x1: {
++            const int size = 1 << low;
++            if (size > 8) { m_failed = true; break; }
++            const quint64 v = readUInt(pos, size);
++            result = QVariant(qint64(v));
++            break;
++        }
++        case 0x2: {
++            const int size = 1 << low;
++            if (size == 4) {
++                const quint32 bits = quint32(readUInt(pos, 4));
++                float f;
++                memcpy(&f, &bits, 4);
++                result = double(f);
++            } else if (size == 8) {
++                const quint64 bits = readUInt(pos, 8);
++                double d;
++                memcpy(&d, &bits, 8);
++                result = d;
++            } else {
++                m_failed = true;
++            }
++            break;
++        }
++        case 0x3: { // date: seconds since 2001
++            const quint64 bits = readUInt(pos, 8);
++            double d;
++            memcpy(&d, &bits, 8);
++            result = d;
++            break;
++        }
++        case 0x4: {
++            const quint64 n = length(pos, low);
++            if (pos + qint64(n) > m_data.size()) { m_failed = true; break; }
++            result = m_data.mid(pos, int(n));
++            break;
++        }
++        case 0x5: {
++            const quint64 n = length(pos, low);
++            if (pos + qint64(n) > m_data.size()) { m_failed = true; break; }
++            result = QString::fromLatin1(m_data.constData() + pos, int(n));
++            break;
++        }
++        case 0x6: {
++            const quint64 n = length(pos, low);
++            if (pos + qint64(n) * 2 > m_data.size()) { m_failed = true; break; }
++            QString s;
++            s.reserve(int(n));
++            for (quint64 i = 0; i < n; i++) s.append(QChar(ushort(readUInt(pos + int(i) * 2, 2))));
++            result = s;
++            break;
++        }
++        case 0x8: {
++            QVariantMap uid;
++            uid.insert("$uid", qint64(readUInt(pos, low + 1)));
++            result = uid;
++            break;
++        }
++        case 0xA:
++        case 0xC: { // array, set
++            const quint64 n = length(pos, low);
++            if (n > 1000000) { m_failed = true; break; }
++            QVariantList list;
++            for (quint64 i = 0; i < n && !m_failed; i++) {
++                list.append(object(readUInt(pos + int(i) * m_refSize, m_refSize), depth + 1));
++            }
++            result = list;
++            break;
++        }
++        case 0xD: {
++            const quint64 n = length(pos, low);
++            if (n > 1000000) { m_failed = true; break; }
++            QVariantMap map;
++            for (quint64 i = 0; i < n && !m_failed; i++) {
++                const QVariant key = object(readUInt(pos + int(i) * m_refSize, m_refSize), depth + 1);
++                const QVariant value = object(readUInt(pos + int(n + i) * m_refSize, m_refSize), depth + 1);
++                map.insert(key.toString(), value);
++            }
++            result = map;
++            break;
++        }
++        default:
++            m_failed = true;
++        }
++
++        m_cache[index] = result;
++        m_state[index] = 2;
++        return result;
++    }
++
++    const QByteArray &m_data;
++    int m_offsetSize = 0;
++    int m_refSize = 0;
++    quint64 m_count = 0;
++    QVector<quint64> m_offsets;
++    QVector<QVariant> m_cache;
++    QVector<char> m_state;
++    bool m_failed = false;
++};
++
++// ---------------------------------------------------------------------------
++// XML property lists
++// ---------------------------------------------------------------------------
++
++QVariant xmlValue(const QDomElement &e)
++{
++    const QString tag = e.tagName();
++    if (tag == "dict") {
++        QVariantMap map;
++        QString key;
++        for (QDomElement child = e.firstChildElement(); !child.isNull(); child = child.nextSiblingElement()) {
++            if (child.tagName() == "key") key = child.text();
++            else map.insert(key, xmlValue(child));
++        }
++        return map;
++    } else if (tag == "array") {
++        QVariantList list;
++        for (QDomElement child = e.firstChildElement(); !child.isNull(); child = child.nextSiblingElement()) {
++            list.append(xmlValue(child));
++        }
++        return list;
++    } else if (tag == "string") {
++        return e.text();
++    } else if (tag == "integer") {
++        return e.text().toLongLong();
++    } else if (tag == "real") {
++        return e.text().toDouble();
++    } else if (tag == "true") {
++        return true;
++    } else if (tag == "false") {
++        return false;
++    } else if (tag == "data") {
++        return QByteArray::fromBase64(e.text().toLatin1());
++    }
++    return QVariant();
++}
++
++QVariant anyPlist(const QByteArray &data, bool *ok)
++{
++    if (data.startsWith("bplist")) return KisProcreateBrushReader::parseBinaryPlist(data, ok);
++    return KisProcreateBrushReader::parseXmlPlist(data, ok);
++}
++
++// ---------------------------------------------------------------------------
++// NSKeyedArchiver
++// ---------------------------------------------------------------------------
++
++bool isUid(const QVariant &v)
++{
++    return v.userType() == QMetaType::QVariantMap && v.toMap().size() == 1 && v.toMap().contains("$uid");
++}
++
++QVariant resolve(const QVariant &value, const QVariantList &objects, int depth)
++{
++    if (depth > 6) return QVariant();
++
++    if (isUid(value)) {
++        const qint64 index = value.toMap().value("$uid").toLongLong();
++        if (index < 0 || index >= objects.size()) return QVariant();
++        const QVariant object = objects[int(index)];
++        if (object.toString() == "$null") return QVariant();
++        return resolve(object, objects, depth + 1);
++    }
++    if (value.userType() == QMetaType::QVariantMap) {
++        QVariantMap map = value.toMap();
++        // NSString / NSMutableString objects keep their text in NS.string
++        if (map.contains("NS.string")) return resolve(map.value("NS.string"), objects, depth + 1);
++        // NSArray: NS.objects
++        if (map.contains("NS.objects") && !map.contains("NS.keys")) {
++            return resolve(map.value("NS.objects"), objects, depth + 1);
++        }
++        for (auto it = map.begin(); it != map.end(); ++it) {
++            if (it.key() == "$class") continue;
++            it.value() = resolve(it.value(), objects, depth + 1);
++        }
++        return map;
++    }
++    if (value.userType() == QMetaType::QVariantList) {
++        QVariantList list = value.toList();
++        for (QVariant &item : list) item = resolve(item, objects, depth + 1);
++        return list;
++    }
++    return value;
++}
++
++// ---------------------------------------------------------------------------
++// zip
++// ---------------------------------------------------------------------------
++
++QMap<QString, QByteArray> unzip(const QByteArray &zipData, bool *ok)
++{
++    QMap<QString, QByteArray> entries;
++    *ok = false;
++
++    QByteArray copy = zipData;
++    QBuffer buffer(&copy);
++    QuaZip zip(&buffer);
++    if (!zip.open(QuaZip::mdUnzip)) return entries;
++
++    for (bool more = zip.goToFirstFile(); more; more = zip.goToNextFile()) {
++        const QString name = zip.getCurrentFileName();
++        if (name.endsWith('/')) continue;
++        const QString base = name.section('/', -1);
++        // only what a brush needs
++        if (base != "Brush.archive" && base != "Shape.png" && base != "Grain.png" && base != "brushset.plist") continue;
++
++        QuaZipFile file(&zip);
++        if (!file.open(QIODevice::ReadOnly)) continue;
++        QByteArray content;
++        char chunk[65536];
++        qint64 n;
++        while ((n = file.read(chunk, sizeof(chunk))) > 0) {
++            content.append(chunk, int(n));
++            if (content.size() > MaxEntrySize) break;
++        }
++        file.close();
++        if (content.size() > MaxEntrySize) continue;
++        entries.insert(name, content);
++    }
++    zip.close();
++    *ok = true;
++    return entries;
++}
++
++} // namespace
++
++QVariant KisProcreateBrushReader::parseBinaryPlist(const QByteArray &data, bool *ok)
++{
++    BinaryPlist plist(data);
++    return plist.parse(ok);
++}
++
++QVariant KisProcreateBrushReader::parseXmlPlist(const QByteArray &data, bool *ok)
++{
++    *ok = false;
++    QDomDocument doc;
++    if (!doc.setContent(data)) return QVariant();
++    const QDomElement root = doc.documentElement();
++    const QDomElement value = root.tagName() == "plist" ? root.firstChildElement() : root;
++    if (value.isNull()) return QVariant();
++    *ok = true;
++    return xmlValue(value);
++}
++
++QVariantMap KisProcreateBrushReader::keyedArchiveRoot(const QVariant &archive)
++{
++    const QVariantMap map = archive.toMap();
++    const QVariantList objects = map.value("$objects").toList();
++    const QVariantMap top = map.value("$top").toMap();
++    QVariant root = top.value("root");
++    if (!root.isValid() && !top.isEmpty()) root = top.first();
++    if (!isUid(root)) return QVariantMap();
++    return resolve(root, objects, 0).toMap();
++}
++
++KisProcreateBrushReader::Result KisProcreateBrushReader::read(const QByteArray &zipData)
++{
++    Result result;
++
++    bool ok = false;
++    const QMap<QString, QByteArray> entries = unzip(zipData, &ok);
++    if (!ok) {
++        result.error = i18n("The file is not a Procreate brush (it is not a zip archive).");
++        return result;
++    }
++
++    // the brush folders: where the Brush.archive files are ("" for a .brush)
++    QStringList folders;
++    for (auto it = entries.begin(); it != entries.end(); ++it) {
++        if (it.key().section('/', -1) == "Brush.archive") {
++            const QString folder = it.key().contains('/') ? it.key().section('/', 0, -2) : QString();
++            folders << folder;
++        }
++    }
++    if (folders.isEmpty()) {
++        result.error = i18n("The file has no Procreate brushes in it.");
++        return result;
++    }
++
++    // a set: its name and the artist's order of the brushes
++    for (auto it = entries.begin(); it != entries.end(); ++it) {
++        if (it.key().section('/', -1) != "brushset.plist") continue;
++        bool plistOk = false;
++        const QVariantMap set = anyPlist(it.value(), &plistOk).toMap();
++        if (!plistOk) continue;
++        result.setName = set.value("name").toString();
++        QStringList ordered;
++        Q_FOREACH (const QVariant &item, set.value("brushes").toList()) {
++            const QString folder = item.toString();
++            if (folders.contains(folder)) ordered << folder;
++        }
++        Q_FOREACH (const QString &folder, folders) {
++            if (!ordered.contains(folder)) ordered << folder;
++        }
++        folders = ordered;
++        break;
++    }
++
++    Q_FOREACH (const QString &folder, folders) {
++        const QString prefix = folder.isEmpty() ? QString() : folder + '/';
++
++        bool plistOk = false;
++        const QVariant archive = parseBinaryPlist(entries.value(prefix + "Brush.archive"), &plistOk);
++        if (!plistOk) {
++            warnKrita << "Procreate brushes: could not read" << prefix + "Brush.archive";
++            continue;
++        }
++
++        Brush brush;
++        brush.settings = keyedArchiveRoot(archive);
++        brush.name = brush.settings.value("name").toString().trimmed();
++
++        const QByteArray shape = entries.value(prefix + "Shape.png");
++        if (!shape.isEmpty()) brush.shape.loadFromData(shape);
++        brush.hasGrain = entries.contains(prefix + "Grain.png");
++
++        result.brushes.append(brush);
++    }
++
++    if (result.brushes.isEmpty()) {
++        result.error = i18n("The Procreate brushes could not be read.");
++        return result;
++    }
++    result.ok = true;
++    return result;
++}
+diff --git a/plugins/extensions/photoshopbrushes/KisProcreateBrushReader.h b/plugins/extensions/photoshopbrushes/KisProcreateBrushReader.h
+new file mode 100644
+index 0000000..ec8d114
+--- /dev/null
++++ b/plugins/extensions/photoshopbrushes/KisProcreateBrushReader.h
+@@ -0,0 +1,53 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef KIS_PROCREATE_BRUSH_READER_H
++#define KIS_PROCREATE_BRUSH_READER_H
++
++#include <QByteArray>
++#include <QImage>
++#include <QString>
++#include <QVariant>
++#include <QVector>
++
++/**
++ * Krita Nova: reads Procreate brushes. A .brush is a zip archive with
++ * Brush.archive (the settings: an NSKeyedArchiver binary property list),
++ * Shape.png (the tip, white is paint) and Grain.png; a .brushset is a zip
++ * archive of such brush folders, with brushset.plist (the set's name and the
++ * order of the brushes).
++ */
++class KisProcreateBrushReader
++{
++public:
++    struct Brush {
++        QString name;
++        QVariantMap settings; ///< the brush object of Brush.archive, references resolved
++        QImage shape;         ///< Shape.png (may be null: a round tip)
++        bool hasGrain = false;
++    };
++
++    struct Result {
++        bool ok = false;
++        QString error;
++        QString setName;      ///< brushset.plist's name (may be empty)
++        QVector<Brush> brushes;
++    };
++
++    static Result read(const QByteArray &zipData);
++
++    /// a binary property list ("bplist00") as QVariant (dicts, lists, numbers,
++    /// strings, data; UIDs as QVariantMap {"$uid": n})
++    static QVariant parseBinaryPlist(const QByteArray &data, bool *ok);
++
++    /// an XML property list as QVariant
++    static QVariant parseXmlPlist(const QByteArray &data, bool *ok);
++
++    /// the root object of an NSKeyedArchiver archive, its references resolved (a few levels)
++    static QVariantMap keyedArchiveRoot(const QVariant &archive);
++};
++
++#endif // KIS_PROCREATE_BRUSH_READER_H
+diff --git a/plugins/extensions/photoshopbrushes/PhotoshopBrushes.cpp b/plugins/extensions/photoshopbrushes/PhotoshopBrushes.cpp
+index 8c35207..bc93245 100644
+--- a/plugins/extensions/photoshopbrushes/PhotoshopBrushes.cpp
++++ b/plugins/extensions/photoshopbrushes/PhotoshopBrushes.cpp
+@@ -46,10 +46,7 @@ QString displayFileName(const QString &location)
+         name = QUrl::fromPercentEncoding(location.toUtf8());
+         name = name.section('/', -1).section(':', -1);
+     }
+-    if (!name.endsWith(".abr", Qt::CaseInsensitive)) {
+-        name += ".abr";
+-    }
+-    return name;
++    return name; // KisAbrPresetImporter::importFile() tells the format by the contents without an extension
+ }
+ 
+ } // namespace
+@@ -75,11 +72,15 @@ void PhotoshopBrushes::slotImport()
+     KoFileDialog dialog(parent, KoFileDialog::OpenFiles, "ImportPhotoshopBrushes");
+     dialog.setCaption(i18n("Import Brushes"));
+     dialog.setDefaultDir(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation));
+-    dialog.setMimeTypeFilters({"image/x-adobe-brushlibrary"});
++    dialog.setNameFilter(i18n("Brushes (*.abr *.brush *.brushset *.kpp *.bundle)") + ";;"
++                         + i18n("Photoshop brushes (*.abr)") + ";;"
++                         + i18n("Procreate brushes (*.brush *.brushset)") + ";;"
++                         + i18n("Krita presets and bundles (*.kpp *.bundle)"));
+ 
+     const QStringList files = dialog.filenames();
+     if (files.isEmpty()) return;
+ 
++    // the brush presets show the category (tag) of the last imported file
+     QStringList done;
+     QStringList problems;
+     QString lastTag;
+@@ -99,12 +100,12 @@ void PhotoshopBrushes::slotImport()
+         KisAbrPresetImporter::Result result;
+         {
+             KisCursorOverrideLock cursorLock(Qt::BusyCursor);
+-            result = KisAbrPresetImporter::importData(name, data);
++            result = KisAbrPresetImporter::importFile(name, data);
+         }
+ 
+         if (result.ok) {
+             lastTag = result.tagName;
+-            done << i18np("%2: 1 brush (tag \"%3\")", "%2: %1 brushes (tag \"%3\")",
++            done << i18np("%2: 1 brush (category \"%3\")", "%2: %1 brushes (category \"%3\")",
+                           result.presets, name, result.tagName);
+         } else {
+             problems << QString("%1: %2").arg(name, result.error);
+@@ -128,8 +129,8 @@ void PhotoshopBrushes::slotImport()
+     QString message;
+     if (!done.isEmpty()) {
+         message += i18n("Imported:") + "\n" + done.join("\n");
+-        message += "\n\n" + i18n("Photoshop's texture, dual brush, color dynamics, count, noise and wet edges "
+-                                 "are not part of the imported brushes.");
++        message += "\n\n" + i18n("Not carried over: Photoshop's texture, dual brush, color dynamics, count, "
++                                 "noise and wet edges; Procreate's grain, taper, tilt and speed settings and wet mixing.");
+     }
+     if (!problems.isEmpty()) {
+         if (!message.isEmpty()) message += "\n\n";

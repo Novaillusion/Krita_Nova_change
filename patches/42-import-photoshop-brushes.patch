@@ -1,13 +1,15 @@
 Krita Nova 42 - import Photoshop brushes (.abr) as ready-to-use brushes
 
 The brush presets (the presets popup of the brush panel / toolbar, the Brush
-Presets docker and the brush editor's preset list) get an "Import Photoshop
-Brushes..." button. It opens one or more .abr files and makes every brush of
-a file a Pixel brush preset, tagged with the file's name:
+Presets docker and the brush editor's preset list) get an "Import Brushes..."
+button (for Photoshop brush files). It opens one or more .abr files and makes every brush of
+a file a Pixel brush preset in a new category (tag) named after the file;
+the brush presets switch to that category after the import:
 
-- The tips are imported as Krita always did (the .abr is copied into the
-  resource folder and becomes a storage of brush tips); importing the same
-  file again reuses it, a different file with the same name gets "name (2)".
+- The tips are decoded by Krita's .abr reader and kept as PNG brush tips
+  in the resource folder ("<file>_<n>.png") - not the .abr as a storage of
+  tips, whose tips cannot be saved into a bundle (patch 46 exports presets
+  as bundles). Importing the same file again reuses its tips.
 - From the brush settings of the file (the "desc" section of Photoshop 6+
   brush files): name; the tip (round computed tips become auto brushes with
   their hardness and roundness, sampled tips use their imported tip, scaled
@@ -24,7 +26,9 @@ New plugin plugins/extensions/photoshopbrushes: the action
 "import_photoshop_brushes" (Settings category) and KisAbrPresetImporter (a
 reader for Photoshop's action descriptors and the preset builder, using the
 paintop option data of libpaintop). KisPresetChooser: the button triggers
-that action.
+that action. The tag of an earlier import of the file is reused (also a
+deleted one); the preset choosers are told to re-read the database
+(KisStorageModel::storageEnabled) so the new category shows right away.
 diff --git a/libs/ui/widgets/kis_preset_chooser.cpp b/libs/ui/widgets/kis_preset_chooser.cpp
 index 382f62d..d03da39 100644
 --- a/libs/ui/widgets/kis_preset_chooser.cpp
@@ -79,10 +83,10 @@ index e9ba03f..235d52a 100644
      add_subdirectory( spensettings )
 diff --git a/plugins/extensions/photoshopbrushes/CMakeLists.txt b/plugins/extensions/photoshopbrushes/CMakeLists.txt
 new file mode 100644
-index 0000000..08e49f2
+index 0000000..ebf9bcc
 --- /dev/null
 +++ b/plugins/extensions/photoshopbrushes/CMakeLists.txt
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,21 @@
 +set(kritaphotoshopbrushes_SOURCES
 +    PhotoshopBrushes.cpp
 +    KisAbrPresetImporter.cpp
@@ -94,6 +98,7 @@ index 0000000..08e49f2
 +    PRIVATE
 +        kritaui
 +        kritaresources
++        kritaresourcewidgets
 +        kritalibbrush
 +        kritalibpaintop
 +        Qt${QT_MAJOR_VERSION}::Core
@@ -105,10 +110,10 @@ index 0000000..08e49f2
 +install(FILES photoshopbrushes.action DESTINATION ${KDE_INSTALL_DATADIR}/krita/actions)
 diff --git a/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.cpp b/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.cpp
 new file mode 100644
-index 0000000..9d34bd1
+index 0000000..4e9ec70
 --- /dev/null
 +++ b/plugins/extensions/photoshopbrushes/KisAbrPresetImporter.cpp
-@@ -0,0 +1,730 @@
+@@ -0,0 +1,760 @@
 +/*
 + *  SPDX-FileCopyrightText: 2026 Krita Nova
 + *
@@ -147,6 +152,8 @@ index 0000000..9d34bd1
 +#include <kis_circle_mask_generator.h>
 +#include <kis_abr_brush_collection.h>
 +#include <kis_abr_brush.h>
++#include <kis_png_brush.h>
++#include <QHash>
 +
 +#include <brushengine/kis_paintop_preset.h>
 +#include <brushengine/kis_paintop_registry.h>
@@ -536,39 +543,6 @@ index 0000000..9d34bd1
 +    return thumbnail;
 +}
 +
-+/// a name for the copy in the resource folder: free, or an earlier copy of the same file
-+QString storageNameFor(const QString &fileName, const QByteArray &data, bool *alreadyThere)
-+{
-+    const QString dir = KoResourcePaths::getAppDataLocation();
-+    QString base = QFileInfo(fileName).completeBaseName();
-+    if (base.isEmpty()) base = "photoshop-brushes";
-+    // Krita names the tips "<base>_<index>": no '_' trouble with the base itself
-+    *alreadyThere = false;
-+
-+    for (int i = 1; i < 1000; i++) {
-+        const QString name = i == 1 ? base + ".abr" : QString("%1 (%2).abr").arg(base).arg(i);
-+        QFile existing(dir + '/' + name);
-+        if (!existing.exists()) return name;
-+        if (existing.open(QIODevice::ReadOnly) && existing.size() == data.size() && existing.readAll() == data) {
-+            *alreadyThere = true;
-+            return name;
-+        }
-+    }
-+    return QString();
-+}
-+
-+KisBrushSP tipByName(KisResourceModel &brushes, const QString &name)
-+{
-+    const QVector<KoResourceSP> found = brushes.resourcesForName(name);
-+    for (const KoResourceSP &resource : found) {
-+        KisBrushSP brush = resource.dynamicCast<KisBrush>();
-+        if (brush && brush->valid()) {
-+            return brush->clone().dynamicCast<KisBrush>();
-+        }
-+    }
-+    return KisBrushSP();
-+}
-+
 +} // namespace
 +
 +KisAbrPresetImporter::ParsedFile KisAbrPresetImporter::parse(const QByteArray &data)
@@ -605,6 +579,14 @@ index 0000000..9d34bd1
 +        if (key == "samp") samples = r.bytes(int(length));
 +        else if (key == "desc") descriptor = r.bytes(int(length));
 +        else r.seek(r.pos() + int(length));
++
++        // sections can be padded to 4 bytes (from the start of the file)
++        const int aligned = (r.pos() + 3) & ~3;
++        if (aligned != r.pos() && aligned + 4 <= r.size()
++                && data.mid(r.pos(), 4) != QByteArray("8BIM")
++                && data.mid(aligned, 4) == QByteArray("8BIM")) {
++            r.seek(aligned);
++        }
 +    }
 +
 +    // the samples: each starts with its length and its id (a Pascal string)
@@ -650,38 +632,77 @@ index 0000000..9d34bd1
 +        return result;
 +    }
 +
-+    // 1. the tips: the .abr becomes a storage in the resource folder
-+    bool alreadyThere = false;
-+    const QString storageName = storageNameFor(fileName, data, &alreadyThere);
-+    if (storageName.isEmpty()) {
-+        result.error = i18n("Could not find a free file name in the resource folder.");
-+        return result;
-+    }
-+    const QString storageLocation = KoResourcePaths::getAppDataLocation() + '/' + storageName;
-+
-+    if (!alreadyThere || !KisResourceLocator::instance()->hasStorage(storageLocation)) {
-+        KisStorageModel storageModel;
-+        if (!alreadyThere && !storageModel.importStorageData(storageName, KisStorageModel::None, data)) {
-+            result.error = i18n("Could not import the brush tips of %1.", fileName);
-+            return result;
-+        }
-+        if (alreadyThere && !KisResourceLocator::instance()->hasStorage(storageLocation)) {
-+            KisResourceStorageSP storage = QSharedPointer<KisResourceStorage>::create(storageLocation);
-+            if (!storage->valid() || !KisResourceLocator::instance()->addStorage(storageLocation, storage)) {
-+                result.error = i18n("Could not import the brush tips of %1.", fileName);
-+                return result;
-+            }
-+        }
-+    }
-+
-+    const QString base = QFileInfo(storageName).completeBaseName();
++    // 1. the tips: decoded by Krita's .abr reader, kept as PNG brush tips in
++    // the resource folder ("<file>_<n>.png"). Not the .abr itself as a
++    // storage of tips: those cannot be saved into a bundle, so exported
++    // brushes would arrive without their tips.
++    QString base = QFileInfo(fileName).completeBaseName().trimmed();
++    if (base.isEmpty()) base = QStringLiteral("photoshop-brushes");
 +    result.tagName = base;
 +
++    KisAbrBrushCollection collection(base + ".abr");
++    {
++        QByteArray copy = data;
++        QBuffer buffer(&copy);
++        buffer.open(QIODevice::ReadOnly);
++        if (!collection.loadFromDevice(&buffer)) {
++            result.error = i18n("Could not read the brush tips of %1.", fileName);
++            return result;
++        }
++    }
++
 +    KisResourceModel brushes(ResourceType::Brushes);
++    QHash<QString, KisBrushSP> storedTips;
++
++    // the PNG tip for Krita's tip "<base>_<n>" (reused from an earlier import of the file)
++    auto storedTip = [&](const QString &abrName) -> KisBrushSP {
++        if (storedTips.contains(abrName)) {
++            KisBrushSP tip = storedTips.value(abrName);
++            return tip ? tip->clone().dynamicCast<KisBrush>() : KisBrushSP();
++        }
++        storedTips.insert(abrName, KisBrushSP());
++
++        KisAbrBrushSP abr = collection.brushByName(abrName);
++        if (!abr) return KisBrushSP();
++        const QImage tipImage = abr->brushTipImage();
++        if (tipImage.isNull()) return KisBrushSP();
++        const QImage tipGray = tipImage.convertToFormat(QImage::Format_Grayscale8);
++
++        const QString pngName = QString(abrName).replace(QRegularExpression("[\\\\/:*?\"<>|]"), "_") + ".png";
++        KisBrushSP stored;
++
++        Q_FOREACH (const KoResourceSP &resource, brushes.resourcesForFilename(pngName)) {
++            KisBrushSP brush = resource.dynamicCast<KisBrush>();
++            if (brush && brush->valid()
++                    && brush->brushTipImage().convertToFormat(QImage::Format_Grayscale8) == tipGray) {
++                stored = brush;
++                break;
++            }
++        }
++
++        if (!stored) {
++            QByteArray png;
++            {
++                QBuffer buffer(&png);
++                buffer.open(QIODevice::WriteOnly);
++                if (!tipGray.save(&buffer, "PNG")) return KisBrushSP();
++            }
++            KisBrushSP brush(new KisPngBrush(pngName));
++            QBuffer buffer(&png);
++            buffer.open(QIODevice::ReadOnly);
++            if (!brush->loadFromDevice(&buffer, KisGlobalResourcesInterface::instance())) return KisBrushSP();
++            brush->setName(QString(abrName).replace('_', ' '));
++            if (!brushes.addResourceDeduplicateFileName(brush)) return KisBrushSP();
++            stored = brushes.resourceForId(brush->resourceId()).dynamicCast<KisBrush>();
++            if (!stored) stored = brush;
++        }
++
++        storedTips.insert(abrName, stored);
++        return stored->clone().dynamicCast<KisBrush>();
++    };
 +
 +    // 2. the brushes to make: from the settings, or one per tip
 +    QVector<BrushInfo> infos = parsed.brushes;
-+    QVector<KisBrushSP> tips;
 +
 +    if (infos.isEmpty()) {
 +        if (!parsed.sampleUuids.isEmpty()) {
@@ -694,8 +715,6 @@ index 0000000..9d34bd1
 +            }
 +        } else {
 +            // version 1 / 2: the names Krita gave the tips
-+            KisAbrBrushCollection collection(storageLocation);
-+            collection.load();
 +            QStringList names = collection.brushesMap()->keys();
 +            for (const QString &name : names) {
 +                BrushInfo info;
@@ -740,7 +759,7 @@ index 0000000..9d34bd1
 +                const int index = parsed.sampleUuids.indexOf(info.sampleUuid);
 +                if (index >= 0) tipName = QString("%1_%2").arg(base).arg(index + 1);
 +            }
-+            brush = tipName.isEmpty() ? KisBrushSP() : tipByName(brushes, tipName);
++            brush = tipName.isEmpty() ? KisBrushSP() : storedTip(tipName);
 +            if (!brush) {
 +                result.skipped << name;
 +                continue;
@@ -805,8 +824,9 @@ index 0000000..9d34bd1
 +        // the preset
 +        KisPaintOpPresetSP preset(new KisPaintOpPreset());
 +        preset->setName(name);
-+        preset->setPaintOp(paintbrush);
++        // the settings first: setPaintOp() writes into them
 +        preset->setSettings(settings);
++        preset->setPaintOp(paintbrush);
 +        preset->setImage(thumbnailFor(brush));
 +        preset->setFilename(QString(name).replace(QRegularExpression("[\\\\/:*?\"<>|]"), "_") + preset->defaultFileExtension());
 +        preset->setValid(true);
@@ -818,17 +838,32 @@ index 0000000..9d34bd1
 +        added.append(preset);
 +    }
 +
-+    // 3. a tag named after the file
++    // 3. a tag (a category of the brush presets) named after the file
 +    if (!added.isEmpty()) {
 +        KisTagModel tagModel(ResourceType::PaintOpPresets);
 +        KisTagSP tag = tagModel.tagForUrl(result.tagName);
-+        if (!tag) {
-+            tag = tagModel.addTag(result.tagName, false, added);
-+        } else {
++        if (tag) {
++            // an earlier import of the file: the new presets join it
 +            QVector<int> ids;
 +            for (const KoResourceSP &resource : added) ids << resource->resourceId();
 +            KisTagResourceModel tagResources(ResourceType::PaintOpPresets);
 +            tagResources.tagResources(tag, ids);
++        } else {
++            tag = tagModel.addTag(result.tagName, false, added);
++            if (!tag) {
++                // a deleted (inactive) tag of that name: bring it back with these
++                tag = tagModel.addTag(result.tagName, true, added);
++            }
++        }
++        if (!tag) {
++            warnKrita << "Photoshop brushes: could not make the tag" << result.tagName;
++        }
++
++        // The other tag / resource models (the preset choosers) only re-read
++        // the database when a storage changes: tell them, so the new tag and
++        // presets show up right away
++        if (KisStorageModel::instance()) {
++            Q_EMIT KisStorageModel::instance()->storageEnabled(KoResourcePaths::getAppDataLocation());
 +        }
 +    }
 +
@@ -940,10 +975,10 @@ index 0000000..5d74ba1
 +#endif // KIS_ABR_PRESET_IMPORTER_H
 diff --git a/plugins/extensions/photoshopbrushes/PhotoshopBrushes.cpp b/plugins/extensions/photoshopbrushes/PhotoshopBrushes.cpp
 new file mode 100644
-index 0000000..0191b27
+index 0000000..1c81d1c
 --- /dev/null
 +++ b/plugins/extensions/photoshopbrushes/PhotoshopBrushes.cpp
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,135 @@
 +/*
 + *  SPDX-FileCopyrightText: 2026 Krita Nova
 + *
@@ -965,6 +1000,10 @@ index 0000000..0191b27
 +#include <KoFileDialog.h>
 +#include <kis_action.h>
 +#include <KisCursorOverrideLock.h>
++
++#include <QApplication>
++#include <KisTagChooserWidget.h>
++#include <kis_preset_chooser.h>
 +
 +#include "KisAbrPresetImporter.h"
 +
@@ -1004,7 +1043,7 @@ index 0000000..0191b27
 +    QWidget *parent = viewManager()->mainWindowAsQWidget();
 +
 +    KoFileDialog dialog(parent, KoFileDialog::OpenFiles, "ImportPhotoshopBrushes");
-+    dialog.setCaption(i18n("Import Photoshop Brushes"));
++    dialog.setCaption(i18n("Import Brushes"));
 +    dialog.setDefaultDir(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation));
 +    dialog.setMimeTypeFilters({"image/x-adobe-brushlibrary"});
 +
@@ -1013,6 +1052,7 @@ index 0000000..0191b27
 +
 +    QStringList done;
 +    QStringList problems;
++    QString lastTag;
 +
 +    for (const QString &location : files) {
 +        if (location.isEmpty()) continue;
@@ -1033,6 +1073,7 @@ index 0000000..0191b27
 +        }
 +
 +        if (result.ok) {
++            lastTag = result.tagName;
 +            done << i18np("%2: 1 brush (tag \"%3\")", "%2: %1 brushes (tag \"%3\")",
 +                          result.presets, name, result.tagName);
 +        } else {
@@ -1040,6 +1081,17 @@ index 0000000..0191b27
 +        }
 +        if (!result.skipped.isEmpty()) {
 +            problems << i18n("%1: could not make %2", name, result.skipped.join(", "));
++        }
++    }
++
++    // the brush presets show the new category (tag) of the last imported file
++    if (!lastTag.isEmpty()) {
++        Q_FOREACH (QWidget *widget, QApplication::allWidgets()) {
++            KisPresetChooser *chooser = qobject_cast<KisPresetChooser *>(widget);
++            if (!chooser) continue;
++            Q_FOREACH (KisTagChooserWidget *tags, chooser->findChildren<KisTagChooserWidget *>()) {
++                tags->setCurrentItem(lastTag);
++            }
 +        }
 +    }
 +
@@ -1055,9 +1107,9 @@ index 0000000..0191b27
 +    }
 +
 +    if (problems.isEmpty()) {
-+        QMessageBox::information(parent, i18nc("@title:window", "Import Photoshop Brushes"), message);
++        QMessageBox::information(parent, i18nc("@title:window", "Import Brushes"), message);
 +    } else {
-+        QMessageBox::warning(parent, i18nc("@title:window", "Import Photoshop Brushes"), message);
++        QMessageBox::warning(parent, i18nc("@title:window", "Import Brushes"), message);
 +    }
 +}
 +
@@ -1113,7 +1165,7 @@ index 0000000..2aa4327
 +}
 diff --git a/plugins/extensions/photoshopbrushes/photoshopbrushes.action b/plugins/extensions/photoshopbrushes/photoshopbrushes.action
 new file mode 100644
-index 0000000..8cf713e
+index 0000000..5ea6f55
 --- /dev/null
 +++ b/plugins/extensions/photoshopbrushes/photoshopbrushes.action
 @@ -0,0 +1,18 @@
@@ -1123,10 +1175,10 @@ index 0000000..8cf713e
 +    <text>Settings</text>
 +    <Action name="import_photoshop_brushes">
 +      <icon>document-import-16</icon>
-+      <text>Import &amp;Photoshop Brushes...</text>
++      <text>Import &amp;Brushes...</text>
 +      <whatsThis>Imports a Photoshop brush file (.abr) as ready-to-use brushes with their settings</whatsThis>
 +      <toolTip>Import Photoshop brushes (.abr) as ready-to-use brushes</toolTip>
-+      <iconText>Import Photoshop Brushes</iconText>
++      <iconText>Import Brushes</iconText>
 +      <activationFlags>0</activationFlags>
 +      <activationConditions>0</activationConditions>
 +      <shortcut></shortcut>
