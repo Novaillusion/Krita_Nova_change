@@ -1,0 +1,108 @@
+Krita Nova 49 - no safe assert in addDerivedResourceConverter (Ctrl+Shift+N)
+
+"Paste into New Image" (Ctrl+Shift+N) and other ways of opening a second
+canvas showed SAFE ASSERT "!m_derivedResources.contains(converter->key())"
+(KoResourceManager_p.cpp; upstream bug 511060). The canvas resource manager
+is shared by all the canvases of a window, and KoToolManager registers the
+active tool's derived-resource converters (e.g. the opacity converter) on it:
+the new canvas' tool registered a key that the other canvas' tool had
+registered already.
+
+- connectActiveTool(): a converter already registered for the key is
+  replaced by the active tool's.
+- disconnectActiveTool(): a tool removes a key only if the registered
+  converter is still its own (another canvas' tool may have replaced it).
+- KoResourceManager / KoCanvasResourceProvider::derivedResourceConverter(key).
+diff --git a/libs/flake/KoCanvasResourceProvider.cpp b/libs/flake/KoCanvasResourceProvider.cpp
+index 4e7e9eb..88fe683 100644
+--- a/libs/flake/KoCanvasResourceProvider.cpp
++++ b/libs/flake/KoCanvasResourceProvider.cpp
+@@ -217,6 +217,11 @@ void KoCanvasResourceProvider::removeDerivedResourceConverter(int key)
+     d->manager.removeDerivedResourceConverter(key);
+ }
+ 
++KoDerivedResourceConverterSP KoCanvasResourceProvider::derivedResourceConverter(int key) const
++{
++    return d->manager.derivedResourceConverter(key);
++}
++
+ bool KoCanvasResourceProvider::hasAbstractResource(int key)
+ {
+     return d->manager.hasAbstractResource(key);
+diff --git a/libs/flake/KoCanvasResourceProvider.h b/libs/flake/KoCanvasResourceProvider.h
+index 6ab8829..625e92e 100644
+--- a/libs/flake/KoCanvasResourceProvider.h
++++ b/libs/flake/KoCanvasResourceProvider.h
+@@ -252,6 +252,9 @@ public:
+      */
+     void removeDerivedResourceConverter(int key);
+ 
++    /// Krita Nova: the converter registered for \p key (null if none)
++    KoDerivedResourceConverterSP derivedResourceConverter(int key) const;
++
+     /**
+      * @see KoResourceManager::hasAbstractResource()
+      */
+diff --git a/libs/flake/KoResourceManager_p.cpp b/libs/flake/KoResourceManager_p.cpp
+index 9f76c89..6d86d36 100644
+--- a/libs/flake/KoResourceManager_p.cpp
++++ b/libs/flake/KoResourceManager_p.cpp
+@@ -286,6 +286,11 @@ void KoResourceManager::removeDerivedResourceConverter(int key)
+     m_derivedFromSource.remove(converter->sourceKey(), converter);
+ }
+ 
++KoDerivedResourceConverterSP KoResourceManager::derivedResourceConverter(int key) const
++{
++    return m_derivedResources.value(key);
++}
++
+ void KoResourceManager::addResourceUpdateMediator(KoResourceUpdateMediatorSP mediator)
+ {
+     KIS_SAFE_ASSERT_RECOVER_NOOP(!m_updateMediators.contains(mediator->key()));
+diff --git a/libs/flake/KoResourceManager_p.h b/libs/flake/KoResourceManager_p.h
+index 810cf19..e9b4e34 100644
+--- a/libs/flake/KoResourceManager_p.h
++++ b/libs/flake/KoResourceManager_p.h
+@@ -168,6 +168,9 @@ public:
+      */
+     void removeDerivedResourceConverter(int key);
+ 
++    /// Krita Nova: the converter registered for \p key (null if none)
++    KoDerivedResourceConverterSP derivedResourceConverter(int key) const;
++
+     /**
+      * Some resources can "mutate", that is their value doesn't change
+      * (a pointer), whereas the contents changes. But we should still
+diff --git a/libs/flake/KoToolManager.cpp b/libs/flake/KoToolManager.cpp
+index 023ea10..b2b38e9 100644
+--- a/libs/flake/KoToolManager.cpp
++++ b/libs/flake/KoToolManager.cpp
+@@ -488,6 +488,14 @@ void KoToolManager::Private::connectActiveTool()
+                 resourceManager->setAbstractResource(abstractResource);
+             }
+             for (KoDerivedResourceConverterSP converter : converters) {
++                // Krita Nova: the resource manager is shared by all the canvases
++                // of a window; another canvas' tool may have registered this
++                // key already (e.g. "Paste into New Image", Ctrl+Shift+N, opens a
++                // second canvas). The active tool's converter replaces it
++                // (upstream bug 511060: the safe assert in addDerivedResourceConverter).
++                if (resourceManager->hasDerivedResourceConverter(converter->key())) {
++                    resourceManager->removeDerivedResourceConverter(converter->key());
++                }
+                 resourceManager->addDerivedResourceConverter(converter);
+             }
+         }
+@@ -511,8 +519,12 @@ void KoToolManager::Private::disconnectActiveTool()
+                 if (resourceManager->hasAbstractResource(key))
+                     resourceManager->removeAbstractResource(key);
+             }
++            const QHash<int, KoDerivedResourceConverterSP> toolConverters = canvasData->activeTool->toolConverters();
+             for (int key : derivedKeys) {
+-                if (resourceManager->hasDerivedResourceConverter(key))
++                // Krita Nova: only this tool's own converter - another canvas'
++                // tool may have replaced it meanwhile (see connectActiveTool())
++                if (resourceManager->hasDerivedResourceConverter(key)
++                        && resourceManager->derivedResourceConverter(key) == toolConverters.value(key))
+                     resourceManager->removeDerivedResourceConverter(key);
+             }
+         }
