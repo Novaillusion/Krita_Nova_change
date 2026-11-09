@@ -1,0 +1,95 @@
+Krita Nova 48 - diagnostic for "image not freed" when closing (Windows)
+
+The safe assert "!sanityCheckPointer.isValid()" (KisDocument::~KisDocument)
+fires now and then when closing: something still holds the document's image.
+It is not reproducible, so on Windows the destructor now writes what it knows
+when that happens, to krita-nova-diagnostics.log next to krita.log
+(%LOCALAPPDATA%; krita.log itself is closed already when Krita quits) and to
+krita.log if it is still open:
+
+- the document's path, image size, number of nodes;
+- how many other holders the image still has (its reference count minus one);
+- whether the image was idle before and after;
+- whether Krita is quitting, and how many documents are open;
+- the Krita version (git).
+
+Only runs in the document's destructor, only writes when the check fails:
+no cost while painting. The safe assert itself is unchanged.
+diff --git a/libs/ui/KisDocument.cpp b/libs/ui/KisDocument.cpp
+index 48509a7..ab76baa 100644
+--- a/libs/ui/KisDocument.cpp
++++ b/libs/ui/KisDocument.cpp
+@@ -56,6 +56,11 @@
+ #include <QApplication>
+ #include <QBuffer>
+ #include <QStandardPaths>
++#include <QTextStream>
++#include <QDateTime>
++#include <QCoreApplication>
++#include <QFile>
++#include <KritaVersionWrapper.h>
+ #include <QDir>
+ #include <QDomDocument>
+ #include <QDomElement>
+@@ -703,9 +708,61 @@ KisDocument::~KisDocument()
+         KisImageWSP sanityCheckPointer = d->image;
+         Q_UNUSED(sanityCheckPointer);
+ 
++#ifdef Q_OS_WIN
++        // Krita Nova: what to write if the image is not freed (see below)
++        const QString diagnosticPath = path();
++        const QSize diagnosticSize = d->image->size();
++        const bool diagnosticIdle = d->image->isIdle(true);
++        int diagnosticNodes = 0;
++        {
++            QList<KisNodeSP> pending;
++            pending << d->image->root();
++            while (!pending.isEmpty()) {
++                KisNodeSP node = pending.takeFirst();
++                if (!node) continue;
++                diagnosticNodes++;
++                for (KisNodeSP child = node->firstChild(); child; child = child->nextSibling()) {
++                    pending << child;
++                }
++            }
++        }
++#endif
++
+         // The following line trigger the deletion of the image
+         d->image.clear();
+ 
++#ifdef Q_OS_WIN
++        // Krita Nova (Windows): the image was not freed - something still holds
++        // it. Write what is known to krita-nova-diagnostics.log next to
++        // krita.log (krita.log itself is already closed when Krita quits).
++        if (sanityCheckPointer.isValid()) {
++            KisImageSP stillAlive = sanityCheckPointer;
++            const int otherHolders = stillAlive ? stillAlive->refCount() - 1 : -1;
++            const bool stillIdle = stillAlive ? stillAlive->isIdle(true) : true;
++            stillAlive.clear();
++
++            QString message;
++            QTextStream out(&message);
++            out << QDateTime::currentDateTime().toString(Qt::ISODate)
++                << " Image not freed when closing \"" << (diagnosticPath.isEmpty() ? QStringLiteral("(unsaved)") : diagnosticPath) << "\""
++                << "\n  size " << diagnosticSize.width() << "x" << diagnosticSize.height()
++                << ", " << diagnosticNodes << " nodes (with the root)"
++                << "\n  other holders of the image: " << otherHolders
++                << "\n  image idle before closing: " << (diagnosticIdle ? "yes" : "no")
++                << ", idle after: " << (stillIdle ? "yes" : "no")
++                << "\n  Krita quitting: " << (QCoreApplication::closingDown() ? "yes" : "no")
++                << ", open documents: " << (KisPart::instance() ? KisPart::instance()->documents().size() : -1)
++                << "\n  Nova Krita git " << KritaVersionWrapper::versionString(true) << "\n";
++
++            QFile logFile(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/krita-nova-diagnostics.log");
++            if (logFile.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
++                logFile.write(message.toUtf8());
++                logFile.close();
++            }
++            KisUsageLogger::log(message.trimmed());
++        }
++#endif
++
+         // check if the image has actually been deleted
+         KIS_SAFE_ASSERT_RECOVER_NOOP(!sanityCheckPointer.isValid());
+     }
