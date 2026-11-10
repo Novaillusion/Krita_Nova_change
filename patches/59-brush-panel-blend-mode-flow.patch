@@ -16,9 +16,11 @@ Krita Nova 59 - Brush Panel: blending mode button, Opacity / Flow switch
 - Below the bottom slider, an "O" / "F" button: it switches the slider
   between Opacity and Flow (its letter and tooltip follow). The choice is
   remembered (kritarc [KritaNova] brushPanelSliderIsFlow).
+- Both buttons look the same: a rounded box with a thin outline and bold
+  letters (paintNovaLetterBox).
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 86b0866..b517199 100644
+index 86b0866..0fed242 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
 @@ -24,6 +24,7 @@
@@ -77,7 +79,46 @@ index 86b0866..b517199 100644
      QString m_name;
      QString m_letter;
      QString m_unit;
-@@ -653,7 +672,45 @@ QWidget *createBrushSliders(QMainWindow *mainWindow, QWidget *parent)
+@@ -629,6 +648,38 @@ void adaptBrushToolBarForPanel(KisToolBar *toolBar, QMainWindow *mainWindow)
+     }
+ }
+ 
++/// Krita Nova (patch 59): the look shared by the Brush Panel's letter
++/// buttons (blending mode "No", Opacity / Flow "O" / "F"): a rounded box with
++/// a thin outline and bold letters
++void paintNovaLetterBox(QPainter &p, const QWidget *w, const QString &text, bool pressed)
++{
++    p.setRenderHint(QPainter::Antialiasing, true);
++    const QRectF box = QRectF(w->rect()).adjusted(2.5, 2.5, -2.5, -2.5);
++    p.setPen(QPen(w->palette().color(QPalette::WindowText), 1.2));
++    p.setBrush(pressed ? w->palette().color(QPalette::Highlight) : w->palette().color(QPalette::Window));
++    p.drawRoundedRect(box, 4, 4);
++    QFont f = QApplication::font();
++    f.setBold(true);
++    p.setFont(f);
++    p.setPen(!w->isEnabled() ? w->palette().color(QPalette::Mid)
++             : pressed ? w->palette().color(QPalette::HighlightedText)
++                       : w->palette().color(QPalette::WindowText));
++    p.drawText(box, Qt::AlignCenter, text);
++}
++
++/// A Brush Panel letter button (see paintNovaLetterBox)
++class NovaLetterButton : public QAbstractButton
++{
++public:
++    explicit NovaLetterButton(QWidget *parent) : QAbstractButton(parent) { setFixedSize(36, 36); }
++protected:
++    void paintEvent(QPaintEvent *) override
++    {
++        QPainter p(this);
++        paintNovaLetterBox(p, this, text(), isDown());
++    }
++};
++
+ /// Size (top) and opacity (bottom) as tall vertical sliders, bound to the
+ /// brush toolbar's first slider chooser
+ QWidget *createBrushSliders(QMainWindow *mainWindow, QWidget *parent)
+@@ -653,7 +704,41 @@ QWidget *createBrushSliders(QMainWindow *mainWindow, QWidget *parent)
          KisDoubleSliderSpinBox *size = sliderChooser->getWidget<KisDoubleSliderSpinBox>("size");
          KisDoubleSliderSpinBox *opacity = sliderChooser->getWidget<KisDoubleSliderSpinBox>("opacity");
          if (size) layout->addWidget(new NovaVerticalSlider(size, i18n("Size"), i18nc("one-letter label of the brush size slider", "S"), i18nc("unit: pixels", "px"), 3.0, sliders), 1, Qt::AlignHCenter);
@@ -89,12 +130,8 @@ index 86b0866..b517199 100644
 +            // Krita Nova (patch 59): below it, a button switching what the
 +            // slider changes - Opacity (O) or Flow (F); remembered
 +            if (flow) {
-+                QToolButton *modeButton = new QToolButton(sliders);
++                NovaLetterButton *modeButton = new NovaLetterButton(sliders);
 +                modeButton->setObjectName(QStringLiteral("KritaNovaOpacityFlowSwitch"));
-+                modeButton->setFixedSize(36, 36);
-+                QFont f = modeButton->font();
-+                f.setBold(true);
-+                modeButton->setFont(f);
 +                QPointer<KisDoubleSliderSpinBox> opacityPtr(opacity), flowPtr(flow);
 +                auto apply = [second, modeButton, opacityPtr, flowPtr](bool useFlow) {
 +                    if (useFlow && flowPtr) {
@@ -111,7 +148,7 @@ index 86b0866..b517199 100644
 +                const bool startWithFlow = novaConfig.readEntry("brushPanelSliderIsFlow", false);
 +                modeButton->setProperty("_kritanova_flow", startWithFlow);
 +                apply(startWithFlow);
-+                QObject::connect(modeButton, &QToolButton::clicked, modeButton, [modeButton, apply]() {
++                QObject::connect(modeButton, &QAbstractButton::clicked, modeButton, [modeButton, apply]() {
 +                    const bool useFlow = !modeButton->property("_kritanova_flow").toBool();
 +                    modeButton->setProperty("_kritanova_flow", useFlow);
 +                    apply(useFlow);
@@ -124,7 +161,7 @@ index 86b0866..b517199 100644
      }
      sliders->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
      return sliders;
-@@ -1537,6 +1594,159 @@ private:
+@@ -1537,6 +1622,152 @@ private:
  
  QPointer<PanelFingerRouter> PanelFingerRouter::s_instance;
  
@@ -165,16 +202,7 @@ index 86b0866..b517199 100644
 +        void paintEvent(QPaintEvent *) override
 +        {
 +            QPainter p(this);
-+            p.setRenderHint(QPainter::Antialiasing, true);
-+            const QRectF box = QRectF(rect()).adjusted(2.5, 2.5, -2.5, -2.5);
-+            p.setPen(QPen(palette().color(QPalette::WindowText), 1.2));
-+            p.setBrush(palette().color(QPalette::Window));
-+            p.drawRoundedRect(box, 4, 4);
-+            QFont f = QApplication::font();
-+            f.setBold(true);
-+            p.setFont(f);
-+            p.setPen(isEnabled() ? palette().color(QPalette::WindowText) : palette().color(QPalette::Mid));
-+            p.drawText(box, Qt::AlignCenter, text);
++            paintNovaLetterBox(p, this, text, false); // same look as the O / F switch
 +        }
 +    };
 +
@@ -192,7 +220,9 @@ index 86b0866..b517199 100644
 +        combo->setParent(this);
 +        combo->setMinimumSize(0, 0);
 +        combo->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
-+        combo->setGeometry(rect());
++        // inside the label box only: at the full size its frame and text
++        // showed around the box's rounded corners
++        combo->setGeometry(rect().adjusted(4, 4, -4, -4));
 +        // the list keeps a readable width although the button is small
 +        if (combo->view()) combo->view()->setMinimumWidth(qMax(combo->view()->minimumWidth(), 220));
 +        combo->show();
@@ -284,7 +314,7 @@ index 86b0866..b517199 100644
  QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *viewManager, QStackedWidget *mainStack)
  {
      QDockWidget *topBar = createAndroidTopBarDock(mainWindow);
-@@ -1559,7 +1769,7 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+@@ -1559,7 +1790,7 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
      RoundedPanelPainter::install(dock);
      dock->setTitleBarWidget(titleBar);
  
@@ -293,7 +323,7 @@ index 86b0866..b517199 100644
      QWidget *container = new QWidget(dock);
      QVBoxLayout *layout = new QVBoxLayout(container);
      layout->setContentsMargins(3, 2, 3, 8); // thin sides, room at the bottom
-@@ -1611,6 +1821,9 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+@@ -1611,6 +1842,9 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
      });
      layout->addWidget(moreButton, 0, Qt::AlignHCenter);
  
