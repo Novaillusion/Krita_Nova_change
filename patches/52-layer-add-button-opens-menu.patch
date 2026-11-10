@@ -7,10 +7,12 @@ vector, fill, file layer, the masks ...). The keyboard shortcut (Insert, "Add
 Paint Layer") is unchanged; the tooltip says so: "Add new layer or mask
 (paint layer: Insert)".
 
-LayerBox.cpp: the menu is no longer set on bnAdd (no split part, no menu
-indicator); clicked() pops it up below the button.
+LayerBox.cpp: the menu is set on bnAdd only while it is open (no split part,
+no menu indicator): pressed() sets it and calls showMenu(), like QToolButton
+opens its menus - on the press; a popup opened on the release (clicked())
+was closed again at once on Android.
 diff --git a/plugins/dockers/layerdocker/LayerBox.cpp b/plugins/dockers/layerdocker/LayerBox.cpp
-index 59de0e8..03305f9 100644
+index 59de0e8..8dc635c 100644
 --- a/plugins/dockers/layerdocker/LayerBox.cpp
 +++ b/plugins/dockers/layerdocker/LayerBox.cpp
 @@ -133,7 +133,7 @@ namespace {
@@ -49,7 +51,7 @@ index 59de0e8..03305f9 100644
      });
  }
  
-@@ -261,8 +262,13 @@ LayerBox::LayerBox()
+@@ -261,8 +262,23 @@ LayerBox::LayerBox()
      connect(m_wdgLayerBox->cmbComposite, SIGNAL(activated(int)), SLOT(slotCompositeOpChanged(int)));
  
      m_newLayerMenu = new QMenu(this);
@@ -58,14 +60,24 @@ index 59de0e8..03305f9 100644
 +    // Krita Nova: "+" opens the menu of layers and masks at once - no arrow
 +    // part, no menu indicator (the menu is not set on the button); Insert
 +    // still adds a paint layer
-+    connect(m_wdgLayerBox->bnAdd, &QAbstractButton::clicked, this, [this]() {
-+        QAbstractButton *button = m_wdgLayerBox->bnAdd;
-+        m_newLayerMenu->popup(button->mapToGlobal(QPoint(0, button->height())));
++    // The menu opens on the press, the way QToolButton opens its menus (a
++    // popup opened on the release was closed again at once on Android): set
++    // only for the moment it is open, so no menu indicator is drawn
++    connect(m_wdgLayerBox->bnAdd, &QAbstractButton::pressed, this, [this]() {
++        QToolButton *button = m_wdgLayerBox->bnAdd;
++        if (button->menu()) return;
++        button->setMenu(m_newLayerMenu);
++        button->setPopupMode(QToolButton::InstantPopup);
++        button->showMenu(); // runs until the menu closes
++        if (m_wdgLayerBox && m_wdgLayerBox->bnAdd == button) {
++            button->setMenu(nullptr);
++            button->setDown(false);
++        }
 +    });
  
      m_opLayerMenu = new QMenu(this);
      m_wdgLayerBox->bnProperties->setMenu(m_opLayerMenu);
-@@ -539,9 +545,11 @@ void LayerBox::setViewManager(KisViewManager* kisview)
+@@ -539,9 +555,11 @@ void LayerBox::setViewManager(KisViewManager* kisview)
              addAction(m_showGlobalSelectionMask->objectName(),
                        m_showGlobalSelectionMask);
  
