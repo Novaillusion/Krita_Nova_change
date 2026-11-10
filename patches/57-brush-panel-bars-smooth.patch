@@ -1,0 +1,66 @@
+Krita Nova 57 - the Brush Panel's size / opacity bars follow changes smoothly
+
+The tall S and O bars of the Android Brush Panel (NovaVerticalSlider, patch
+15) only noticed a value changed elsewhere - the three-finger size / opacity
+gesture (patch 55), shortcuts, preset changes - by polling every 250 ms (the
+brush toolbar updates its spin boxes with signals blocked): they lagged and
+jumped while the gesture's floating message counted smoothly.
+
+- They check every frame (16 ms; only a comparison when nothing changed).
+- The fill glides to the new value (lerp: 35 % of the remaining distance
+  per frame, about 100 ms to arrive), so a fast series of changes looks
+  smooth; while the bar itself is dragged it follows the finger exactly.
+diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
+index 04e1a36..86b0866 100644
+--- a/libs/ui/KisMainWindow.cpp
++++ b/libs/ui/KisMainWindow.cpp
+@@ -421,11 +421,26 @@ public:
+         setMinimumSize(45, 110);
+         setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
+         connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this]() { update(); });
+-        // the brush toolbar updates its sliders with signals blocked on preset
+-        // changes: also repaint when the value changed behind our back
+-        m_poll.setInterval(250);
++        // the brush toolbar updates its sliders with signals blocked (preset
++        // changes, the three-finger size / opacity gesture, shortcuts...):
++        // follow the value every frame. Krita Nova (patch 57): the bar glides
++        // to a new value (lerp), so a fast series of changes looks smooth
++        m_poll.setInterval(16);
+         connect(&m_poll, &QTimer::timeout, this, [this]() {
+-            if (m_spin && isVisible() && !qFuzzyCompare(m_spin->value() + 1.0, m_painted + 1.0)) update();
++            if (!m_spin || !isVisible()) return;
++            const qreal target = toPos(m_spin->value());
++            if (m_dragging || m_shownPos < 0.0) {
++                if (m_shownPos != target) { m_shownPos = target; update(); }
++                return;
++            }
++            const qreal diff = target - m_shownPos;
++            if (qAbs(diff) < 0.002) {
++                if (m_shownPos != target) { m_shownPos = target; update(); }
++            } else {
++                m_shownPos += diff * 0.35; // per frame: about 100 ms to arrive
++                update();
++            }
++            if (!qFuzzyCompare(m_spin->value() + 1.0, m_painted + 1.0)) update();
+         });
+         m_poll.start();
+     }
+@@ -456,7 +471,9 @@ protected:
+         QPainterPath clip;
+         clip.addRoundedRect(track, radius, radius);
+         p.fillPath(clip, palette().color(QPalette::Base).darker(115));
+-        const qreal pos = toPos(m_painted);
++        // the shown (gliding) position, see the constructor; the exact one while dragging
++        const qreal exactPos = toPos(m_painted);
++        const qreal pos = (m_dragging || m_shownPos < 0.0) ? exactPos : m_shownPos;
+         QRectF fill = track;
+         fill.setTop(track.bottom() - track.height() * pos);
+         p.save();
+@@ -531,6 +548,7 @@ private:
+     qreal m_exponent {1.0};
+     QTimer m_poll;
+     qreal m_painted {0.0};
++    qreal m_shownPos {-1.0}; ///< Krita Nova (57): the fill position shown, gliding to the value
+     bool m_dragging {false};
+     int m_pressY {0};
+     qreal m_pressPos {0.0};
