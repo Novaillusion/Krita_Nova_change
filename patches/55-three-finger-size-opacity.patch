@@ -9,7 +9,11 @@ ThreeFingerDrag, which no profile used):
 - up / down: brush size, on a log scale (150 px doubles / halves it), 1 to
   10000 px;
 - left / right: opacity, 400 px for 0 to 100 %, at least 1 %;
-- the value shows in a floating message on the canvas;
+- the value shows in a floating message on the canvas (a new one only when
+  the shown text changes);
+- applied at most every 30 ms (the last value always, also when the fingers
+  stop or lift): every change updates the preset, the toolbar sliders and the
+  brush outline, which could not keep up with every touch event;
 - through the canvas resources (KoCanvasResource::Size / Opacity), like the
   toolbar sliders.
 
@@ -84,10 +88,10 @@ index ad30725..5b38c5f 100644
  
 diff --git a/libs/ui/input/KisBrushSizeOpacityGestureAction.cpp b/libs/ui/input/KisBrushSizeOpacityGestureAction.cpp
 new file mode 100644
-index 0000000..6feffd5
+index 0000000..d1ef555
 --- /dev/null
 +++ b/libs/ui/input/KisBrushSizeOpacityGestureAction.cpp
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,197 @@
 +/*
 + *  SPDX-FileCopyrightText: 2026 Krita Nova
 + *
@@ -97,6 +101,7 @@ index 0000000..6feffd5
 +#include "KisBrushSizeOpacityGestureAction.h"
 +
 +#include <QTouchEvent>
++#include <QTimer>
 +#include <QtMath>
 +
 +#include <klocalizedstring.h>
@@ -117,6 +122,13 @@ index 0000000..6feffd5
 +const qreal DoubleSizeDistance = 150.0;
 +/// dragging this far right adds 100 % opacity
 +const qreal FullOpacityDistance = 400.0;
++/**
++ * Every new size / opacity updates the brush preset, the toolbar sliders, the
++ * brush outline...: a touch screen sends far more events than that can keep
++ * up with, so the value is applied at most every UpdateInterval ms (the last
++ * one always)
++ */
++const int UpdateInterval = 30;
 +}
 +
 +KisBrushSizeOpacityGestureAction::KisBrushSizeOpacityGestureAction()
@@ -128,6 +140,10 @@ index 0000000..6feffd5
 +    QHash<QString, int> shortcuts;
 +    shortcuts.insert(i18n("Change Brush Size and Opacity"), SizeAndOpacityShortcut);
 +    setShortcutIndexes(shortcuts);
++
++    m_applyTimer.reset(new QTimer());
++    m_applyTimer->setSingleShot(true);
++    QObject::connect(m_applyTimer.data(), &QTimer::timeout, [this]() { applyPending(); });
 +}
 +
 +KisBrushSizeOpacityGestureAction::~KisBrushSizeOpacityGestureAction()
@@ -174,6 +190,9 @@ index 0000000..6feffd5
 +
 +    m_active = false;
 +    m_axis = Undecided;
++    m_pendingValue = -1.0;
++    m_lastMessage.clear();
++    m_sinceApply.invalidate();
 +
 +    KisCanvas2 *canvas = inputManager() ? inputManager()->canvas() : nullptr;
 +    if (!canvas || !canvas->resourceManager()) return;
@@ -208,13 +227,37 @@ index 0000000..6feffd5
 +    if (m_axis == Vertical) {
 +        // up (negative y) makes the brush bigger, on a log scale so it is
 +        // as easy for 3 px as for 300 px
-+        const qreal size = qBound(1.0, m_startSize * qPow(2.0, -delta.y() / DoubleSizeDistance), 10000.0);
-+        canvas->resourceManager()->setResource(KoCanvasResource::Size, size);
++        m_pendingValue = qBound(1.0, m_startSize * qPow(2.0, -delta.y() / DoubleSizeDistance), 10000.0);
 +    } else {
-+        const qreal opacity = qBound(0.01, m_startOpacity + delta.x() / FullOpacityDistance, 1.0);
-+        canvas->resourceManager()->setResource(KoCanvasResource::Opacity, opacity);
++        m_pendingValue = qBound(0.01, m_startOpacity + delta.x() / FullOpacityDistance, 1.0);
 +    }
-+    showValue();
++
++    if (!m_sinceApply.isValid() || m_sinceApply.elapsed() >= UpdateInterval) {
++        applyPending();
++    } else if (!m_applyTimer->isActive()) {
++        m_applyTimer->start(UpdateInterval - int(m_sinceApply.elapsed()));
++    }
++}
++
++void KisBrushSizeOpacityGestureAction::applyPending()
++{
++    m_applyTimer->stop();
++    if (m_pendingValue < 0.0 || m_axis == Undecided) return;
++
++    KisCanvas2 *canvas = inputManager() ? inputManager()->canvas() : nullptr;
++    if (!canvas || !canvas->resourceManager()) return;
++
++    const KoCanvasResource::CanvasResourceId id =
++        m_axis == Vertical ? KoCanvasResource::Size : KoCanvasResource::Opacity;
++    // only real changes (the sliders show whole pixels / percent)
++    const qreal current = canvas->resourceManager()->resource(id).toDouble();
++    const qreal step = m_axis == Vertical ? (m_pendingValue < 10.0 ? 0.05 : 0.5) : 0.005;
++    if (qAbs(current - m_pendingValue) >= step) {
++        canvas->resourceManager()->setResource(id, m_pendingValue);
++        showValue();
++    }
++    m_pendingValue = -1.0;
++    m_sinceApply.restart();
 +}
 +
 +void KisBrushSizeOpacityGestureAction::showValue()
@@ -232,21 +275,26 @@ index 0000000..6feffd5
 +    } else {
 +        return;
 +    }
++    if (text == m_lastMessage) return; // the same text: no new message widget
++    m_lastMessage = text;
 +    canvas->viewManager()->showFloatingMessage(text, QIcon(), 1000, KisFloatingMessage::High);
 +}
 +
 +void KisBrushSizeOpacityGestureAction::end(QEvent *event)
 +{
++    applyPending(); // the last value
++    m_sinceApply.invalidate();
++    m_lastMessage.clear();
 +    m_active = false;
 +    m_axis = Undecided;
 +    KisAbstractInputAction::end(event);
 +}
 diff --git a/libs/ui/input/KisBrushSizeOpacityGestureAction.h b/libs/ui/input/KisBrushSizeOpacityGestureAction.h
 new file mode 100644
-index 0000000..a92e8f3
+index 0000000..1770f77
 --- /dev/null
 +++ b/libs/ui/input/KisBrushSizeOpacityGestureAction.h
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,62 @@
 +/*
 + *  SPDX-FileCopyrightText: 2026 Krita Nova
 + *
@@ -259,6 +307,10 @@ index 0000000..a92e8f3
 +#include "kis_abstract_input_action.h"
 +
 +#include <QPointF>
++#include <QElapsedTimer>
++#include <QScopedPointer>
++
++class QTimer;
 +
 +/**
 + * Krita Nova: a drag (by default with three fingers) changes the brush: up /
@@ -289,6 +341,13 @@ index 0000000..a92e8f3
 +    /// the centre of the touch points (or the event's position)
 +    QPointF centerOf(const QEvent *event);
 +    void showValue();
++    /// sets the pending size / opacity on the canvas (at most every UpdateInterval ms)
++    void applyPending();
++
++    QScopedPointer<QTimer> m_applyTimer;
++    QElapsedTimer m_sinceApply;
++    qreal m_pendingValue {-1.0};
++    QString m_lastMessage;
 +
 +    QPointF m_start;
 +    qreal m_startSize {0.0};
