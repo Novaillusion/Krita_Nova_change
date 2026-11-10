@@ -1,0 +1,145 @@
+Krita Nova 50 - "Paint only inside the canvas"
+
+Krita keeps paint outside the canvas border (layers have no edges). New
+setting, Configure Krita > General > Tools, below "Activate transform tool
+after pasting": "Paint only inside the canvas" (kritarc
+paintOnlyInsideCanvas, off by default).
+
+When on, brush strokes (KisPainterBasedStrokeStrategy: freehand brush, line,
+shapes, ... and their level-of-detail previews) get the canvas as their
+selection when there is no selection of the user's: the image bounds at the
+stroke's level of detail. Nothing is painted outside. Moving and
+transforming layers keeps what is outside, as before; a selection of the
+user's limits painting as usual; not in wrap-around mode. Read when a stroke
+starts, so changing it applies to the next stroke.
+diff --git a/libs/ui/dialogs/kis_dlg_preferences.cc b/libs/ui/dialogs/kis_dlg_preferences.cc
+index 2c3bfb6..d550081 100644
+--- a/libs/ui/dialogs/kis_dlg_preferences.cc
++++ b/libs/ui/dialogs/kis_dlg_preferences.cc
+@@ -873,6 +873,7 @@ void GeneralTab::setDefault()
+     m_spnPalmRejectionDelay->setValue(100);
+     m_chkPalmLargeContacts->setChecked(true);
+     m_spnPalmMaxContactMm->setValue(18);
++    m_chkPaintInsideCanvas->setChecked(false);
+     chkEnableTransformToolAfterPaste->setChecked(cfg.activateTransformToolAfterPaste(true));
+     chkZoomHorizontally->setChecked(cfg.zoomHorizontal(true));
+     m_chkConvertOnImport->setChecked(cfg.convertToImageColorspaceOnImport(true));
+@@ -1293,6 +1294,30 @@ void GeneralTab::setupPalmRejectionSettings(KisConfig &cfg)
+     connect(m_chkPalmRejection, &QCheckBox::toggled, this, [this]() { updatePalmRejectionEnabled(); });
+     connect(m_chkPalmLargeContacts, &QCheckBox::toggled, this, [this]() { updatePalmRejectionEnabled(); });
+     updatePalmRejectionEnabled();
++
++    // Krita Nova: brush strokes stop at the canvas border
++    m_chkPaintInsideCanvas = new QCheckBox(i18n("Paint only inside the canvas"), this);
++    m_chkPaintInsideCanvas->setToolTip(i18n("Brush strokes stop at the canvas border, so no paint is kept outside of it. "
++                                            "Moving and transforming layers still keeps what is outside. "
++                                            "With a selection, the selection limits painting as usual."));
++    m_chkPaintInsideCanvas->setChecked(cfg.readEntry("paintOnlyInsideCanvas", false));
++
++    QFormLayout *toolsForm = qobject_cast<QFormLayout *>(chkEnableTransformToolAfterPaste->parentWidget()->layout());
++    int toolsRow = -1;
++    QFormLayout::ItemRole toolsRole;
++    if (toolsForm) {
++        toolsForm->getWidgetPosition(chkEnableTransformToolAfterPaste, &toolsRow, &toolsRole);
++    }
++    if (toolsForm && toolsRow >= 0) {
++        toolsForm->insertRow(toolsRow + 1, QString(), m_chkPaintInsideCanvas);
++    } else if (QBoxLayout *box = qobject_cast<QBoxLayout *>(chkEnableTransformToolAfterPaste->parentWidget()->layout())) {
++        const int index = box->indexOf(chkEnableTransformToolAfterPaste);
++        box->insertWidget(index >= 0 ? index + 1 : box->count(), m_chkPaintInsideCanvas);
++    } else if (QGridLayout *grid = qobject_cast<QGridLayout *>(chkEnableTransformToolAfterPaste->parentWidget()->layout())) {
++        grid->addWidget(m_chkPaintInsideCanvas, grid->rowCount(), 0, 1, grid->columnCount());
++    } else if (QLayout *layout = chkEnableTransformToolAfterPaste->parentWidget()->layout()) {
++        layout->addWidget(m_chkPaintInsideCanvas);
++    }
+ }
+ 
+ void GeneralTab::updatePalmRejectionEnabled()
+@@ -1309,6 +1334,7 @@ void GeneralTab::savePalmRejectionSettings(KisConfig &cfg)
+     cfg.writeEntry("palmRejectionLiftDelay", m_spnPalmRejectionDelay->value());
+     cfg.writeEntry("palmRejectionLargeContacts", m_chkPalmLargeContacts->isChecked());
+     cfg.writeEntry("palmRejectionMaxContactMm", m_spnPalmMaxContactMm->value());
++    cfg.writeEntry("paintOnlyInsideCanvas", m_chkPaintInsideCanvas->isChecked());
+ }
+ 
+ void GeneralTab::updateTouchPressureSensitivityEnabled(int touchPainting)
+diff --git a/libs/ui/dialogs/kis_dlg_preferences.h b/libs/ui/dialogs/kis_dlg_preferences.h
+index 5f1179c..0d2450b 100644
+--- a/libs/ui/dialogs/kis_dlg_preferences.h
++++ b/libs/ui/dialogs/kis_dlg_preferences.h
+@@ -149,6 +149,7 @@ private:
+     QSpinBox *m_spnPalmRejectionDelay {nullptr};
+     QCheckBox *m_chkPalmLargeContacts {nullptr};
+     QSpinBox *m_spnPalmMaxContactMm {nullptr};
++    QCheckBox *m_chkPaintInsideCanvas {nullptr}; ///< Krita Nova: "Paint only inside the canvas"
+ };
+ 
+ 
+diff --git a/libs/ui/tool/strokes/kis_painter_based_stroke_strategy.cpp b/libs/ui/tool/strokes/kis_painter_based_stroke_strategy.cpp
+index c21eb4f..1a4347d 100644
+--- a/libs/ui/tool/strokes/kis_painter_based_stroke_strategy.cpp
++++ b/libs/ui/tool/strokes/kis_painter_based_stroke_strategy.cpp
+@@ -22,6 +22,10 @@
+ #include "KisMaskingBrushRenderer.h"
+ #include "KisRunnableStrokeJobData.h"
+ #include "KisAnimAutoKey.h"
++#include "kis_selection.h"
++#include "kis_pixel_selection.h"
++#include "KisImageResolutionProxy.h"
++#include "kis_config.h"
+ 
+ #include "kis_paintop_registry.h"
+ #include "kis_paintop_preset.h"
+@@ -80,6 +84,9 @@ void KisPainterBasedStrokeStrategy::init()
+ 
+     enableJob(KisSimpleStrokeStrategy::JOB_SUSPEND);
+     enableJob(KisSimpleStrokeStrategy::JOB_RESUME);
++
++    // Krita Nova: Configure Krita > General > Tools > "Paint only inside the canvas"
++    m_paintInsideCanvas = KisConfig(true).readEntry("paintOnlyInsideCanvas", false);
+ }
+ 
+ KisPainterBasedStrokeStrategy::KisPainterBasedStrokeStrategy(const KisPainterBasedStrokeStrategy &rhs, int levelOfDetail)
+@@ -88,7 +95,8 @@ KisPainterBasedStrokeStrategy::KisPainterBasedStrokeStrategy(const KisPainterBas
+       m_useMergeID(rhs.m_useMergeID),
+       m_supportsMaskingBrush(rhs.m_supportsMaskingBrush),
+       m_supportsIndirectPainting(rhs.m_supportsIndirectPainting),
+-      m_supportsContinuedInterstrokeData(rhs.m_supportsContinuedInterstrokeData)
++      m_supportsContinuedInterstrokeData(rhs.m_supportsContinuedInterstrokeData),
++      m_paintInsideCanvas(rhs.m_paintInsideCanvas)
+ {
+     Q_FOREACH (KisFreehandStrokeInfo *info, rhs.m_strokeInfos) {
+         m_strokeInfos.append(new KisFreehandStrokeInfo(info, levelOfDetail));
+@@ -268,6 +276,20 @@ void KisPainterBasedStrokeStrategy::initStrokeCallback()
+         KisPaintDeviceSP paintDevice = node->paintDevice();
+         KisPaintDeviceSP targetDevice = paintDevice;
+         KisSelectionSP selection =  m_resources->activeSelection();
++
++        // Krita Nova: "Paint only inside the canvas" - without a selection of
++        // the user's, the stroke is limited to the canvas (the image bounds at
++        // the stroke's level of detail); not in wrap-around mode, which paints
++        // everywhere anyway
++        if (!selection && m_paintInsideCanvas && paintDevice->defaultBounds()
++                && !paintDevice->defaultBounds()->wrapAroundMode()) {
++            const QRect canvasRect = paintDevice->defaultBounds()->bounds();
++            if (!canvasRect.isEmpty()) {
++                selection = new KisSelection(paintDevice->defaultBounds(), KisImageResolutionProxy::identity());
++                selection->pixelSelection()->select(canvasRect);
++            }
++        }
++
+         bool hasIndirectPainting = supportsIndirectPainting() && m_resources->needsIndirectPainting();
+         const QString indirectCompositeOp = m_resources->indirectPaintingCompositeOp();
+ 
+diff --git a/libs/ui/tool/strokes/kis_painter_based_stroke_strategy.h b/libs/ui/tool/strokes/kis_painter_based_stroke_strategy.h
+index ea9dd20..7e47537 100644
+--- a/libs/ui/tool/strokes/kis_painter_based_stroke_strategy.h
++++ b/libs/ui/tool/strokes/kis_painter_based_stroke_strategy.h
+@@ -134,6 +134,7 @@ private:
+     bool m_supportsMaskingBrush {false};
+     bool m_supportsIndirectPainting {false};
+     bool m_supportsContinuedInterstrokeData {false};
++    bool m_paintInsideCanvas {false}; ///< Krita Nova: limit strokes to the canvas
+ 
+     KisIndirectPaintingSupport::FinalMergeSuspenderSP m_finalMergeSuspender;
+ 

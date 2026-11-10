@@ -1,0 +1,36 @@
+Krita Nova 56 - no empty Tools menu
+
+The menu bar's Tools menu only holds Scripts, which Python scripting fills;
+Nova Krita is built without it, so Tools > Scripts was always empty. The
+Tools menu is removed from krita5.xmlgui; KRITA5_XMLGUI_VERSION 546 -> 547 so
+the new menus replace a saved copy of the old ones.
+diff --git a/krita/CMakeLists.txt b/krita/CMakeLists.txt
+index c8e4981..065d089 100644
+--- a/krita/CMakeLists.txt
++++ b/krita/CMakeLists.txt
+@@ -126,7 +126,7 @@ endif()
+ # make a change that applies to all systems, remove any conditions. The version
+ # you specify should always be one higher than any version number you see here,
+ # no matter what you're doing. Do not re-use versions.
+-set(KRITA5_XMLGUI_VERSION 546)
++set(KRITA5_XMLGUI_VERSION 547)
+ 
+ # After updating the version number properly, put the new hash that the CMake
+ # error lists as the "actual hash" here.
+diff --git a/krita/krita5.xmlgui b/krita/krita5.xmlgui
+index 7eb11f8..7b8160a 100644
+--- a/krita/krita5.xmlgui
++++ b/krita/krita5.xmlgui
+@@ -377,10 +377,8 @@ xsi:schemaLocation="http://www.kde.org/standards/kxmlgui/1.0  http://www.kde.org
+       <Action name="QMic"/>
+       <Action name="QMicAgain"/>
+     </Menu>
+-    <Menu name="tools">
+-      <text>&amp;Tools</text>
+-      <Menu name="scripts" icon="scripts"><text>Scripts</text></Menu>
+-    </Menu>
++    <!-- Krita Nova: no Tools menu - its only entry, Scripts, is empty (Nova
++         Krita is built without Python scripting) -->
+     <Menu name="settings">
+       <text>Setti&amp;ngs</text>
+       <Action name="options_configure"/>

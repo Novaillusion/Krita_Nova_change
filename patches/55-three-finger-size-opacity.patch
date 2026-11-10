@@ -1,0 +1,320 @@
+Krita Nova 55 - three-finger drag changes brush size and opacity
+
+New canvas input action "Brush Size and Opacity" (KisBrushSizeOpacityGestureAction,
+Configure Krita > Canvas Input Settings), on a three-finger drag in every
+bundled input profile ([Brush Size and Opacity] 0={0;4;[];0;0;8} -
+ThreeFingerDrag, which no profile used):
+
+- the first 12 px of movement decide the direction for the rest of the drag;
+- up / down: brush size, on a log scale (150 px doubles / halves it), 1 to
+  10000 px;
+- left / right: opacity, 400 px for 0 to 100 %, at least 1 %;
+- the value shows in a floating message on the canvas;
+- through the canvas resources (KoCanvasResource::Size / Opacity), like the
+  toolbar sliders.
+
+A three-finger tap stays Redo. Profiles the user has customized (saved in
+the resource folder) need the gesture added in Canvas Input Settings.
+diff --git a/krita/data/input/clipstudiopaintcompatible.profile b/krita/data/input/clipstudiopaintcompatible.profile
+index 12cbd05..0e5a21d 100644
+--- a/krita/data/input/clipstudiopaintcompatible.profile
++++ b/krita/data/input/clipstudiopaintcompatible.profile
+@@ -80,3 +80,6 @@ version=7
+ [Zoom and Rotate Canvas]
+ 0={0;4;[];0;0;7}
+ 1={0;5;[];0;0;1}
++
++[Brush Size and Opacity]
++0={0;4;[];0;0;8}
+diff --git a/krita/data/input/kritadefault.profile b/krita/data/input/kritadefault.profile
+index 26373aa..7ee44a4 100644
+--- a/krita/data/input/kritadefault.profile
++++ b/krita/data/input/kritadefault.profile
+@@ -80,3 +80,6 @@ version=7
+ 1={1;4;[];0;0;3}
+ 2={2;4;[];0;0;4}
+ 3={3;2;[];20;0;0}
++
++[Brush Size and Opacity]
++0={0;4;[];0;0;8}
+diff --git a/krita/data/input/painttoolsaicompatible.profile b/krita/data/input/painttoolsaicompatible.profile
+index b63d82f..b961db7 100644
+--- a/krita/data/input/painttoolsaicompatible.profile
++++ b/krita/data/input/painttoolsaicompatible.profile
+@@ -78,3 +78,6 @@ version=7
+ 1={1;4;[];0;0;3}
+ 2={2;4;[];0;0;4}
+ 3={e;2;[];20;0;0}
++
++[Brush Size and Opacity]
++0={0;4;[];0;0;8}
+diff --git a/krita/data/input/photoshopcompatible.profile b/krita/data/input/photoshopcompatible.profile
+index aca38b5..b69a12a 100644
+--- a/krita/data/input/photoshopcompatible.profile
++++ b/krita/data/input/photoshopcompatible.profile
+@@ -75,3 +75,6 @@ version=7
+ 1={1;4;[];0;0;3}
+ 2={2;4;[];0;0;4}
+ 3={e;2;[];20;0;0}
++
++[Brush Size and Opacity]
++0={0;4;[];0;0;8}
+diff --git a/krita/data/input/tabletpro.profile b/krita/data/input/tabletpro.profile
+index ca7dd33..d74af2e 100644
+--- a/krita/data/input/tabletpro.profile
++++ b/krita/data/input/tabletpro.profile
+@@ -78,3 +78,6 @@ version=7
+ 
+ [Toggle Canvas Only]
+ 0={0;4;[];0;0;6}
++
++[Brush Size and Opacity]
++0={0;4;[];0;0;8}
+diff --git a/libs/ui/CMakeLists.txt b/libs/ui/CMakeLists.txt
+index ad30725..5b38c5f 100644
+--- a/libs/ui/CMakeLists.txt
++++ b/libs/ui/CMakeLists.txt
+@@ -381,6 +381,7 @@ set(kritaui_LIB_SRCS
+     input/kis_zoom_and_rotate_action.cpp
+     input/KisCanvasOnlyAction.cpp
+     input/KisTouchGestureAction.cpp
++    input/KisBrushSizeOpacityGestureAction.cpp
+     input/KisTouchHoldEventsPostponer.cpp
+     input/KisInputProfileMigrator.cpp
+ 
+diff --git a/libs/ui/input/KisBrushSizeOpacityGestureAction.cpp b/libs/ui/input/KisBrushSizeOpacityGestureAction.cpp
+new file mode 100644
+index 0000000..6feffd5
+--- /dev/null
++++ b/libs/ui/input/KisBrushSizeOpacityGestureAction.cpp
+@@ -0,0 +1,153 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "KisBrushSizeOpacityGestureAction.h"
++
++#include <QTouchEvent>
++#include <QtMath>
++
++#include <klocalizedstring.h>
++
++#include <KoCanvasResourceProvider.h>
++#include <KoCanvasResourcesIds.h>
++#include <kis_icon_utils.h>
++
++#include "kis_input_manager.h"
++#include "kis_canvas2.h"
++#include "KisViewManager.h"
++#include "kis_floating_message.h"
++
++namespace {
++/// movement (screen pixels) before the direction is decided
++const qreal DecideDistance = 12.0;
++/// dragging this far up doubles the size (and down halves it)
++const qreal DoubleSizeDistance = 150.0;
++/// dragging this far right adds 100 % opacity
++const qreal FullOpacityDistance = 400.0;
++}
++
++KisBrushSizeOpacityGestureAction::KisBrushSizeOpacityGestureAction()
++    : KisAbstractInputAction("Brush Size and Opacity")
++{
++    setName(i18n("Brush Size and Opacity"));
++    setDescription(i18n("Dragging up or down changes the brush size, left or right the opacity"));
++
++    QHash<QString, int> shortcuts;
++    shortcuts.insert(i18n("Change Brush Size and Opacity"), SizeAndOpacityShortcut);
++    setShortcutIndexes(shortcuts);
++}
++
++KisBrushSizeOpacityGestureAction::~KisBrushSizeOpacityGestureAction()
++{
++}
++
++int KisBrushSizeOpacityGestureAction::priority() const
++{
++    return 5;
++}
++
++bool KisBrushSizeOpacityGestureAction::supportsHiResInputEvents(int shortcut) const
++{
++    Q_UNUSED(shortcut);
++    return true;
++}
++
++KisInputActionGroup KisBrushSizeOpacityGestureAction::inputActionGroup(int shortcut) const
++{
++    Q_UNUSED(shortcut);
++    return ModifyingActionGroup;
++}
++
++QPointF KisBrushSizeOpacityGestureAction::centerOf(const QEvent *event)
++{
++    if (event && (event->type() == QEvent::TouchBegin || event->type() == QEvent::TouchUpdate
++                  || event->type() == QEvent::TouchEnd)) {
++        const QTouchEvent *touch = static_cast<const QTouchEvent *>(event);
++        QPointF sum;
++        int count = 0;
++        Q_FOREACH (const QTouchEvent::TouchPoint &point, touch->touchPoints()) {
++            if (point.state() == Qt::TouchPointReleased) continue;
++            sum += point.pos();
++            count++;
++        }
++        if (count > 0) return sum / count;
++    }
++    return eventPosF(event);
++}
++
++void KisBrushSizeOpacityGestureAction::begin(int shortcut, QEvent *event)
++{
++    KisAbstractInputAction::begin(shortcut, event);
++
++    m_active = false;
++    m_axis = Undecided;
++
++    KisCanvas2 *canvas = inputManager() ? inputManager()->canvas() : nullptr;
++    if (!canvas || !canvas->resourceManager()) return;
++
++    m_start = centerOf(event);
++    m_startSize = canvas->resourceManager()->resource(KoCanvasResource::Size).toDouble();
++    m_startOpacity = canvas->resourceManager()->resource(KoCanvasResource::Opacity).toDouble();
++    m_active = true;
++}
++
++void KisBrushSizeOpacityGestureAction::inputEvent(QEvent *event)
++{
++    if (!m_active || !event) {
++        KisAbstractInputAction::inputEvent(event);
++        return;
++    }
++    if (event->type() != QEvent::TouchUpdate && event->type() != QEvent::MouseMove
++            && event->type() != QEvent::TabletMove) {
++        return;
++    }
++
++    KisCanvas2 *canvas = inputManager() ? inputManager()->canvas() : nullptr;
++    if (!canvas || !canvas->resourceManager()) return;
++
++    const QPointF delta = centerOf(event) - m_start;
++
++    if (m_axis == Undecided) {
++        if (qAbs(delta.x()) < DecideDistance && qAbs(delta.y()) < DecideDistance) return;
++        m_axis = qAbs(delta.y()) >= qAbs(delta.x()) ? Vertical : Horizontal;
++    }
++
++    if (m_axis == Vertical) {
++        // up (negative y) makes the brush bigger, on a log scale so it is
++        // as easy for 3 px as for 300 px
++        const qreal size = qBound(1.0, m_startSize * qPow(2.0, -delta.y() / DoubleSizeDistance), 10000.0);
++        canvas->resourceManager()->setResource(KoCanvasResource::Size, size);
++    } else {
++        const qreal opacity = qBound(0.01, m_startOpacity + delta.x() / FullOpacityDistance, 1.0);
++        canvas->resourceManager()->setResource(KoCanvasResource::Opacity, opacity);
++    }
++    showValue();
++}
++
++void KisBrushSizeOpacityGestureAction::showValue()
++{
++    KisCanvas2 *canvas = inputManager() ? inputManager()->canvas() : nullptr;
++    if (!canvas || !canvas->viewManager() || !canvas->resourceManager()) return;
++
++    QString text;
++    if (m_axis == Vertical) {
++        const qreal size = canvas->resourceManager()->resource(KoCanvasResource::Size).toDouble();
++        text = i18n("Brush size: %1 px", QString::number(size, 'f', size < 10 ? 1 : 0));
++    } else if (m_axis == Horizontal) {
++        const qreal opacity = canvas->resourceManager()->resource(KoCanvasResource::Opacity).toDouble();
++        text = i18n("Opacity: %1%", qRound(opacity * 100));
++    } else {
++        return;
++    }
++    canvas->viewManager()->showFloatingMessage(text, QIcon(), 1000, KisFloatingMessage::High);
++}
++
++void KisBrushSizeOpacityGestureAction::end(QEvent *event)
++{
++    m_active = false;
++    m_axis = Undecided;
++    KisAbstractInputAction::end(event);
++}
+diff --git a/libs/ui/input/KisBrushSizeOpacityGestureAction.h b/libs/ui/input/KisBrushSizeOpacityGestureAction.h
+new file mode 100644
+index 0000000..d47afa2
+--- /dev/null
++++ b/libs/ui/input/KisBrushSizeOpacityGestureAction.h
+@@ -0,0 +1,51 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef KIS_BRUSH_SIZE_OPACITY_GESTURE_ACTION_H
++#define KIS_BRUSH_SIZE_OPACITY_GESTURE_ACTION_H
++
++#include "kis_abstract_input_action.h"
++
++#include <QPointF>
++
++/**
++ * Krita Nova: a drag (by default with three fingers) changes the brush: up /
++ * down its size, left / right its opacity. The direction of the first
++ * movement decides which one, for the rest of the drag.
++ */
++class KisBrushSizeOpacityGestureAction : public KisAbstractInputAction
++{
++public:
++    enum Shortcut {
++        SizeAndOpacityShortcut
++    };
++
++    KisBrushSizeOpacityGestureAction();
++    ~KisBrushSizeOpacityGestureAction() override;
++
++    void begin(int shortcut, QEvent *event) override;
++    void end(QEvent *event) override;
++    void inputEvent(QEvent *event) override;
++
++    bool supportsHiResInputEvents(int shortcut) const override;
++    KisInputActionGroup inputActionGroup(int shortcut) const override;
++    int priority() const override;
++
++private:
++    enum Axis { Undecided, Vertical, Horizontal };
++
++    /// the centre of the touch points (or the event's position)
++    static QPointF centerOf(const QEvent *event);
++    void showValue();
++
++    QPointF m_start;
++    qreal m_startSize {0.0};
++    qreal m_startOpacity {1.0};
++    Axis m_axis {Undecided};
++    bool m_active {false};
++};
++
++#endif // KIS_BRUSH_SIZE_OPACITY_GESTURE_ACTION_H
+diff --git a/libs/ui/input/kis_input_profile_manager.cpp b/libs/ui/input/kis_input_profile_manager.cpp
+index 074907f..2cdb9f0 100644
+--- a/libs/ui/input/kis_input_profile_manager.cpp
++++ b/libs/ui/input/kis_input_profile_manager.cpp
+@@ -34,6 +34,7 @@
+ #include "kis_zoom_and_rotate_action.h"
+ #include "KisCanvasOnlyAction.h"
+ #include "KisTouchGestureAction.h"
++#include "KisBrushSizeOpacityGestureAction.h"
+ #include "KisInputProfileMigrator.h"
+ 
+ 
+@@ -485,6 +486,7 @@ void KisInputProfileManager::Private::createActions()
+     actions.append(new KisChangeFrameAction());
+     actions.append(new KisZoomAndRotateAction());
+     actions.append(new KisTouchGestureAction());
++    actions.append(new KisBrushSizeOpacityGestureAction()); // Krita Nova
+ }
+ 
+ QString KisInputProfileManager::Private::profileFileName(const QString &profileName)

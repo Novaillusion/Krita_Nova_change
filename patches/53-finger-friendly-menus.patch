@@ -1,0 +1,155 @@
+Krita Nova 53 - finger-friendly menus (Android)
+
+Menu items were too close together to hit the right one with a finger, and a
+tap was too short to see which one was hit.
+
+- KisTouchFriendlyStyle::sizeFromContents(): menu items (not separators) are
+  at least MENU_ITEM_HEIGHT (40) high - every menu: the menu bar's, the
+  Layers docker's "+" menu, context menus, ...
+- MenuTapFeedback (an application event filter): when a finger (or mouse)
+  is released over a menu item, the item is highlighted and the release is
+  held back for MENU_TAP_FEEDBACK_MS (150 ms), then replayed - the menu acts
+  and closes after the tapped line was shown. Separators, disabled items and
+  submenus behave as before.
+
+Android only (KisTouchFriendlyStyle is only used there).
+diff --git a/libs/ui/KisTouchFriendlyStyle.cpp b/libs/ui/KisTouchFriendlyStyle.cpp
+index 958bae8..7d0623f 100644
+--- a/libs/ui/KisTouchFriendlyStyle.cpp
++++ b/libs/ui/KisTouchFriendlyStyle.cpp
+@@ -20,6 +20,9 @@
+ #include <QLayout>
+ #include <QPainter>
+ #include <QToolButton>
++#include <QMenu>
++#include <QTimer>
++#include <QStyleOptionMenuItem>
+ 
+ #include <kis_icon_utils.h>
+ #include <klocalizedstring.h>
+@@ -436,6 +439,70 @@ private:
+     };
+ };
+ 
++/**
++ * Krita Nova: a tapped menu item is shown highlighted for a moment before the
++ * menu acts on it and closes - with a finger the tap is too short to see which
++ * line was hit. The release over an item is held back for
++ * MENU_TAP_FEEDBACK_MS (the item is highlighted meanwhile) and then replayed.
++ */
++class MenuTapFeedback : public QObject
++{
++public:
++    static void install()
++    {
++        if (!s_instance) {
++            s_instance = new MenuTapFeedback(qApp);
++            qApp->installEventFilter(s_instance);
++        }
++    }
++
++protected:
++    bool eventFilter(QObject *watched, QEvent *event) override
++    {
++        if (event->type() != QEvent::MouseButtonRelease || m_replaying) {
++            return false;
++        }
++        QMenu *menu = qobject_cast<QMenu *>(watched);
++        if (!menu || !menu->isVisible()) return false;
++
++        QMouseEvent *mouse = static_cast<QMouseEvent *>(event);
++        if (mouse->button() != Qt::LeftButton) return false;
++
++        QAction *action = menu->actionAt(mouse->pos());
++        // separators, disabled items and submenus behave as before
++        if (!action || action->isSeparator() || !action->isEnabled() || action->menu()) {
++            return false;
++        }
++
++        menu->setActiveAction(action);
++        menu->update();
++
++        const QPointF localPos = mouse->localPos();
++        const QPointF windowPos = mouse->windowPos();
++        const QPointF screenPos = mouse->screenPos();
++        const Qt::KeyboardModifiers modifiers = mouse->modifiers();
++        QPointer<QMenu> menuPointer(menu);
++
++        QTimer::singleShot(KisTouchFriendlyStyle::MENU_TAP_FEEDBACK_MS, this,
++                           [this, menuPointer, localPos, windowPos, screenPos, modifiers]() {
++            if (!menuPointer || !menuPointer->isVisible()) return;
++            QMouseEvent release(QEvent::MouseButtonRelease, localPos, windowPos, screenPos,
++                                Qt::LeftButton, Qt::NoButton, modifiers, Qt::MouseEventSynthesizedByApplication);
++            m_replaying = true;
++            QCoreApplication::sendEvent(menuPointer, &release);
++            m_replaying = false;
++        });
++        return true;
++    }
++
++private:
++    using QObject::QObject;
++    static MenuTapFeedback *s_instance;
++    bool m_replaying {false};
++};
++
++MenuTapFeedback *MenuTapFeedback::s_instance = nullptr;
++
+ } // namespace
+ 
+ KisTouchFriendlyStyle::KisTouchFriendlyStyle(const QString &baseStyleName)
+@@ -470,6 +537,21 @@ int KisTouchFriendlyStyle::pixelMetric(PixelMetric metric, const QStyleOption *o
+     }
+ }
+ 
++QSize KisTouchFriendlyStyle::sizeFromContents(ContentsType type, const QStyleOption *option,
++                                              const QSize &size, const QWidget *widget) const
++{
++    QSize result = QProxyStyle::sizeFromContents(type, option, size, widget);
++
++    // Krita Nova: menu items tall enough to tap the right one with a finger
++    if (type == CT_MenuItem) {
++        const QStyleOptionMenuItem *item = qstyleoption_cast<const QStyleOptionMenuItem *>(option);
++        if (item && item->menuItemType != QStyleOptionMenuItem::Separator) {
++            result.setHeight(qMax(result.height(), MENU_ITEM_HEIGHT));
++        }
++    }
++    return result;
++}
++
+ bool KisTouchFriendlyStyle::isEnabled()
+ {
+ #ifdef Q_OS_ANDROID
+@@ -495,4 +577,5 @@ void KisTouchFriendlyStyle::applyStyle(const QString &styleName)
+     qApp->setStyle(new KisTouchFriendlyStyle(styleName));
+     FloatingDockResizer::install();
+     DialogFramer::install();
++    MenuTapFeedback::install();
+ }
+diff --git a/libs/ui/KisTouchFriendlyStyle.h b/libs/ui/KisTouchFriendlyStyle.h
+index 1885637..7f8058a 100644
+--- a/libs/ui/KisTouchFriendlyStyle.h
++++ b/libs/ui/KisTouchFriendlyStyle.h
+@@ -29,6 +29,9 @@ public:
+     int pixelMetric(PixelMetric metric, const QStyleOption *option = nullptr,
+                     const QWidget *widget = nullptr) const override;
+ 
++    QSize sizeFromContents(ContentsType type, const QStyleOption *option,
++                           const QSize &size, const QWidget *widget = nullptr) const override;
++
+     /// Whether the touch-friendly style should wrap the application style.
+     static bool isEnabled();
+ 
+@@ -53,6 +56,12 @@ public:
+ 
+     /// Width of scroll bars, wide enough to grab with a finger
+     static constexpr int SCROLL_BAR_EXTENT = 22;
++
++    /// Height of menu items (all menus), tall enough to tap the right one
++    static constexpr int MENU_ITEM_HEIGHT = 40;
++
++    /// How long a tapped menu item stays highlighted before the menu acts on it
++    static constexpr int MENU_TAP_FEEDBACK_MS = 150;
+ };
+ 
+ #endif // KIS_TOUCH_FRIENDLY_STYLE_H

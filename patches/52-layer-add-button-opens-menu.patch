@@ -1,0 +1,82 @@
+Krita Nova 52 - the Layers docker's "+" opens the layer menu
+
+The "+" (Add) button of the Layers docker was a split button: a click added a
+paint layer, its small arrow opened the menu of layer and mask types. Now
+there is no arrow part: a click on "+" opens that menu (paint, group, clone,
+vector, fill, file layer, the masks ...). The keyboard shortcut (Insert, "Add
+Paint Layer") is unchanged; the tooltip says so: "Add new layer or mask
+(paint layer: Insert)".
+
+LayerBox.cpp: the menu is no longer set on bnAdd (no split part, no menu
+indicator); clicked() pops it up below the button.
+diff --git a/plugins/dockers/layerdocker/LayerBox.cpp b/plugins/dockers/layerdocker/LayerBox.cpp
+index 59de0e8..03305f9 100644
+--- a/plugins/dockers/layerdocker/LayerBox.cpp
++++ b/plugins/dockers/layerdocker/LayerBox.cpp
+@@ -133,7 +133,7 @@ namespace {
+ 
+ /// Krita Nova: the button's tooltip with the action's shortcut(s), e.g.
+ /// "Duplicate layer or mask (Ctrl+J)"
+-void updateShortcutToolTip(QAbstractButton *button, QAction *action)
++void updateShortcutToolTip(QAbstractButton *button, QAction *action, const QString &format = QString())
+ {
+     if (!button || !action) return;
+ 
+@@ -149,19 +149,20 @@ void updateShortcutToolTip(QAbstractButton *button, QAction *action)
+         const QString text = shortcut.toString(QKeySequence::NativeText);
+         if (!text.isEmpty() && !keys.contains(text)) keys << text;
+     }
++    const QString keyText = keys.join(i18nc("separator between keyboard shortcuts", ", "));
+     button->setToolTip(keys.isEmpty() ? base
+-                                      : i18nc("tooltip: %1 what the button does, %2 keyboard shortcut", "%1 (%2)",
+-                                              base, keys.join(i18nc("separator between keyboard shortcuts", ", "))));
++                       : !format.isEmpty() ? format.arg(base, keyText)
++                       : i18nc("tooltip: %1 what the button does, %2 keyboard shortcut", "%1 (%2)", base, keyText));
+ }
+ 
+ /// Krita Nova: keeps the tooltip up to date when the shortcut is changed
+-void showShortcutInToolTip(QAbstractButton *button, QAction *action)
++void showShortcutInToolTip(QAbstractButton *button, QAction *action, const QString &format = QString())
+ {
+     if (!button || !action) return;
+-    updateShortcutToolTip(button, action);
++    updateShortcutToolTip(button, action, format);
+     QPointer<QAbstractButton> buttonPointer(button);
+-    QObject::connect(action, &QAction::changed, button, [buttonPointer, action]() {
+-        updateShortcutToolTip(buttonPointer, action);
++    QObject::connect(action, &QAction::changed, button, [buttonPointer, action, format]() {
++        updateShortcutToolTip(buttonPointer, action, format);
+     });
+ }
+ 
+@@ -261,8 +262,13 @@ LayerBox::LayerBox()
+     connect(m_wdgLayerBox->cmbComposite, SIGNAL(activated(int)), SLOT(slotCompositeOpChanged(int)));
+ 
+     m_newLayerMenu = new QMenu(this);
+-    m_wdgLayerBox->bnAdd->setMenu(m_newLayerMenu);
+-    m_wdgLayerBox->bnAdd->setPopupMode(QToolButton::MenuButtonPopup);
++    // Krita Nova: "+" opens the menu of layers and masks at once - no arrow
++    // part, no menu indicator (the menu is not set on the button); Insert
++    // still adds a paint layer
++    connect(m_wdgLayerBox->bnAdd, &QAbstractButton::clicked, this, [this]() {
++        QAbstractButton *button = m_wdgLayerBox->bnAdd;
++        m_newLayerMenu->popup(button->mapToGlobal(QPoint(0, button->height())));
++    });
+ 
+     m_opLayerMenu = new QMenu(this);
+     m_wdgLayerBox->bnProperties->setMenu(m_opLayerMenu);
+@@ -539,9 +545,11 @@ void LayerBox::setViewManager(KisViewManager* kisview)
+             addAction(m_showGlobalSelectionMask->objectName(),
+                       m_showGlobalSelectionMask);
+ 
+-    connect(m_wdgLayerBox->bnAdd, SIGNAL(clicked()), this, SLOT(slotAddLayerBnClicked()));
+-    // Krita Nova: a click adds a paint layer (with one layer selected)
+-    showShortcutInToolTip(m_wdgLayerBox->bnAdd, kisview->actionManager()->actionByName("add_new_paint_layer"));
++    // Krita Nova: "+" opens the menu (InstantPopup, see above); the tooltip
++    // shows the shortcut that still adds a paint layer
++    showShortcutInToolTip(m_wdgLayerBox->bnAdd, kisview->actionManager()->actionByName("add_new_paint_layer"),
++                          i18nc("tooltip of the + button of the Layers docker: %1 its tooltip, %2 a keyboard shortcut",
++                                "%1 (paint layer: %2)", QStringLiteral("%1"), QStringLiteral("%2")));
+ 
+     connectActionToButton(kisview, m_wdgLayerBox->bnDuplicate, "duplicatelayer");
+     // Krita Nova: clears the layer, or the selected area (Edit > Clear)

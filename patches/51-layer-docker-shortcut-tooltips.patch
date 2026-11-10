@@ -1,0 +1,114 @@
+Krita Nova 51 - shortcuts in the Layers docker's button tooltips
+
+The buttons at the bottom of the Layers docker show their action's keyboard
+shortcut in the tooltip, like the toolbox (patch 44): "Add new layer or mask
+(Insert)", "Duplicate layer or mask (Ctrl+J)", Clear (patch 43), move down /
+up, properties, delete. Several shortcuts are listed with commas; changing a
+shortcut updates the tooltip. The Add button shows the shortcut of "Add Paint
+Layer", what a click on it does.
+
+LayerBox.cpp: showShortcutInToolTip() for the buttons connected with
+connectActionToButton() and SyncButtonAndAction, and for bnAdd.
+diff --git a/plugins/dockers/layerdocker/LayerBox.cpp b/plugins/dockers/layerdocker/LayerBox.cpp
+index ccb93d3..59de0e8 100644
+--- a/plugins/dockers/layerdocker/LayerBox.cpp
++++ b/plugins/dockers/layerdocker/LayerBox.cpp
+@@ -11,6 +11,8 @@
+  */
+ 
+ #include "LayerBox.h"
++#include <QPointer>
++#include <QKeySequence>
+ 
+ #include <QApplication>
+ #include <QToolButton>
+@@ -127,6 +129,44 @@ public:
+     }
+ };
+ 
++namespace {
++
++/// Krita Nova: the button's tooltip with the action's shortcut(s), e.g.
++/// "Duplicate layer or mask (Ctrl+J)"
++void updateShortcutToolTip(QAbstractButton *button, QAction *action)
++{
++    if (!button || !action) return;
++
++    QString base = button->property("_kritanova_tooltip").toString();
++    if (base.isEmpty()) {
++        base = button->toolTip();
++        if (base.isEmpty()) base = action->toolTip();
++        button->setProperty("_kritanova_tooltip", base);
++    }
++
++    QStringList keys;
++    Q_FOREACH (const QKeySequence &shortcut, action->shortcuts()) {
++        const QString text = shortcut.toString(QKeySequence::NativeText);
++        if (!text.isEmpty() && !keys.contains(text)) keys << text;
++    }
++    button->setToolTip(keys.isEmpty() ? base
++                                      : i18nc("tooltip: %1 what the button does, %2 keyboard shortcut", "%1 (%2)",
++                                              base, keys.join(i18nc("separator between keyboard shortcuts", ", "))));
++}
++
++/// Krita Nova: keeps the tooltip up to date when the shortcut is changed
++void showShortcutInToolTip(QAbstractButton *button, QAction *action)
++{
++    if (!button || !action) return;
++    updateShortcutToolTip(button, action);
++    QPointer<QAbstractButton> buttonPointer(button);
++    QObject::connect(action, &QAction::changed, button, [buttonPointer, action]() {
++        updateShortcutToolTip(buttonPointer, action);
++    });
++}
++
++} // namespace
++
+ inline void LayerBox::connectActionToButton(KisViewManager* viewManager, QAbstractButton *button, const QString &id)
+ {
+     if (!viewManager || !button) return;
+@@ -137,6 +177,7 @@ inline void LayerBox::connectActionToButton(KisViewManager* viewManager, QAbstra
+ 
+     connect(button, SIGNAL(clicked()), action, SLOT(trigger()));
+     connect(action, SIGNAL(sigEnableSlaves(bool)), button, SLOT(setEnabled(bool)));
++    showShortcutInToolTip(button, action);
+     connect(viewManager->mainWindowAsQWidget(), SIGNAL(themeChanged()), this, SLOT(slotUpdateIcons()));
+ }
+ 
+@@ -499,6 +540,8 @@ void LayerBox::setViewManager(KisViewManager* kisview)
+                       m_showGlobalSelectionMask);
+ 
+     connect(m_wdgLayerBox->bnAdd, SIGNAL(clicked()), this, SLOT(slotAddLayerBnClicked()));
++    // Krita Nova: a click adds a paint layer (with one layer selected)
++    showShortcutInToolTip(m_wdgLayerBox->bnAdd, kisview->actionManager()->actionByName("add_new_paint_layer"));
+ 
+     connectActionToButton(kisview, m_wdgLayerBox->bnDuplicate, "duplicatelayer");
+     // Krita Nova: clears the layer, or the selected area (Edit > Clear)
+@@ -513,6 +556,7 @@ void LayerBox::setViewManager(KisViewManager* kisview)
+     m_propertiesAction = actionManager->createAction("layer_properties");
+     Q_ASSERT(m_propertiesAction);
+     new SyncButtonAndAction(m_propertiesAction, m_wdgLayerBox->bnProperties, this);
++    showShortcutInToolTip(m_wdgLayerBox->bnProperties, m_propertiesAction);
+     connect(m_propertiesAction, SIGNAL(triggered()), this, SLOT(slotPropertiesClicked()));
+ 
+     connect(m_opLayerMenu, SIGNAL(aboutToShow()), this, SLOT(slotLayerOpMenuOpened()));
+@@ -524,16 +568,19 @@ void LayerBox::setViewManager(KisViewManager* kisview)
+     m_removeAction = actionManager->createAction("remove_layer");
+     Q_ASSERT(m_removeAction);
+     new SyncButtonAndAction(m_removeAction, m_wdgLayerBox->bnDelete, this);
++    showShortcutInToolTip(m_wdgLayerBox->bnDelete, m_removeAction);
+     connect(m_removeAction, SIGNAL(triggered()), this, SLOT(slotRmClicked()));
+ 
+     action = actionManager->createAction("move_layer_up");
+     Q_ASSERT(action);
+     new SyncButtonAndAction(action, m_wdgLayerBox->bnRaise, this);
++    showShortcutInToolTip(m_wdgLayerBox->bnRaise, action);
+     connect(action, SIGNAL(triggered()), this, SLOT(slotRaiseClicked()));
+ 
+     action = actionManager->createAction("move_layer_down");
+     Q_ASSERT(action);
+     new SyncButtonAndAction(action, m_wdgLayerBox->bnLower, this);
++    showShortcutInToolTip(m_wdgLayerBox->bnLower, action);
+     connect(action, SIGNAL(triggered()), this, SLOT(slotLowerClicked()));
+ 
+     m_changeCloneSourceAction = actionManager->createAction("set-copy-from");

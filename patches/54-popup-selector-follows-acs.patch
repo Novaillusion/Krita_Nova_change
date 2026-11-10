@@ -1,0 +1,87 @@
+Krita Nova 54 - the pop-up palette's color selector matches the docker's
+
+The pop-up palette drew the sRGB triangle by default, whatever the Advanced
+Color Selector looked like. Krita can draw it from the Advanced Color
+Selector's settings instead (KisVisualColorSelector, "Wide Gamut Selector" in
+Configure Krita > Pop-up Palette > Color Selector):
+
+- that is the default now, and existing settings are switched to it once
+  (kritarc popuppalette/novaSelectorFollowsACS); it can still be set back;
+- the option is called "Same as the Advanced Color Selector";
+- Restore Defaults picks it too.
+
+The selector follows changes of the Color Selector Settings (shape, ring or
+slider, HSV/HSL/...) as before; in the round palette a slider is drawn as a
+ring.
+diff --git a/libs/ui/dialogs/kis_dlg_preferences.cc b/libs/ui/dialogs/kis_dlg_preferences.cc
+index d550081..c9ac0be 100644
+--- a/libs/ui/dialogs/kis_dlg_preferences.cc
++++ b/libs/ui/dialogs/kis_dlg_preferences.cc
+@@ -2720,11 +2720,21 @@ void PopupPaletteTab::load()
+ {
+     using namespace PopupPaletteTabPrivate;
+ 
++    // Krita Nova: the pop-up palette's color selector is the same as the
++    // Advanced Color Selector (its settings: shape, ring, ...) - switched once
++    // for everyone, it can still be set back in Configure Krita > Pop-up Palette
++    {
++        KisConfig writable(false);
++        if (!writable.readEntry("popuppalette/novaSelectorFollowsACS", false)) {
++            writable.writeEntry<bool>("popuppalette/usevisualcolorselector", true);
++            writable.writeEntry<bool>("popuppalette/novaSelectorFollowsACS", true);
++        }
++    }
+     KisConfig config(true);
+     sbNumPresets->setValue(config.favoritePresets());
+     sbPaletteSize->setValue(config.readEntry("popuppalette/size", 385));
+     sbSelectorSize->setValue(config.readEntry("popuppalette/selectorSize", 140));
+-    cmbSelectorType->setCurrentIndex(config.readEntry<bool>("popuppalette/usevisualcolorselector", false) ? 1 : 0);
++    cmbSelectorType->setCurrentIndex(config.readEntry<bool>("popuppalette/usevisualcolorselector", true) ? 1 : 0);
+     chkShowColorHistory->setChecked(config.readEntry("popuppalette/showColorHistory", true));
+     chkShowRotationTrack->setChecked(config.readEntry("popuppalette/showRotationTrack", true));
+     chkUseDynamicSlotCount->setChecked(config.readEntry("popuppalette/useDynamicSlotCount", true));
+@@ -2765,7 +2775,7 @@ void PopupPaletteTab::setDefault()
+     sbNumPresets->setValue(config.favoritePresets(true));
+     sbPaletteSize->setValue(385);
+     sbSelectorSize->setValue(140);
+-    cmbSelectorType->setCurrentIndex(0);
++    cmbSelectorType->setCurrentIndex(1); // Krita Nova: same as the Advanced Color Selector
+     chkShowColorHistory->setChecked(true);
+     chkShowRotationTrack->setChecked(true);
+     chkUseDynamicSlotCount->setChecked(true);
+diff --git a/libs/ui/forms/WdgPopupPaletteSettings.ui b/libs/ui/forms/WdgPopupPaletteSettings.ui
+index 75a1bea..b73f3c3 100644
+--- a/libs/ui/forms/WdgPopupPaletteSettings.ui
++++ b/libs/ui/forms/WdgPopupPaletteSettings.ui
+@@ -92,7 +92,7 @@
+      </item>
+      <item>
+       <property name="text">
+-       <string>Wide Gamut Selector</string>
++       <string>Same as the Advanced Color Selector</string>
+       </property>
+      </item>
+     </widget>
+diff --git a/libs/ui/kis_popup_palette.cpp b/libs/ui/kis_popup_palette.cpp
+index d8efe1d..9bb0655 100644
+--- a/libs/ui/kis_popup_palette.cpp
++++ b/libs/ui/kis_popup_palette.cpp
+@@ -326,7 +326,17 @@ void KisPopupPalette::reconfigure()
+ 
+     m_mainArea->changeSize(m_popupPaletteSize, m_popupPaletteSize);
+ 
+-    bool useVisualSelector = config.readEntry<bool>("popuppalette/usevisualcolorselector", false);
++    // Krita Nova: the pop-up palette's color selector is the same as the
++    // Advanced Color Selector (its settings: shape, ring, ...) - switched once
++    // for everyone, it can still be set back in Configure Krita > Pop-up Palette
++    {
++        KisConfig writable(false);
++        if (!writable.readEntry("popuppalette/novaSelectorFollowsACS", false)) {
++            writable.writeEntry<bool>("popuppalette/usevisualcolorselector", true);
++            writable.writeEntry<bool>("popuppalette/novaSelectorFollowsACS", true);
++        }
++    }
++    bool useVisualSelector = config.readEntry<bool>("popuppalette/usevisualcolorselector", true);
+     if (m_colorSelector) {
+         // if the selector type changed, delete it
+         bool haveVisualSelector = qobject_cast<KisVisualColorSelector*>(m_colorSelector) != 0;
