@@ -10,7 +10,8 @@ Krita Nova 59 - Brush Panel: blending mode button, Opacity / Flow switch
   "LC", Easy Burn / Dodge "EB" / "ED", Alpha Darken "AD", Divide "Dv",
   Dissolve "Ds", Copy "Cp", Bumpmap "Bm", Luminosity/Shine (SAI) "LS"). Tapping it opens the same
   blending mode list as before: it is the brush toolbar's blending mode
-  combo box, moved out of the "more" popup and covered by the label box.
+  combo box, moved out of the "more" popup, painting the letter box
+  instead of itself.
   The "more" popup no longer has the blending mode (alpha lock and reload
   stay there).
 - Below the bottom slider, an "O" / "F" button: it switches the slider
@@ -20,7 +21,7 @@ Krita Nova 59 - Brush Panel: blending mode button, Opacity / Flow switch
   letters (paintNovaLetterBox).
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 86b0866..0fed242 100644
+index 86b0866..93374d4 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
 @@ -24,6 +24,7 @@
@@ -161,16 +162,16 @@ index 86b0866..0fed242 100644
      }
      sliders->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
      return sliders;
-@@ -1537,6 +1622,152 @@ private:
+@@ -1537,6 +1622,149 @@ private:
  
  QPointer<PanelFingerRouter> PanelFingerRouter::s_instance;
  
 +/**
 + * Krita Nova (patch 59): the Brush Panel's blending mode button. The brush
 + * toolbar's own blending mode combo box is moved here (out of the "more"
-+ * popup) and covered by a box showing the first two letters of the mode
-+ * ("Normal" -> "No"). Touches go through the box to the combo box, so
-+ * tapping it opens the same blending mode list as before.
++ * popup) and paints a box with two letters for the mode ("Normal" -> "No")
++ * instead of itself, so tapping it opens the same blending mode list as
++ * before.
 + */
 +class NovaBlendModeButton : public QWidget
 +{
@@ -181,9 +182,6 @@ index 86b0866..0fed242 100644
 +        setObjectName(QStringLiteral("KritaNovaBlendModeButton"));
 +        setFixedSize(36, 36);
 +        setToolTip(i18n("Blending Mode"));
-+        m_cover = new Cover(this);
-+        m_cover->setGeometry(rect());
-+        m_cover->setAttribute(Qt::WA_TransparentForMouseEvents, true);
 +        // the combo box exists once the brush toolbar is made, and it may be
 +        // set with signals blocked (preset changes): look for it / follow it
 +        m_poll.setInterval(200);
@@ -192,20 +190,21 @@ index 86b0866..0fed242 100644
 +        attach();
 +    }
 +
-+private:
-+    class Cover : public QWidget
++protected:
++    /// the combo box paints only the letter box (the same look as the O / F
++    /// switch), never itself: a box laid over it still let its frame and
++    /// text show at the edges
++    bool eventFilter(QObject *watched, QEvent *event) override
 +    {
-+    public:
-+        explicit Cover(QWidget *parent) : QWidget(parent) {}
-+        QString text;
-+    protected:
-+        void paintEvent(QPaintEvent *) override
-+        {
-+            QPainter p(this);
-+            paintNovaLetterBox(p, this, text, false); // same look as the O / F switch
++        if (watched == m_combo && event->type() == QEvent::Paint) {
++            QPainter p(m_combo);
++            paintNovaLetterBox(p, m_combo, m_text, false);
++            return true;
 +        }
-+    };
++        return QWidget::eventFilter(watched, event);
++    }
 +
++private:
 +    void attach()
 +    {
 +        if (m_combo) return;
@@ -220,13 +219,11 @@ index 86b0866..0fed242 100644
 +        combo->setParent(this);
 +        combo->setMinimumSize(0, 0);
 +        combo->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
-+        // inside the label box only: at the full size its frame and text
-+        // showed around the box's rounded corners
-+        combo->setGeometry(rect().adjusted(4, 4, -4, -4));
++        combo->setGeometry(rect());
++        combo->installEventFilter(this);
 +        // the list keeps a readable width although the button is small
 +        if (combo->view()) combo->view()->setMinimumWidth(qMax(combo->view()->minimumWidth(), 220));
 +        combo->show();
-+        m_cover->raise();
 +        connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() { updateText(); });
 +        updateText();
 +    }
@@ -234,15 +231,16 @@ index 86b0866..0fed242 100644
 +    void updateText()
 +    {
 +        if (!m_combo) return;
++        // kept to the button (something may resize the combo box)
++        if (m_combo->geometry() != rect()) m_combo->setGeometry(rect());
 +        const QString name = m_combo->currentText().trimmed();
 +        const QString letters = shortName(m_combo->selectedCompositeOp().id(), name);
-+        if (letters != m_cover->text) {
-+            m_cover->text = letters;
-+            m_cover->update();
++        if (letters != m_text) {
++            m_text = letters;
++            m_combo->update();
 +        }
 +        const QString tip = i18n("Blending Mode: %1", name);
 +        if (toolTip() != tip) setToolTip(tip);
-+        if (m_cover->isEnabled() != m_combo->isEnabled()) m_cover->setEnabled(m_combo->isEnabled());
 +    }
 +
 +    /// Two letters for the button: the common painting modes have their own
@@ -307,14 +305,14 @@ index 86b0866..0fed242 100644
 +
 +    QPointer<KisViewManager> m_viewManager;
 +    QPointer<KisCompositeOpComboBox> m_combo;
-+    Cover *m_cover {nullptr};
++    QString m_text;
 +    QTimer m_poll;
 +};
 +
  QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *viewManager, QStackedWidget *mainStack)
  {
      QDockWidget *topBar = createAndroidTopBarDock(mainWindow);
-@@ -1559,7 +1790,7 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+@@ -1559,7 +1787,7 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
      RoundedPanelPainter::install(dock);
      dock->setTitleBarWidget(titleBar);
  
@@ -323,7 +321,7 @@ index 86b0866..0fed242 100644
      QWidget *container = new QWidget(dock);
      QVBoxLayout *layout = new QVBoxLayout(container);
      layout->setContentsMargins(3, 2, 3, 8); // thin sides, room at the bottom
-@@ -1611,6 +1842,9 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+@@ -1611,6 +1839,9 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
      });
      layout->addWidget(moreButton, 0, Qt::AlignHCenter);
  
