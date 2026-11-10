@@ -1,0 +1,305 @@
+Krita Nova 59 - Brush Panel: blending mode button, Opacity / Flow switch
+
+- Below the "more" (3 dots) button, a button with two letters for the
+  brush blending mode: the first two of its name ("Normal" -> "No"), and
+  for the common painting modes their own, so they differ (Color Dodge
+  "CD", Linear Burn "LB", Linear Dodge "LD", Linear Light "LL", Vivid Light
+  "VL", Pin Light "PL", Hard Light "HL", Soft Light (Photoshop) "SL", Soft
+  Light (SVG) "SS", Hard Mix "HM", Hard Mix (Photoshop) "HP", Hard Overlay
+  "HO", Grain Merge / Extract "GM" / "GE", Darker / Lighter Color "DC" /
+  "LC", Easy Burn / Dodge "EB" / "ED", Alpha Darken "AD", Divide "Dv",
+  Dissolve "Ds", Copy "Cp", Bumpmap "Bm", Luminosity/Shine (SAI) "LS"). Tapping it opens the same
+  blending mode list as before: it is the brush toolbar's blending mode
+  combo box, moved out of the "more" popup and covered by the label box.
+  The "more" popup no longer has the blending mode (alpha lock and reload
+  stay there).
+- Below the bottom slider, an "O" / "F" button: it switches the slider
+  between Opacity and Flow (its letter and tooltip follow). The choice is
+  remembered (kritarc [KritaNova] brushPanelSliderIsFlow).
+
+diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
+index 86b0866..b517199 100644
+--- a/libs/ui/KisMainWindow.cpp
++++ b/libs/ui/KisMainWindow.cpp
+@@ -24,6 +24,7 @@
+ #include <QTimer>
+ #include <functional>
+ #include <QWidgetAction>
++#include <QHash>
+ #include <QStyle>
+ #include <KisPopupButton.h>
+ #include <QElapsedTimer>
+@@ -42,6 +43,7 @@
+ #include <kis_slider_spin_box.h>
+ #include "widgets/kis_widget_chooser.h"
+ #include "widgets/kis_cmb_composite.h"
++#include <KoCompositeOpRegistry.h>
+ #include "widgets/KoDualColorButton.h"
+ #include <QIcon>
+ #include <QInputDialog>
+@@ -420,7 +422,7 @@ public:
+         setToolTip(name);
+         setMinimumSize(45, 110);
+         setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
+-        connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this]() { update(); });
++        m_valueConnection = connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this]() { update(); });
+         // the brush toolbar updates its sliders with signals blocked (preset
+         // changes, the three-finger size / opacity gesture, shortcuts...):
+         // follow the value every frame. Krita Nova (patch 57): the bar glides
+@@ -447,6 +449,22 @@ public:
+ 
+     QSize sizeHint() const override { return QSize(45, 200); }
+ 
++    /// Krita Nova (patch 59): bind the slider to another of the brush
++    /// toolbar's spin boxes (opacity <-> flow)
++    void setSpin(KisDoubleSliderSpinBox *spin, const QString &name, const QString &letter)
++    {
++        if (!spin || spin == m_spin) return;
++        disconnect(m_valueConnection);
++        m_spin = spin;
++        m_name = name;
++        m_letter = letter;
++        setToolTip(name);
++        m_dragging = false;
++        m_shownPos = -1.0; // jump to the new value, no glide
++        m_valueConnection = connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this]() { update(); });
++        update();
++    }
++
+ protected:
+     qreal toPos(qreal v) const
+     {
+@@ -542,6 +560,7 @@ protected:
+ 
+ private:
+     QPointer<KisDoubleSliderSpinBox> m_spin;
++    QMetaObject::Connection m_valueConnection;
+     QString m_name;
+     QString m_letter;
+     QString m_unit;
+@@ -653,7 +672,45 @@ QWidget *createBrushSliders(QMainWindow *mainWindow, QWidget *parent)
+         KisDoubleSliderSpinBox *size = sliderChooser->getWidget<KisDoubleSliderSpinBox>("size");
+         KisDoubleSliderSpinBox *opacity = sliderChooser->getWidget<KisDoubleSliderSpinBox>("opacity");
+         if (size) layout->addWidget(new NovaVerticalSlider(size, i18n("Size"), i18nc("one-letter label of the brush size slider", "S"), i18nc("unit: pixels", "px"), 3.0, sliders), 1, Qt::AlignHCenter);
+-        if (opacity) layout->addWidget(new NovaVerticalSlider(opacity, i18n("Opacity"), i18nc("one-letter label of the brush opacity slider", "O"), QStringLiteral("%"), 1.0, sliders), 1, Qt::AlignHCenter);
++        KisDoubleSliderSpinBox *flow = sliderChooser->getWidget<KisDoubleSliderSpinBox>("flow");
++        if (opacity) {
++            NovaVerticalSlider *second = new NovaVerticalSlider(opacity, i18n("Opacity"), i18nc("one-letter label of the brush opacity slider", "O"), QStringLiteral("%"), 1.0, sliders);
++            layout->addWidget(second, 1, Qt::AlignHCenter);
++            // Krita Nova (patch 59): below it, a button switching what the
++            // slider changes - Opacity (O) or Flow (F); remembered
++            if (flow) {
++                QToolButton *modeButton = new QToolButton(sliders);
++                modeButton->setObjectName(QStringLiteral("KritaNovaOpacityFlowSwitch"));
++                modeButton->setFixedSize(36, 36);
++                QFont f = modeButton->font();
++                f.setBold(true);
++                modeButton->setFont(f);
++                QPointer<KisDoubleSliderSpinBox> opacityPtr(opacity), flowPtr(flow);
++                auto apply = [second, modeButton, opacityPtr, flowPtr](bool useFlow) {
++                    if (useFlow && flowPtr) {
++                        second->setSpin(flowPtr, i18n("Flow"), i18nc("one-letter label of the brush flow slider", "F"));
++                        modeButton->setText(i18nc("one-letter label of the brush flow slider", "F"));
++                        modeButton->setToolTip(i18n("The slider above changes the Flow. Tap to change the Opacity instead"));
++                    } else if (opacityPtr) {
++                        second->setSpin(opacityPtr, i18n("Opacity"), i18nc("one-letter label of the brush opacity slider", "O"));
++                        modeButton->setText(i18nc("one-letter label of the brush opacity slider", "O"));
++                        modeButton->setToolTip(i18n("The slider above changes the Opacity. Tap to change the Flow instead"));
++                    }
++                };
++                KConfigGroup novaConfig(KSharedConfig::openConfig(), "KritaNova");
++                const bool startWithFlow = novaConfig.readEntry("brushPanelSliderIsFlow", false);
++                modeButton->setProperty("_kritanova_flow", startWithFlow);
++                apply(startWithFlow);
++                QObject::connect(modeButton, &QToolButton::clicked, modeButton, [modeButton, apply]() {
++                    const bool useFlow = !modeButton->property("_kritanova_flow").toBool();
++                    modeButton->setProperty("_kritanova_flow", useFlow);
++                    apply(useFlow);
++                    KConfigGroup group(KSharedConfig::openConfig(), "KritaNova");
++                    group.writeEntry("brushPanelSliderIsFlow", useFlow);
++                });
++                layout->addWidget(modeButton, 0, Qt::AlignHCenter);
++            }
++        }
+     }
+     sliders->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+     return sliders;
+@@ -1537,6 +1594,159 @@ private:
+ 
+ QPointer<PanelFingerRouter> PanelFingerRouter::s_instance;
+ 
++/**
++ * Krita Nova (patch 59): the Brush Panel's blending mode button. The brush
++ * toolbar's own blending mode combo box is moved here (out of the "more"
++ * popup) and covered by a box showing the first two letters of the mode
++ * ("Normal" -> "No"). Touches go through the box to the combo box, so
++ * tapping it opens the same blending mode list as before.
++ */
++class NovaBlendModeButton : public QWidget
++{
++public:
++    NovaBlendModeButton(KisViewManager *viewManager, QWidget *parent)
++        : QWidget(parent), m_viewManager(viewManager)
++    {
++        setObjectName(QStringLiteral("KritaNovaBlendModeButton"));
++        setFixedSize(36, 36);
++        setToolTip(i18n("Blending Mode"));
++        m_cover = new Cover(this);
++        m_cover->setGeometry(rect());
++        m_cover->setAttribute(Qt::WA_TransparentForMouseEvents, true);
++        // the combo box exists once the brush toolbar is made, and it may be
++        // set with signals blocked (preset changes): look for it / follow it
++        m_poll.setInterval(200);
++        connect(&m_poll, &QTimer::timeout, this, [this]() { attach(); updateText(); });
++        m_poll.start();
++        attach();
++    }
++
++private:
++    class Cover : public QWidget
++    {
++    public:
++        explicit Cover(QWidget *parent) : QWidget(parent) {}
++        QString text;
++    protected:
++        void paintEvent(QPaintEvent *) override
++        {
++            QPainter p(this);
++            p.setRenderHint(QPainter::Antialiasing, true);
++            const QRectF box = QRectF(rect()).adjusted(2.5, 2.5, -2.5, -2.5);
++            p.setPen(QPen(palette().color(QPalette::WindowText), 1.2));
++            p.setBrush(palette().color(QPalette::Window));
++            p.drawRoundedRect(box, 4, 4);
++            QFont f = QApplication::font();
++            f.setBold(true);
++            p.setFont(f);
++            p.setPen(isEnabled() ? palette().color(QPalette::WindowText) : palette().color(QPalette::Mid));
++            p.drawText(box, Qt::AlignCenter, text);
++        }
++    };
++
++    void attach()
++    {
++        if (m_combo) return;
++        if (!m_viewManager || !m_viewManager->actionCollection()) return;
++        QWidgetAction *action = qobject_cast<QWidgetAction *>(
++            m_viewManager->actionCollection()->action(QStringLiteral("composite_actions")));
++        QWidget *compositeActions = action ? action->defaultWidget() : nullptr;
++        KisCompositeOpComboBox *combo = compositeActions ? compositeActions->findChild<KisCompositeOpComboBox *>() : nullptr;
++        if (!combo) return;
++        m_combo = combo;
++        if (QLayout *oldLayout = compositeActions->layout()) oldLayout->removeWidget(combo);
++        combo->setParent(this);
++        combo->setMinimumSize(0, 0);
++        combo->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
++        combo->setGeometry(rect());
++        // the list keeps a readable width although the button is small
++        if (combo->view()) combo->view()->setMinimumWidth(qMax(combo->view()->minimumWidth(), 220));
++        combo->show();
++        m_cover->raise();
++        connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() { updateText(); });
++        updateText();
++    }
++
++    void updateText()
++    {
++        if (!m_combo) return;
++        const QString name = m_combo->currentText().trimmed();
++        const QString letters = shortName(m_combo->selectedCompositeOp().id(), name);
++        if (letters != m_cover->text) {
++            m_cover->text = letters;
++            m_cover->update();
++        }
++        const QString tip = i18n("Blending Mode: %1", name);
++        if (toolTip() != tip) setToolTip(tip);
++        if (m_cover->isEnabled() != m_combo->isEnabled()) m_cover->setEnabled(m_combo->isEnabled());
++    }
++
++    /// Two letters for the button: the common painting modes have their own
++    /// (so e.g. Color Dodge "CD" and Color "Co" differ), all others show the
++    /// first two letters of their name
++    static QString shortName(const QString &id, const QString &name)
++    {
++        static const QHash<QString, QString> codes = {
++            {COMPOSITE_OVER, QStringLiteral("No")},
++            {COMPOSITE_ERASE, QStringLiteral("Er")},
++            {COMPOSITE_BEHIND, QStringLiteral("Be")},
++            {COMPOSITE_ALPHA_DARKEN, QStringLiteral("AD")},
++            // arithmetic
++            {COMPOSITE_ADD, QStringLiteral("Ad")},
++            {COMPOSITE_SUBTRACT, QStringLiteral("Su")},
++            {COMPOSITE_MULT, QStringLiteral("Mu")},
++            {COMPOSITE_DIVIDE, QStringLiteral("Dv")},
++            // darken
++            {COMPOSITE_DARKEN, QStringLiteral("Da")},
++            {COMPOSITE_DARKER_COLOR, QStringLiteral("DC")},
++            {COMPOSITE_BURN, QStringLiteral("Bu")},
++            {COMPOSITE_LINEAR_BURN, QStringLiteral("LB")},
++            {COMPOSITE_EASY_BURN, QStringLiteral("EB")},
++            // lighten
++            {COMPOSITE_LIGHTEN, QStringLiteral("Li")},
++            {COMPOSITE_LIGHTER_COLOR, QStringLiteral("LC")},
++            {COMPOSITE_SCREEN, QStringLiteral("Sc")},
++            {COMPOSITE_DODGE, QStringLiteral("CD")},
++            {COMPOSITE_LINEAR_DODGE, QStringLiteral("LD")},
++            {COMPOSITE_EASY_DODGE, QStringLiteral("ED")},
++            {COMPOSITE_LINEAR_LIGHT, QStringLiteral("LL")},
++            {COMPOSITE_VIVID_LIGHT, QStringLiteral("VL")},
++            {COMPOSITE_PIN_LIGHT, QStringLiteral("PL")},
++            {COMPOSITE_HARD_LIGHT, QStringLiteral("HL")},
++            {COMPOSITE_SOFT_LIGHT_PHOTOSHOP, QStringLiteral("SL")},
++            {COMPOSITE_SOFT_LIGHT_SVG, QStringLiteral("SS")},
++            {COMPOSITE_LUMINOSITY_SAI, QStringLiteral("LS")},
++            // mix
++            {COMPOSITE_OVERLAY, QStringLiteral("Ov")},
++            {COMPOSITE_HARD_OVERLAY, QStringLiteral("HO")},
++            {COMPOSITE_HARD_MIX, QStringLiteral("HM")},
++            {COMPOSITE_HARD_MIX_PHOTOSHOP, QStringLiteral("HP")},
++            {COMPOSITE_GRAIN_MERGE, QStringLiteral("GM")},
++            {COMPOSITE_GRAIN_EXTRACT, QStringLiteral("GE")},
++            {COMPOSITE_GREATER, QStringLiteral("Gr")},
++            // negative
++            {COMPOSITE_DIFF, QStringLiteral("Di")},
++            {COMPOSITE_EXCLUSION, QStringLiteral("Ex")},
++            // misc
++            {COMPOSITE_DISSOLVE, QStringLiteral("Ds")},
++            {COMPOSITE_COPY, QStringLiteral("Cp")},
++            {COMPOSITE_BUMPMAP, QStringLiteral("Bm")},
++            // HSY (the HSL / HSI / HSV variants keep their first letters)
++            {COMPOSITE_COLOR, QStringLiteral("Co")},
++            {COMPOSITE_HUE, QStringLiteral("Hu")},
++            {COMPOSITE_SATURATION, QStringLiteral("Sa")},
++            {COMPOSITE_LUMINIZE, QStringLiteral("Lu")},
++        };
++        const QString code = codes.value(id);
++        return code.isEmpty() ? name.left(2) : code;
++    }
++
++    QPointer<KisViewManager> m_viewManager;
++    QPointer<KisCompositeOpComboBox> m_combo;
++    Cover *m_cover {nullptr};
++    QTimer m_poll;
++};
++
+ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *viewManager, QStackedWidget *mainStack)
+ {
+     QDockWidget *topBar = createAndroidTopBarDock(mainWindow);
+@@ -1559,7 +1769,7 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+     RoundedPanelPainter::install(dock);
+     dock->setTitleBarWidget(titleBar);
+ 
+-    // Column, everything centered: undo, redo | more (3 dots) | size | opacity | color sampler
++    // Column, everything centered: undo, redo | more (3 dots) | blending mode | size | opacity (or flow) | O/F | colors | color sampler
+     QWidget *container = new QWidget(dock);
+     QVBoxLayout *layout = new QVBoxLayout(container);
+     layout->setContentsMargins(3, 2, 3, 8); // thin sides, room at the bottom
+@@ -1611,6 +1821,9 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+     });
+     layout->addWidget(moreButton, 0, Qt::AlignHCenter);
+ 
++    // Krita Nova (patch 59): the blending mode, out of the "more" popup
++    layout->addWidget(new NovaBlendModeButton(viewManager, container), 0, Qt::AlignHCenter);
++
+     mainWindow->addDockWidget(Qt::LeftDockWidgetArea, dock);
+ 
+     BrushPanelToolBarKeeper *keeper = new BrushPanelToolBarKeeper(mainWindow, container);
