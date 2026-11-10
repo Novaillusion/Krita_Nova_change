@@ -1,0 +1,118 @@
+Krita Nova 58 - Android: tapping a number field in a QML panel opens the keyboard
+
+On Android, tapping the Text tool's font size (and the other slider number
+fields of the QML panels - the Text Properties docker, the text tool
+options) only moved the slider to the tapped spot; a long press opened the
+field for typing but no keyboard came up, so the size could not be typed.
+
+- On Android a tap (no drag) opens the field for typing; dragging still
+  changes the value. Desktop behaviour is unchanged.
+- When the field opens for typing on Android, the keyboard is asked for
+  (the text input got its focus from code, which Android does not answer
+  by itself); it closes again when editing finishes or is cancelled.
+- The QML host widget takes the focus on a tap and accepts keyboard input
+  on Android.
+
+diff --git a/qmlmodules/components/qml/sliderspinbox/SliderSpinBoxContentItem.qml b/qmlmodules/components/qml/sliderspinbox/SliderSpinBoxContentItem.qml
+index c689c4c..e104534 100644
+--- a/qmlmodules/components/qml/sliderspinbox/SliderSpinBoxContentItem.qml
++++ b/qmlmodules/components/qml/sliderspinbox/SliderSpinBoxContentItem.qml
+@@ -191,6 +191,9 @@ FocusScope {
+             if (root.parentSpinBox) {
+                 root.parentSpinBox.editable = false;
+             }
++            if (Qt.platform.os === "android") {
++                Qt.inputMethod.hide(); // Krita Nova: the keyboard opened for editing
++            }
+             if (textInput.activeFocus) {
+                 sliderManipulator.forceActiveFocus(Qt.OtherFocusReason);
+             }
+@@ -200,6 +203,9 @@ FocusScope {
+             if (root.parentSpinBox) {
+                 root.parentSpinBox.editable = false;
+             }
++            if (Qt.platform.os === "android") {
++                Qt.inputMethod.hide(); // Krita Nova: the keyboard opened for editing
++            }
+             if (textInput.activeFocus) {
+                 sliderManipulator.forceActiveFocus(Qt.OtherFocusReason);
+             }
+@@ -243,6 +249,12 @@ FocusScope {
+             parseSpinBoxContentItem.textInput.selectContents();
+             parseSpinBoxContentItem.textInput.forceActiveFocus(Qt.OtherFocusReason);
+             root.valueBeforeEditing = root.value;
++            // Krita Nova: Android opens its keyboard only for a tap on a text
++            // input itself - this one gets the focus from code: ask for it
++            if (Qt.platform.os === "android") {
++                Qt.inputMethod.update(Qt.ImQueryAll);
++                Qt.inputMethod.show();
++            }
+         }
+ 
+         onEditingStartedWithValue: (v) => {
+@@ -252,6 +264,12 @@ FocusScope {
+             parseSpinBoxContentItem.textInput.selectContents();
+             parseSpinBoxContentItem.textInput.forceActiveFocus(Qt.OtherFocusReason);
+             root.valueBeforeEditing = root.value;
++            // Krita Nova: Android opens its keyboard only for a tap on a text
++            // input itself - this one gets the focus from code: ask for it
++            if (Qt.platform.os === "android") {
++                Qt.inputMethod.update(Qt.ImQueryAll);
++                Qt.inputMethod.show();
++            }
+             parseSpinBoxContentItem.textInput.contentsText = v;
+         }
+ 
+diff --git a/qmlmodules/components/qml/sliderspinbox/SliderSpinBoxManipulator.qml b/qmlmodules/components/qml/sliderspinbox/SliderSpinBoxManipulator.qml
+index ce15fbc..fb4221e 100644
+--- a/qmlmodules/components/qml/sliderspinbox/SliderSpinBoxManipulator.qml
++++ b/qmlmodules/components/qml/sliderspinbox/SliderSpinBoxManipulator.qml
+@@ -133,10 +133,15 @@ FocusScope {
+             if (isDragging) {
+                 return;
+             }
++            mouseArea.novaHoldStartedEditing = true;
+             root.editingStarted()
+         }
+ 
++        // Krita Nova: set when a press-and-hold has already opened the editor
++        property bool novaHoldStartedEditing: false
++
+         onPressed: (me) => {
++            mouseArea.novaHoldStartedEditing = false;
+             if (root.focusPolicy & Qt.ClickFocus) {
+                 mouseArea.forceActiveFocus(Qt.MouseFocusReason);
+             }
+@@ -155,6 +160,15 @@ FocusScope {
+                 root.editingStarted();
+ 
+             } else if (me.button === Qt.LeftButton) {
++                if (Qt.platform.os === "android" && !mouseArea.isDragging) {
++                    // Krita Nova: on Android a tap opens the number for typing
++                    // (with the keyboard); dragging still changes the value
++                    if (!mouseArea.novaHoldStartedEditing) {
++                        root.editingStarted();
++                    }
++                    mouseArea.novaHoldStartedEditing = false;
++                    return;
++                }
+                 if (root.blockUpdateSignalOnDrag) {
+                     let x = mouseArea.useRelativeDragging ? me.x + mouseArea.relativeDraggingOffset : me.x;
+                     value = mouseArea.valueForPoint(x, me.y, me.modifiers);
+diff --git a/qmlmodules/widgets/KisQQuickWidget.cpp b/qmlmodules/widgets/KisQQuickWidget.cpp
+index f16372b..96c82c9 100644
+--- a/qmlmodules/widgets/KisQQuickWidget.cpp
++++ b/qmlmodules/widgets/KisQQuickWidget.cpp
+@@ -21,6 +21,12 @@
+ 
+ KisQQuickWidget::KisQQuickWidget(QWidget *parent): QQuickWidget(parent)
+ {
++#ifdef Q_OS_ANDROID
++    // Krita Nova: number fields inside QML panels type with the Android
++    // keyboard - the widget must take the focus on a tap and accept input
++    setFocusPolicy(Qt::StrongFocus);
++    setAttribute(Qt::WA_InputMethodEnabled, true);
++#endif
+ #if !defined(Q_OS_MACOS)
+     QSurfaceFormat format;
+ 

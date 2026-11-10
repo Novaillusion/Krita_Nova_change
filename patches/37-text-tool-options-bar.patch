@@ -76,10 +76,10 @@ index 6242e5d..86f995d 100644
      void textColorChanged();
 diff --git a/plugins/dockers/textproperties/qml/NovaTextOptionsBar.qml b/plugins/dockers/textproperties/qml/NovaTextOptionsBar.qml
 new file mode 100644
-index 0000000..9935203
+index 0000000..155cb86
 --- /dev/null
 +++ b/plugins/dockers/textproperties/qml/NovaTextOptionsBar.qml
-@@ -0,0 +1,196 @@
+@@ -0,0 +1,201 @@
 +/*
 + *  SPDX-FileCopyrightText: 2026 Krita Nova
 + *
@@ -186,7 +186,12 @@ index 0000000..9935203
 +
 +    SqueezedComboBox {
 +        id: styleCmb;
-+        width: 110;
++        width: 130;
++        // its own box, as tall as the font family box: SqueezedComboBox
++        // takes its height from its content item, which the combo box sizes
++        // from its height - outside a layout it collapsed and was drawn over
++        // the family box
++        height: Math.max(implicitHeight, familyCmb.height);
 +        model: stylesModel;
 +        textRole: "display";
 +        enabled: root.props !== null;
