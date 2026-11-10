@@ -2,13 +2,13 @@ Krita Nova 56 - no empty Tools menu
 
 The menu bar's Tools menu only holds Scripts, which Python scripting fills;
 Nova Krita is built without it, so Tools > Scripts was always empty. The
-Tools menu is removed from krita5.xmlgui; KRITA5_XMLGUI_VERSION 546 -> 547 so
-the new menus replace a saved copy of the old ones.
+Tools menu is removed from krita5.xmlgui; KRITA5_XMLGUI_VERSION 546 -> 547 (and krita5_xmlgui_hash_expected
+updated) so the new menus replace a saved copy of the old ones.
 diff --git a/krita/CMakeLists.txt b/krita/CMakeLists.txt
-index c8e4981..065d089 100644
+index c8e4981..30f8d99 100644
 --- a/krita/CMakeLists.txt
 +++ b/krita/CMakeLists.txt
-@@ -126,7 +126,7 @@ endif()
+@@ -126,11 +126,11 @@ endif()
  # make a change that applies to all systems, remove any conditions. The version
  # you specify should always be one higher than any version number you see here,
  # no matter what you're doing. Do not re-use versions.
@@ -17,6 +17,11 @@ index c8e4981..065d089 100644
  
  # After updating the version number properly, put the new hash that the CMake
  # error lists as the "actual hash" here.
+-set(krita5_xmlgui_hash_expected "c06c58b36619ceb34c37e23584121d56")
++set(krita5_xmlgui_hash_expected "8f75589f7b17e9bf5edb4befb44197cc")
+ 
+ # You can stop reading now, the stuff that follows doesn't need to be modified.
+ # ==============================================================================
 diff --git a/krita/krita5.xmlgui b/krita/krita5.xmlgui
 index 7eb11f8..7b8160a 100644
 --- a/krita/krita5.xmlgui
