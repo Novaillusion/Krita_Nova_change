@@ -1,0 +1,224 @@
+Krita Nova 63 - Android: the Brush Panel is exempt from palm rejection
+
+Fingers that land on the Brush Panel are no longer subject to palm
+rejection, wherever the pen or a palm is:
+- KisMainWindow tells MainActivity where the panel is (setBrushPanelRect,
+  in the physical pixels of the Qt view; empty while it is hidden).
+- MainActivity reports every finger that lands there to Krita (before, only
+  fingers made while the pen was in use), and PanelFingerRouter hands it to
+  the widget under it unless Qt delivered it itself.
+- A quick tap on the panel (under 0.5 s, hardly moved) that Android's own
+  palm rejection cancels still counts as a tap (new action CancelledTap).
+
+diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
+index 3afd2cd..a619138 100644
+--- a/libs/ui/KisMainWindow.cpp
++++ b/libs/ui/KisMainWindow.cpp
+@@ -129,6 +129,8 @@
+ #include <QtAndroid>
+ #include <KisAndroidUtils.h>
+ #include <jni.h>
++#include <QAndroidJniObject>
++#include <QtMath>
+ #endif
+ 
+ #include <KisScopedPerformanceLogger.h>
+@@ -1573,12 +1575,17 @@ private:
+ class PanelFingerRouter : public QObject
+ {
+ public:
+-    enum Action { Down = 0, Move = 1, Up = 2, Cancel = 3 };
++    /// CancelledTap (patch 63): Android's own palm rejection cancelled a quick
++    /// tap of a finger on the panel - it is still a tap there
++    enum Action { Down = 0, Move = 1, Up = 2, Cancel = 3, CancelledTap = 4 };
+ 
+     explicit PanelFingerRouter(QDockWidget *panel)
+         : QObject(panel), m_panel(panel)
+     {
+         s_instance = this;
++        // Krita Nova (patch 63): tell MainActivity where the panel is: fingers
++        // that land there are exempt from palm rejection
++        panel->installEventFilter(this);
+         m_decideTimer.setSingleShot(true);
+         m_decideTimer.setInterval(DECIDE_DELAY_MS);
+         QObject::connect(&m_decideTimer, &QTimer::timeout, this, [this]() { decide(); });
+@@ -1610,10 +1617,19 @@ public:
+             m_lastPos = globalPos;
+             if (m_state == Forwarding) send(QEvent::MouseMove, globalPos, Qt::LeftButton);
+             break;
++        case CancelledTap:
++            if (m_state == Idle || id != m_id) return;
++            if (m_state == Ignored) {
++                // Qt pressed the widget itself; on a cancel Qt sends the
++                // release of its own (QGuiApplication), so the tap is done
++                reset();
++                return;
++            }
++            Q_FALLTHROUGH();
+         case Up:
+         case Cancel:
+             if (m_state == Idle || id != m_id) return;
+-            if (action == Up) m_lastPos = globalPos;
++            if (action == Up) m_lastPos = globalPos; // a cancelled tap ends where it was last
+             if (m_state == Pending) {
+                 m_decideTimer.stop();
+                 decide();
+@@ -1630,6 +1646,14 @@ protected:
+     bool eventFilter(QObject *watched, QEvent *event) override
+     {
+         const QEvent::Type type = event->type();
++        if (watched == m_panel && (type == QEvent::Move || type == QEvent::Resize
++                                   || type == QEvent::Show || type == QEvent::Hide)) {
++            if (!m_rectPending) {
++                m_rectPending = true;
++                QTimer::singleShot(0, this, [this]() { m_rectPending = false; publishPanelRect(); });
++            }
++            return false;
++        }
+         if (m_sending || (type != QEvent::MouseButtonPress && type != QEvent::TouchBegin
+                           && type != QEvent::TabletPress)) {
+             return false;
+@@ -1659,6 +1683,24 @@ private:
+         return (physicalPos / ratio).toPoint();
+     }
+ 
++    /// the panel's place, in the physical pixels of the Qt view, for
++    /// MainActivity (an empty rect while it is hidden)
++    void publishPanelRect()
++    {
++        QRect r;
++        qreal ratio = 1.0;
++        if (m_panel && m_panel->isVisible()) {
++            r = m_panel->frameGeometry();
++            if (QWindow *handle = m_panel->window()->windowHandle()) ratio = handle->devicePixelRatio();
++            if (ratio <= 0.0) ratio = 1.0;
++        }
++        const int l = qFloor(r.left() * ratio), t = qFloor(r.top() * ratio);
++        const int rr = r.isValid() ? qCeil((r.right() + 1) * ratio) : l;
++        const int b = r.isValid() ? qCeil((r.bottom() + 1) * ratio) : t;
++        QAndroidJniObject::callStaticMethod<void>("org/krita/android/MainActivity", "setBrushPanelRect",
++                                                  "(IIII)V", jint(l), jint(t), jint(rr), jint(b));
++    }
++
+     void decide()
+     {
+         if (m_state != Pending) return;
+@@ -1703,6 +1745,7 @@ private:
+     QPoint m_pressPos;
+     QPoint m_lastPos;
+     bool m_sending {false};
++    bool m_rectPending {false};
+ };
+ 
+ QPointer<PanelFingerRouter> PanelFingerRouter::s_instance;
+diff --git a/packaging/android/apk/src/org/krita/android/MainActivity.java b/packaging/android/apk/src/org/krita/android/MainActivity.java
+index ffad6c0..06d91d1 100644
+--- a/packaging/android/apk/src/org/krita/android/MainActivity.java
++++ b/packaging/android/apk/src/org/krita/android/MainActivity.java
+@@ -193,6 +193,44 @@ public class MainActivity extends QtActivity {
+     private final android.util.SparseBooleanArray m_reportedFingers = new android.util.SparseBooleanArray();
+     private final int[] m_qtViewOrigin = new int[2];
+ 
++    // Krita Nova (patch 63): where the Brush Panel is, in the physical pixels
++    // of the Qt view (set by KisMainWindow.cpp; empty while it is hidden).
++    // Fingers that land there are exempt from palm rejection: always
++    // reported, and a quick tap the system cancels (its own palm rejection)
++    // still counts as a tap.
++    private static volatile int s_panelLeft = 0, s_panelTop = 0, s_panelRight = 0, s_panelBottom = 0;
++    private static final long PANEL_TAP_MS = 500;
++    private static final float PANEL_TAP_SLOP = 24.0f;
++    private final android.util.SparseBooleanArray m_panelFingers = new android.util.SparseBooleanArray();
++    private final android.util.SparseLongArray m_fingerDownTime = new android.util.SparseLongArray();
++    private final android.util.SparseArray<float[]> m_fingerDownPos = new android.util.SparseArray<>();
++
++    public static void setBrushPanelRect(int left, int top, int right, int bottom) {
++        s_panelLeft = left;
++        s_panelTop = top;
++        s_panelRight = right;
++        s_panelBottom = bottom;
++    }
++
++    private boolean onBrushPanel(MotionEvent ev, int index) {
++        if (s_panelRight <= s_panelLeft || s_panelBottom <= s_panelTop) return false;
++        final float x = ev.getX(index) - m_qtViewOrigin[0];
++        final float y = ev.getY(index) - m_qtViewOrigin[1];
++        return x >= s_panelLeft && x < s_panelRight && y >= s_panelTop && y < s_panelBottom;
++    }
++
++    /// a finger on the panel that went down a moment ago and hardly moved
++    private boolean isQuickPanelTap(MotionEvent ev, int index) {
++        final int id = ev.getPointerId(index);
++        if (!m_panelFingers.get(id)) return false;
++        final long down = m_fingerDownTime.get(id, -1);
++        final float[] pos = m_fingerDownPos.get(id);
++        if (down < 0 || pos == null) return false;
++        if (android.os.SystemClock.uptimeMillis() - down > PANEL_TAP_MS) return false;
++        return Math.abs(ev.getX(index) - pos[0]) < PANEL_TAP_SLOP
++            && Math.abs(ev.getY(index) - pos[1]) < PANEL_TAP_SLOP;
++    }
++
+     private static boolean isPen(int toolType) {
+         return toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER;
+     }
+@@ -248,7 +286,8 @@ public class MainActivity extends QtActivity {
+     private void reportFingers(MotionEvent ev) {
+         final int action = ev.getActionMasked();
+         final boolean starting = action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN;
+-        if (m_reportedFingers.size() == 0 && !(starting && isPenActive(ev))) return;
++        final boolean panelShown = s_panelRight > s_panelLeft && s_panelBottom > s_panelTop;
++        if (m_reportedFingers.size() == 0 && !(starting && (isPenActive(ev) || panelShown))) return;
+ 
+         android.view.View qtView = findViewById(android.R.id.content);
+         if (qtView != null) {
+@@ -259,8 +298,16 @@ public class MainActivity extends QtActivity {
+         case MotionEvent.ACTION_DOWN:
+         case MotionEvent.ACTION_POINTER_DOWN: {
+             final int i = ev.getActionIndex();
+-            if (ev.getToolType(i) == MotionEvent.TOOL_TYPE_FINGER && isPenActive(ev)) {
+-                m_reportedFingers.put(ev.getPointerId(i), true);
++            if (ev.getToolType(i) != MotionEvent.TOOL_TYPE_FINGER) break;
++            final boolean onPanel = onBrushPanel(ev, i);
++            if (isPenActive(ev) || onPanel) {
++                final int id = ev.getPointerId(i);
++                m_reportedFingers.put(id, true);
++                if (onPanel) {
++                    m_panelFingers.put(id, true);
++                    m_fingerDownTime.put(id, android.os.SystemClock.uptimeMillis());
++                    m_fingerDownPos.put(id, new float[] {ev.getX(i), ev.getY(i)});
++                }
+                 reportFinger(ev, i, 0);
+             }
+             break;
+@@ -278,19 +325,31 @@ public class MainActivity extends QtActivity {
+                 reportFinger(ev, i, 2);
+                 m_reportedFingers.delete(id);
+             }
++            forgetPanelFinger(id);
+             break;
+         }
+         case MotionEvent.ACTION_CANCEL:
+             for (int i = 0; i < ev.getPointerCount(); ++i) {
+-                if (m_reportedFingers.get(ev.getPointerId(i))) reportFinger(ev, i, 3);
++                if (!m_reportedFingers.get(ev.getPointerId(i))) continue;
++                // a quick tap on the panel cancelled by the system: still a tap
++                reportFinger(ev, i, isQuickPanelTap(ev, i) ? 4 : 3);
+             }
+             m_reportedFingers.clear();
++            m_panelFingers.clear();
++            m_fingerDownTime.clear();
++            m_fingerDownPos.clear();
+             break;
+         default:
+             break;
+         }
+     }
+ 
++    private void forgetPanelFinger(int id) {
++        m_panelFingers.delete(id);
++        m_fingerDownTime.delete(id);
++        m_fingerDownPos.remove(id);
++    }
++
+     @Override
+     public boolean dispatchTouchEvent(MotionEvent ev) {
+         trackPen(ev);
