@@ -1,0 +1,74 @@
+Krita Nova 60 - Brush Panel: Mirror View button, 20% taller
+
+Between the "more" (3 dots) button and the blending mode button, a Mirror
+View on/off button: Krita's "mirror_canvas" action (its icon, shortcut M).
+It is highlighted while the view is mirrored, and otherwise flat like the
+panel's other buttons.
+
+The panel starts 20% taller (0.79 of the window height instead of 0.66,
+at least 384 px, never past the window). It is placed again once at the
+new height (kritarc androidBrushPanelPlaced4 -> androidBrushPanelPlaced5).
+
+diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
+index 93374d4..227c606 100644
+--- a/libs/ui/KisMainWindow.cpp
++++ b/libs/ui/KisMainWindow.cpp
+@@ -1085,7 +1085,7 @@ private:
+         const QRect available = screen ? screen->availableGeometry() : area;
+ 
+         KisConfig cfg(true);
+-        const bool placedBefore = cfg.readEntry("androidBrushPanelPlaced4", false);
++        const bool placedBefore = cfg.readEntry("androidBrushPanelPlaced5", false);
+         const bool onScreen = m_dock->isFloating() && m_dock->width() > 20 && m_dock->height() > 100
+                               && available.intersects(m_dock->frameGeometry());
+ 
+@@ -1102,10 +1102,12 @@ private:
+             // as narrow as the sliders allow; a bit taller so the color squares
+             // and the sampler button have room at the bottom
+             const int width = panelWidth;
+-            const int height = qMax(320, int(area.height() * 0.66));
++            // Krita Nova (patch 60): 20% taller than before (0.66 -> 0.79 of
++            // the window), still inside it
++            const int height = qMin(qMax(384, int(area.height() * 0.66 * 1.2)), area.height() - 16);
+             const int top = area.top() + (area.height() - height) / 2;
+             m_dock->setGeometry(area.left() + 8, top, width, height);
+-            KisConfig(false).writeEntry("androidBrushPanelPlaced4", true);
++            KisConfig(false).writeEntry("androidBrushPanelPlaced5", true);
+         }
+         m_dock->show();
+         m_dock->raise();
+@@ -1787,7 +1789,7 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+     RoundedPanelPainter::install(dock);
+     dock->setTitleBarWidget(titleBar);
+ 
+-    // Column, everything centered: undo, redo | more (3 dots) | blending mode | size | opacity (or flow) | O/F | colors | color sampler
++    // Column, everything centered: undo, redo | more (3 dots) | mirror view | blending mode | size | opacity (or flow) | O/F | colors | color sampler
+     QWidget *container = new QWidget(dock);
+     QVBoxLayout *layout = new QVBoxLayout(container);
+     layout->setContentsMargins(3, 2, 3, 8); // thin sides, room at the bottom
+@@ -1839,6 +1841,25 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+     });
+     layout->addWidget(moreButton, 0, Qt::AlignHCenter);
+ 
++    // Krita Nova (patch 60): Mirror View on/off (the "mirror_canvas" action:
++    // same icon, shortcut M, highlighted while the view is mirrored)
++    if (QAction *mirror = viewManager && viewManager->actionCollection()
++            ? viewManager->actionCollection()->action(QStringLiteral("mirror_canvas")) : nullptr) {
++        QToolButton *mirrorButton = new QToolButton(container);
++        mirrorButton->setObjectName(QStringLiteral("KritaNovaBrushPanelMirrorView"));
++        mirrorButton->setDefaultAction(mirror);
++        mirrorButton->setAutoRaise(true);
++        mirrorButton->setFixedSize(36, 36);
++        mirrorButton->setIconSize(QSize(22, 22));
++        // an on/off button: highlighted while the view is mirrored, otherwise
++        // like the panel's other buttons (flat, no frame)
++        mirrorButton->setCheckable(true);
++        mirrorButton->setStyleSheet(QStringLiteral(
++            "QToolButton#KritaNovaBrushPanelMirrorView { border: none; border-radius: 6px; background: transparent; }"
++            "QToolButton#KritaNovaBrushPanelMirrorView:checked { background: palette(highlight); }"));
++        layout->addWidget(mirrorButton, 0, Qt::AlignHCenter);
++    }
++
+     // Krita Nova (patch 59): the blending mode, out of the "more" popup
+     layout->addWidget(new NovaBlendModeButton(viewManager, container), 0, Qt::AlignHCenter);
+ 

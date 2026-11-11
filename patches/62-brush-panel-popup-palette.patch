@@ -1,0 +1,133 @@
+Krita Nova 62 - Brush Panel: pop-up palette button
+
+At the bottom of the Brush Panel, a button (a ring cut at the top, the
+bottom and the right, around a dot) that shows Krita's pop-up palette in the
+middle of the canvas, or hides it when it is open. It is highlighted while
+the palette is open.
+
+diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
+index 5633dee..7ecdbe5 100644
+--- a/libs/ui/KisMainWindow.cpp
++++ b/libs/ui/KisMainWindow.cpp
+@@ -140,6 +140,7 @@
+ #include "kis_action_manager.h"
+ #include "KisApplication.h"
+ #include "kis_canvas2.h"
++#include "kis_popup_palette.h"
+ #include "kis_canvas_controller.h"
+ #include "kis_canvas_resource_provider.h"
+ #include "kis_clipboard.h"
+@@ -1843,6 +1844,94 @@ private:
+     QTimer m_poll;
+ };
+ 
++/**
++ * Krita Nova (patch 62): the Brush Panel's pop-up palette button (bottom of
++ * the panel). Tapping it shows Krita's pop-up palette in the middle of the
++ * canvas, or hides it when it is open; the button is highlighted while the
++ * palette is open.
++ */
++class NovaPopupPaletteButton : public QAbstractButton
++{
++public:
++    NovaPopupPaletteButton(KisViewManager *viewManager, QWidget *parent)
++        : QAbstractButton(parent), m_viewManager(viewManager)
++    {
++        setObjectName(QStringLiteral("KritaNovaBrushPanelPopupPalette"));
++        setToolTip(i18n("Show / hide the pop-up palette"));
++        setFixedSize(36, 36);
++        // decided on press: by the release the palette may have closed itself
++        connect(this, &QAbstractButton::pressed, this, [this]() { m_wasOpen = popupPalette() && popupPalette()->onScreen(); });
++        connect(this, &QAbstractButton::clicked, this, [this]() { toggle(); });
++        m_poll.setInterval(200);
++        connect(&m_poll, &QTimer::timeout, this, [this]() {
++            const bool open = popupPalette() && popupPalette()->onScreen();
++            if (open != m_open) { m_open = open; update(); }
++        });
++        m_poll.start();
++    }
++
++private:
++    KisPopupPalette *popupPalette() const
++    {
++        KisCanvas2 *canvas = m_viewManager ? m_viewManager->canvasBase() : nullptr;
++        return canvas ? canvas->popupPalette() : nullptr;
++    }
++
++    void toggle()
++    {
++        KisCanvas2 *canvas = m_viewManager ? m_viewManager->canvasBase() : nullptr;
++        KisPopupPalette *popup = popupPalette();
++        if (!canvas || !popup) return;
++        if (m_wasOpen || popup->onScreen()) {
++            if (popup->onScreen()) popup->dismiss();
++        } else {
++            QWidget *canvasWidget = canvas->canvasWidget();
++            if (!canvasWidget) return;
++            if (KisInputManager *input = m_viewManager->inputManager()) input->registerPopupWidget(popup);
++            popup->popup(canvasWidget->rect().center());
++        }
++        m_open = popup->onScreen();
++        update();
++    }
++
++    void paintEvent(QPaintEvent *) override
++    {
++        QPainter p(this);
++        p.setRenderHint(QPainter::Antialiasing, true);
++        const bool lit = m_open || isDown();
++        if (lit) {
++            p.setPen(Qt::NoPen);
++            p.setBrush(palette().color(QPalette::Highlight));
++            p.drawRoundedRect(QRectF(rect()).adjusted(1, 1, -1, -1), 6, 6);
++        }
++        const QColor ink = lit ? palette().color(QPalette::HighlightedText)
++                               : palette().color(QPalette::WindowText);
++        // the icon: a thick ring cut at the top, the bottom and the right
++        // middle, around a solid dot
++        const QPointF c = QRectF(rect()).center();
++        const qreal outer = 11.0, inner = 7.5, dot = 4.5, gap = 1.6;
++        QPainterPath ring;
++        ring.addEllipse(c, outer, outer);
++        QPainterPath hole;
++        hole.addEllipse(c, inner, inner);
++        ring = ring.subtracted(hole);
++        QPainterPath cuts;
++        cuts.addRect(QRectF(c.x() - gap, c.y() - outer - 1, 2 * gap, outer - inner + 2));      // top
++        cuts.addRect(QRectF(c.x() - gap, c.y() + inner - 1, 2 * gap, outer - inner + 2));      // bottom
++        cuts.addRect(QRectF(c.x() + inner - 1, c.y() - gap, outer - inner + 2, 2 * gap));      // right
++        ring = ring.subtracted(cuts);
++        p.setPen(Qt::NoPen);
++        p.setBrush(ink);
++        p.drawPath(ring);
++        p.drawEllipse(c, dot, dot);
++    }
++
++    QPointer<KisViewManager> m_viewManager;
++    QTimer m_poll;
++    bool m_open {false};
++    bool m_wasOpen {false};
++};
++
+ /**
+  * Krita Nova (patch 61): the Brush Panel docks to the left, right or bottom
+  * edge of the window. Drop it (by its grip) within a short distance of an
+@@ -2112,7 +2201,7 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+     RoundedPanelPainter::install(dock);
+     dock->setTitleBarWidget(titleBar);
+ 
+-    // Column, everything centered: undo, redo | more (3 dots) | mirror view | blending mode | size | opacity (or flow) | O/F | colors | color sampler
++    // Column, everything centered: undo, redo | more (3 dots) | mirror view | blending mode | size | opacity (or flow) | O/F | colors | color sampler | pop-up palette
+     QWidget *container = new QWidget(dock);
+     QVBoxLayout *layout = new QVBoxLayout(container);
+     layout->setContentsMargins(3, 2, 3, 8); // thin sides, room at the bottom
+@@ -2207,6 +2296,9 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+     // colour sampler button at the bottom of the panel
+     layout->addWidget(new NovaColorSamplerButton(viewManager, container), 0, Qt::AlignHCenter);
+ 
++    // Krita Nova (patch 62): pop-up palette on / off, at the very bottom
++    layout->addWidget(new NovaPopupPaletteButton(viewManager, container), 0, Qt::AlignHCenter);
++
+     // Show it once the main window is on screen: a floating dock is a window
+     // of its own and is not shown along with the main window, and the saved
+     // window state / workspace restored during startup may hide or re-dock it.

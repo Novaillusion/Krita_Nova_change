@@ -1,0 +1,508 @@
+Krita Nova 61 - Brush Panel: dock it to the left, right or bottom edge
+
+Drop the floating Brush Panel (dragged by its grip) within 40 px of the
+left, right or bottom edge of the window and it docks there:
+- left / right: a column as tall as the window, at the very edge;
+- bottom: a row as wide as the window - the panel lies down: undo / redo
+  side by side, the size and opacity sliders lie down (filled from the
+  left, dragged sideways), the grip moves to its left end.
+The window's contents (the dockers of that side, the canvas, the toolbars)
+move toward the center to make room, so the panel covers nothing. Dragging
+it away from its edge floats it again (standing up, the floating height).
+A nudge or a resize while docked goes back to the edge. The space is given
+back while the panel is hidden (welcome page, hidden by the user).
+The side is remembered (kritarc androidBrushPanelSide: 0 floating, 1 left,
+2 right, 3 bottom).
+
+diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
+index 227c606..5633dee 100644
+--- a/libs/ui/KisMainWindow.cpp
++++ b/libs/ui/KisMainWindow.cpp
+@@ -447,7 +447,24 @@ public:
+         m_poll.start();
+     }
+ 
+-    QSize sizeHint() const override { return QSize(45, 200); }
++    QSize sizeHint() const override { return m_horizontal ? QSize(200, 40) : QSize(45, 200); }
++
++    /// Krita Nova (patch 61): lying down (the panel docked at the bottom):
++    /// filled from the left, dragged sideways
++    void setHorizontal(bool horizontal)
++    {
++        if (m_horizontal == horizontal) return;
++        m_horizontal = horizontal;
++        if (horizontal) {
++            setMinimumSize(110, 40);
++            setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
++        } else {
++            setMinimumSize(45, 110);
++            setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
++        }
++        updateGeometry();
++        update();
++    }
+ 
+     /// Krita Nova (patch 59): bind the slider to another of the brush
+     /// toolbar's spin boxes (opacity <-> flow)
+@@ -493,7 +510,11 @@ protected:
+         const qreal exactPos = toPos(m_painted);
+         const qreal pos = (m_dragging || m_shownPos < 0.0) ? exactPos : m_shownPos;
+         QRectF fill = track;
+-        fill.setTop(track.bottom() - track.height() * pos);
++        if (m_horizontal) {
++            fill.setRight(track.left() + track.width() * pos);
++        } else {
++            fill.setTop(track.bottom() - track.height() * pos);
++        }
+         p.save();
+         p.setClipPath(clip);
+         p.fillRect(fill, isEnabled() ? palette().color(QPalette::WindowText).darker(120)
+@@ -506,8 +527,10 @@ protected:
+             QFont f = QApplication::font();
+             f.setBold(true);
+             p.setFont(f);
+-            const QRectF letterRect(track.left(), track.bottom() - QFontMetricsF(f).height() - 4,
+-                                    track.width(), QFontMetricsF(f).height());
++            const QRectF letterRect = m_horizontal
++                ? QRectF(track.left() + 4, track.top(), QFontMetricsF(f).height(), track.height())
++                : QRectF(track.left(), track.bottom() - QFontMetricsF(f).height() - 4,
++                         track.width(), QFontMetricsF(f).height());
+             p.setPen(QColor(0, 0, 0, 110));
+             p.drawText(letterRect.translated(0.8, 0.8), Qt::AlignCenter, m_letter);
+             p.setPen(Qt::white);
+@@ -526,6 +549,13 @@ protected:
+             QFont f = QApplication::font();
+             p.setFont(f);
+             const QFontMetricsF fm(f);
++            if (m_horizontal) {
++                // at the right end of the lying bar
++                const QRectF label = track.adjusted(0, 0, -6, 0);
++                p.setPen(pos > 0.8 ? palette().color(QPalette::Window) : palette().color(QPalette::WindowText));
++                p.drawText(label, Qt::AlignRight | Qt::AlignVCenter, text);
++                return;
++            }
+             // too wide for the bar ("1000 px"): number and unit on two lines
+             if (fm.horizontalAdvance(text) > track.width() - 2 && m_unit != QLatin1String("%")) {
+                 text.replace(QLatin1Char(' '), QLatin1Char('\n'));
+@@ -540,15 +570,16 @@ protected:
+     {
+         if (e->button() != Qt::LeftButton || !m_spin) return;
+         m_dragging = true;
+-        m_pressY = e->pos().y();
++        m_pressY = m_horizontal ? e->pos().x() : e->pos().y();
+         m_pressPos = toPos(m_spin->value());
+         update();
+     }
+     void mouseMoveEvent(QMouseEvent *e) override
+     {
+         if (!m_dragging || !m_spin) return;
+-        const qreal span = qMax(40.0, height() - 6.0);
+-        const qreal pos = m_pressPos + (m_pressY - e->pos().y()) / span;
++        const qreal span = qMax(40.0, (m_horizontal ? width() : height()) - 6.0);
++        const qreal pos = m_horizontal ? m_pressPos + (e->pos().x() - m_pressY) / span
++                                       : m_pressPos + (m_pressY - e->pos().y()) / span;
+         m_spin->setValue(fromPos(pos)); // the brush toolbar applies it
+         update();
+     }
+@@ -569,7 +600,8 @@ private:
+     qreal m_painted {0.0};
+     qreal m_shownPos {-1.0}; ///< Krita Nova (57): the fill position shown, gliding to the value
+     bool m_dragging {false};
+-    int m_pressY {0};
++    bool m_horizontal {false}; ///< Krita Nova (61): docked at the bottom
++    int m_pressY {0}; ///< where the drag started (x when horizontal)
+     qreal m_pressPos {0.0};
+ };
+ 
+@@ -864,7 +896,7 @@ public:
+         // and the main toolbar: the top bar dock (so the Toolbox docker can share its row)
+         struct Target { const char *name; QWidget *parent; Qt::Orientation orientation; bool stretch; };
+         const Target targets[] = {
+-            {"editToolBar", m_container, Qt::Vertical, false},
++            {"editToolBar", m_container, m_editOrientation, false},
+             {"BrushesAndStuff", m_moreContainer ? m_moreContainer.data() : m_container.data(), Qt::Horizontal, false},
+             {"mainToolBar", m_topBarContainer, Qt::Horizontal, true},
+         };
+@@ -942,6 +974,8 @@ public:
+     }
+ 
+     void setMoreContainer(QWidget *container) { m_moreContainer = container; }
++    /// Krita Nova (patch 61): undo / redo side by side when the panel lies at the bottom
++    void setEditOrientation(Qt::Orientation orientation) { m_editOrientation = orientation; }
+     void setColorSlot(QWidget *slot) { m_colorSlot = slot; }
+     void setTopBarContainer(QWidget *container) { m_topBarContainer = container; }
+ 
+@@ -976,10 +1010,18 @@ private:
+     QPointer<QWidget> m_colorSlot;
+     QPointer<QWidget> m_topBarContainer;
+     QList<QPointer<KisToolBar>> m_watched;
++    Qt::Orientation m_editOrientation {Qt::Vertical};
+     bool m_busy {false};
+     bool m_pending {false};
+ };
+ 
++/// The floating Brush Panel's height: 0.79 of the window (patch 60), at least
++/// 384 px, never past the window
++int floatingPanelHeight(const QRect &area)
++{
++    return qMin(qMax(384, int(area.height() * 0.66 * 1.2)), area.height() - 16);
++}
++
+ /**
+  * Puts the Brush Panel on screen after the main window has been shown (and
+  * startup has restored the window state): floating, at the left edge, tall,
+@@ -1080,6 +1122,13 @@ private:
+             return;
+         }
+         if (m_keeper) m_keeper->relocate();
++        if (placeDocked) {
++            m_dock->show();
++            if (placeDocked()) {
++                m_dock->raise();
++                return;
++            }
++        }
+         const QRect area = m_mainWindow->geometry();
+         QScreen *screen = m_mainWindow->screen();
+         const QRect available = screen ? screen->availableGeometry() : area;
+@@ -1104,7 +1153,7 @@ private:
+             const int width = panelWidth;
+             // Krita Nova (patch 60): 20% taller than before (0.66 -> 0.79 of
+             // the window), still inside it
+-            const int height = qMin(qMax(384, int(area.height() * 0.66 * 1.2)), area.height() - 16);
++            const int height = floatingPanelHeight(area);
+             const int top = area.top() + (area.height() - height) / 2;
+             m_dock->setGeometry(area.left() + 8, top, width, height);
+             KisConfig(false).writeEntry("androidBrushPanelPlaced5", true);
+@@ -1120,6 +1169,11 @@ private:
+     bool m_userHidden {false};
+     bool m_done {false};
+     QElapsedTimer m_stackChanged;
++
++public:
++    /// Krita Nova (patch 61): when the panel is docked to a side, places it
++    /// there and returns true
++    std::function<bool()> placeDocked;
+ };
+ 
+ /**
+@@ -1239,9 +1293,27 @@ public:
+     explicit NovaPanelGrip(QWidget *parent) : QWidget(parent)
+     {
+         setFixedHeight(20);
+-        setToolTip(i18n("Drag to move"));
++        setToolTip(i18n("Drag to move. Drop at the left, right or bottom edge to dock"));
++    }
++    QSize sizeHint() const override { return m_vertical ? QSize(20, 40) : QSize(40, 20); }
++
++    /// Krita Nova (patch 61): at the left side of the panel (docked at the bottom)
++    void setVertical(bool vertical)
++    {
++        if (m_vertical == vertical) return;
++        m_vertical = vertical;
++        if (vertical) {
++            setMinimumHeight(0);
++            setMaximumHeight(QWIDGETSIZE_MAX);
++            setFixedWidth(20);
++        } else {
++            setMinimumWidth(0);
++            setMaximumWidth(QWIDGETSIZE_MAX);
++            setFixedHeight(20);
++        }
++        updateGeometry();
++        update();
+     }
+-    QSize sizeHint() const override { return QSize(40, 20); }
+ 
+ protected:
+     void paintEvent(QPaintEvent *) override
+@@ -1252,9 +1324,13 @@ protected:
+         c.setAlpha(110);
+         p.setPen(Qt::NoPen);
+         p.setBrush(c);
+-        const QRectF grip(width() / 2.0 - 12, height() / 2.0 - 1.5, 24, 3);
++        const QRectF grip = m_vertical ? QRectF(width() / 2.0 - 1.5, height() / 2.0 - 12, 3, 24)
++                                       : QRectF(width() / 2.0 - 12, height() / 2.0 - 1.5, 24, 3);
+         p.drawRoundedRect(grip, 1.5, 1.5);
+     }
++
++private:
++    bool m_vertical {false};
+ };
+ 
+ /**
+@@ -1767,6 +1843,253 @@ private:
+     QTimer m_poll;
+ };
+ 
++/**
++ * Krita Nova (patch 61): the Brush Panel docks to the left, right or bottom
++ * edge of the window. Drop it (by its grip) within a short distance of an
++ * edge and it docks there: as tall (or, at the bottom, as wide) as the
++ * window, lying down at the bottom. The window's contents - the dockers of
++ * that side, the canvas, the toolbars - move toward the center to make room
++ * (contents margins of the main window), so nothing is covered. Drag it away
++ * from the edge to float it again. The side is remembered (kritarc
++ * androidBrushPanelSide: 0 floating, 1 left, 2 right, 3 bottom).
++ */
++class BrushPanelDocking : public QObject
++{
++public:
++    enum Side { Floating = 0, Left = 1, Right = 2, Bottom = 3 };
++
++    BrushPanelDocking(QMainWindow *mainWindow, QDockWidget *dock, QWidget *container,
++                      BrushPanelToolBarKeeper *keeper, NovaPanelGrip *grip)
++        : QObject(dock), m_mainWindow(mainWindow), m_dock(dock), m_container(container),
++          m_keeper(keeper), m_grip(grip)
++    {
++        m_baseMargins = mainWindow->contentsMargins();
++        m_side = Side(qBound(0, KisConfig(true).readEntry("androidBrushPanelSide", 0), 3));
++        m_settle.setSingleShot(true);
++        m_settle.setInterval(250);
++        connect(&m_settle, &QTimer::timeout, this, [this]() { settle(); });
++        dock->installEventFilter(this);
++        mainWindow->installEventFilter(this);
++        if (m_side == Bottom) setLying(true);
++    }
++
++    bool isDocked() const { return m_side != Floating; }
++
++    /// put the docked panel at its edge and make room for it
++    bool placeDocked()
++    {
++        if (!isDocked() || !m_dock || !m_mainWindow) return false;
++        apply();
++        return true;
++    }
++
++protected:
++    bool eventFilter(QObject *watched, QEvent *event) override
++    {
++        const QEvent::Type type = event->type();
++        if (watched == m_dock) {
++            if (type == QEvent::MouseButtonPress) {
++                m_pressed = true;
++                m_waits = 0;
++                m_moved = false;
++                m_pressSize = m_dock->size();
++            } else if (type == QEvent::MouseButtonRelease) {
++                m_pressed = false;
++                m_settle.start();
++            } else if (type == QEvent::Move && !m_applying) {
++                if (m_pressed) m_moved = true;
++                if (isDocked() && m_pressed && m_dock->size() == m_pressSize) {
++                    // dragged away from its edge: float again
++                    const QPoint d = m_dock->geometry().topLeft() - m_dockedRect.topLeft();
++                    if (d.manhattanLength() > 30) undock();
++                }
++                m_settle.start();
++            } else if (type == QEvent::Show) {
++                if (isDocked()) QTimer::singleShot(0, this, [this]() { apply(); });
++            } else if (type == QEvent::Hide) {
++                setMargins(0, 0, 0); // the space is given back while the panel is hidden
++            }
++        } else if (watched == m_mainWindow && (type == QEvent::Resize || type == QEvent::Move)) {
++            if (isDocked() && m_dock && m_dock->isVisible() && !m_applying) {
++                QTimer::singleShot(0, this, [this]() { apply(); });
++            }
++        }
++        return QObject::eventFilter(watched, event);
++    }
++
++private:
++    QRect area() const { return m_mainWindow->geometry(); }
++
++    /// the drag is over: dock to a near edge, or back to the docked place
++    void settle()
++    {
++        if (!m_dock || !m_mainWindow || !m_dock->isVisible()) return;
++        if (m_pressed) {
++            // a release that never reached the panel: give up after ~10 s
++            if (++m_waits < 40) { m_settle.start(); return; }
++            m_pressed = false;
++        }
++        m_waits = 0;
++        const bool userMoved = m_moved && m_dock->size() == m_pressSize; // a move, not a resize
++        m_moved = false;
++        if (isDocked()) {
++            apply(); // a nudge or a resize: back to the edge
++            return;
++        }
++        if (!userMoved) return;
++        const QRect a = area();
++        const QRect g = m_dock->frameGeometry();
++        const int snap = 40;
++        const int left = g.left() - a.left();
++        const int right = a.right() - g.right();
++        const int bottom = a.bottom() - g.bottom();
++        Side side = Floating;
++        int best = snap + 1;
++        if (left <= snap && left < best) { side = Left; best = left; }
++        if (right <= snap && right < best) { side = Right; best = right; }
++        if (bottom <= snap && bottom < best) { side = Bottom; best = bottom; }
++        if (side != Floating) dockTo(side);
++    }
++
++    void dockTo(Side side)
++    {
++        m_side = side;
++        KisConfig(false).writeEntry("androidBrushPanelSide", int(side));
++        setLying(side == Bottom);
++        apply();
++    }
++
++    void undock()
++    {
++        const QRect a = area();
++        m_side = Floating;
++        KisConfig(false).writeEntry("androidBrushPanelSide", int(Floating));
++        setMargins(0, 0, 0);
++        setLying(false);
++        m_applying = true;
++        const int width = panelThickness();
++        m_dock->setFixedWidth(width);
++        m_dock->setMinimumHeight(0);
++        m_dock->setMaximumHeight(QWIDGETSIZE_MAX);
++        m_dock->resize(width, floatingPanelHeight(a));
++        m_applying = false;
++    }
++
++    /// the panel's width standing up / its height lying down
++    int panelThickness() const
++    {
++        const int frame = 2 * m_dock->style()->pixelMetric(QStyle::PM_DockWidgetFrameWidth, nullptr, m_dock);
++        QWidget *content = m_dock->widget();
++        if (m_side == Bottom) {
++            return qMax(content ? content->sizeHint().height() : 0, 46) + frame;
++        }
++        return qMax(content ? content->sizeHint().width() : 0, 46) + frame;
++    }
++
++    void apply()
++    {
++        if (!isDocked() || !m_dock || !m_mainWindow || !m_dock->isVisible()) return;
++        m_applying = true;
++        const QRect a = area();
++        const int thickness = panelThickness();
++        QRect r;
++        if (m_side == Bottom) {
++            m_dock->setMinimumWidth(0);
++            m_dock->setMaximumWidth(QWIDGETSIZE_MAX);
++            m_dock->setFixedHeight(thickness);
++            r = QRect(a.left(), a.bottom() - thickness + 1, a.width(), thickness);
++            setMargins(0, 0, thickness);
++        } else {
++            m_dock->setMinimumHeight(0);
++            m_dock->setMaximumHeight(QWIDGETSIZE_MAX);
++            m_dock->setFixedWidth(thickness);
++            const int x = m_side == Left ? a.left() : a.right() - thickness + 1;
++            r = QRect(x, a.top(), thickness, a.height());
++            setMargins(m_side == Left ? thickness : 0, m_side == Right ? thickness : 0, 0);
++        }
++        m_dockedRect = r;
++        if (m_dock->geometry() != r) m_dock->setGeometry(r);
++        m_dock->raise();
++        m_applying = false;
++    }
++
++    void setMargins(int left, int right, int bottom)
++    {
++        if (!m_mainWindow) return;
++        const QMargins wanted(m_baseMargins.left() + left, m_baseMargins.top(),
++                              m_baseMargins.right() + right, m_baseMargins.bottom() + bottom);
++        if (m_mainWindow->contentsMargins() == wanted) return;
++        const bool was = m_applying;
++        m_applying = true;
++        m_mainWindow->setContentsMargins(wanted);
++        m_applying = was;
++    }
++
++    /// the panel standing up (a column) or lying down (a row, docked at the bottom)
++    void setLying(bool lying)
++    {
++        if (!m_container || !m_dock) return;
++        QBoxLayout *layout = qobject_cast<QBoxLayout *>(m_container->layout());
++        if (!layout) return;
++        layout->setDirection(lying ? QBoxLayout::LeftToRight : QBoxLayout::TopToBottom);
++        layout->setContentsMargins(lying ? QMargins(2, 3, 8, 3) : QMargins(3, 2, 3, 8));
++        const Qt::Alignment across = lying ? Qt::AlignVCenter : Qt::AlignHCenter;
++        for (int i = 0; i < layout->count(); ++i) {
++            QWidget *w = layout->itemAt(i)->widget();
++            if (!w) continue;
++            if (w->objectName() == QLatin1String("KritaNovaVerticalSliders")) {
++                if (QBoxLayout *inner = qobject_cast<QBoxLayout *>(w->layout())) {
++                    inner->setDirection(lying ? QBoxLayout::LeftToRight : QBoxLayout::TopToBottom);
++                    inner->setContentsMargins(lying ? QMargins(2, 0, 2, 0) : QMargins(0, 2, 0, 2));
++                    for (int j = 0; j < inner->count(); ++j) {
++                        if (QWidget *child = inner->itemAt(j)->widget()) inner->setAlignment(child, across);
++                    }
++                }
++                // (no Q_OBJECT in these small classes: no findChildren<NovaVerticalSlider *>)
++                Q_FOREACH (QWidget *child, w->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly)) {
++                    if (NovaVerticalSlider *slider = dynamic_cast<NovaVerticalSlider *>(child)) {
++                        slider->setHorizontal(lying);
++                    }
++                }
++                w->setSizePolicy(lying ? QSizePolicy::Expanding : QSizePolicy::Preferred,
++                                 lying ? QSizePolicy::Preferred : QSizePolicy::Expanding);
++            }
++            if (w->objectName() == QLatin1String("KritaNovaBrushPanelColors")) {
++                if (w->layout()) w->layout()->setContentsMargins(lying ? QMargins(8, 0, 4, 0) : QMargins(0, 8, 0, 4));
++            }
++            layout->setAlignment(w, across);
++        }
++        if (m_keeper) {
++            m_keeper->setEditOrientation(lying ? Qt::Horizontal : Qt::Vertical);
++            m_keeper->relocate();
++            // relocate() inserts the undo / redo toolbar centered: keep it in line
++            if (KisToolBar *edit = m_mainWindow ? m_mainWindow->findChild<KisToolBar *>(QStringLiteral("editToolBar")) : nullptr) {
++                if (layout->indexOf(edit) >= 0) layout->setAlignment(edit, across);
++            }
++        }
++        if (m_grip) m_grip->setVertical(lying);
++        m_dock->setFeatures(lying ? (m_dock->features() | QDockWidget::DockWidgetVerticalTitleBar)
++                                  : (m_dock->features() & ~QDockWidget::DockWidgetVerticalTitleBar));
++        layout->invalidate();
++        m_container->updateGeometry();
++    }
++
++    QPointer<QMainWindow> m_mainWindow;
++    QPointer<QDockWidget> m_dock;
++    QPointer<QWidget> m_container;
++    QPointer<BrushPanelToolBarKeeper> m_keeper;
++    QPointer<NovaPanelGrip> m_grip;
++    QMargins m_baseMargins;
++    Side m_side {Floating};
++    QRect m_dockedRect;
++    QSize m_pressSize;
++    QTimer m_settle;
++    int m_waits {0};
++    bool m_pressed {false};
++    bool m_moved {false};
++    bool m_applying {false};
++};
++
+ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *viewManager, QStackedWidget *mainStack)
+ {
+     QDockWidget *topBar = createAndroidTopBarDock(mainWindow);
+@@ -1785,7 +2108,7 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+     // with Settings > Toolbars Shown > Brush Panel). The top few pixels of a
+     // floating panel resize it (patch 14), so the grip is tall enough to have
+     // room to move it below that.
+-    QWidget *titleBar = new NovaPanelGrip(dock);
++    NovaPanelGrip *titleBar = new NovaPanelGrip(dock);
+     RoundedPanelPainter::install(dock);
+     dock->setTitleBarWidget(titleBar);
+ 
+@@ -1892,7 +2215,11 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+     // ... and while the pen is in use
+     new PanelFingerRouter(dock);
+ 
++    // Krita Nova (patch 61): docks to the left, right or bottom edge
++    BrushPanelDocking *docking = new BrushPanelDocking(mainWindow, dock, container, keeper, titleBar);
++
+     BrushPanelShower *shower = new BrushPanelShower(mainWindow, dock, keeper, mainStack);
++    shower->placeDocked = [docking]() { return docking->placeDocked(); };
+     keeper->onToolBarShown = [shower]() { shower->toolBarShown(); };
+ 
+ 
