@@ -1,12 +1,12 @@
 Krita Nova 61 - Brush Panel: dock it to the left, right or bottom edge
 
-Drop the floating Brush Panel (dragged by its grip) within 40 px of the
-left, right or bottom edge of the window and it docks there:
+Drop the floating Brush Panel (dragged by its grip) within an eighth of
+the window (at least 120 px) of the left, right or bottom edge of the window and it docks there:
 - left / right: a column as tall as the window, at the very edge;
 - bottom: a row as wide as the window - the panel lies down: undo / redo
   side by side, the size and opacity sliders lie down (filled from the
   left, dragged sideways), the grip moves to its left end.
-The window's contents (the dockers of that side, the canvas, the toolbars)
+Docked, it has square corners. The window's contents (the dockers of that side, the canvas, the toolbars)
 move toward the center to make room, so the panel covers nothing. Dragging
 it away from its edge floats it again (standing up, the floating height).
 A nudge or a resize while docked goes back to the edge. The space is given
@@ -15,7 +15,7 @@ The side is remembered (kritarc androidBrushPanelSide: 0 floating, 1 left,
 2 right, 3 bottom).
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 227c606..5633dee 100644
+index 227c606..220ccdf 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
 @@ -447,7 +447,24 @@ public:
@@ -186,7 +186,22 @@ index 227c606..5633dee 100644
  };
  
  /**
-@@ -1239,9 +1293,27 @@ public:
+@@ -1157,7 +1211,13 @@ protected:
+         const QRectF r = QRectF(widget->rect()).adjusted(pen / 2, pen / 2, -pen / 2, -pen / 2);
+         p.setPen(QPen(outline, pen));
+         p.setBrush(widget->palette().color(QPalette::Window));
+-        p.drawRoundedRect(r, m_radius, m_radius);
++        // Krita Nova (patch 61): square while docked to an edge of the window
++        const qreal radius = widget->property("_kritanova_squareCorners").toBool() ? 0.0 : m_radius;
++        if (radius > 0.0) {
++            p.drawRoundedRect(r, radius, radius);
++        } else {
++            p.drawRect(r);
++        }
+         return true; // no square background or frame from the widget itself
+     }
+ 
+@@ -1239,9 +1299,27 @@ public:
      explicit NovaPanelGrip(QWidget *parent) : QWidget(parent)
      {
          setFixedHeight(20);
@@ -216,7 +231,7 @@ index 227c606..5633dee 100644
  
  protected:
      void paintEvent(QPaintEvent *) override
-@@ -1252,9 +1324,13 @@ protected:
+@@ -1252,9 +1330,13 @@ protected:
          c.setAlpha(110);
          p.setPen(Qt::NoPen);
          p.setBrush(c);
@@ -231,7 +246,7 @@ index 227c606..5633dee 100644
  };
  
  /**
-@@ -1767,6 +1843,253 @@ private:
+@@ -1767,6 +1849,270 @@ private:
      QTimer m_poll;
  };
  
@@ -285,6 +300,7 @@ index 227c606..5633dee 100644
 +                m_waits = 0;
 +                m_moved = false;
 +                m_pressSize = m_dock->size();
++                m_pressPos = m_dock->pos();
 +            } else if (type == QEvent::MouseButtonRelease) {
 +                m_pressed = false;
 +                m_settle.start();
@@ -322,7 +338,9 @@ index 227c606..5633dee 100644
 +            m_pressed = false;
 +        }
 +        m_waits = 0;
-+        const bool userMoved = m_moved && m_dock->size() == m_pressSize; // a move, not a resize
++        // a move, not a resize (also when the move events were not seen)
++        const bool userMoved = (m_moved || (m_dock->pos() - m_pressPos).manhattanLength() > 10)
++                               && m_dock->size() == m_pressSize;
 +        m_moved = false;
 +        if (isDocked()) {
 +            apply(); // a nudge or a resize: back to the edge
@@ -331,15 +349,18 @@ index 227c606..5633dee 100644
 +        if (!userMoved) return;
 +        const QRect a = area();
 +        const QRect g = m_dock->frameGeometry();
-+        const int snap = 40;
++        // a wide snapping zone: an eighth of the window from each edge, at
++        // least 120 px (40 px was hard to hit with a finger)
++        const int snapX = qMax(120, a.width() / 8);
++        const int snapY = qMax(120, a.height() / 8);
 +        const int left = g.left() - a.left();
 +        const int right = a.right() - g.right();
 +        const int bottom = a.bottom() - g.bottom();
 +        Side side = Floating;
-+        int best = snap + 1;
-+        if (left <= snap && left < best) { side = Left; best = left; }
-+        if (right <= snap && right < best) { side = Right; best = right; }
-+        if (bottom <= snap && bottom < best) { side = Bottom; best = bottom; }
++        qreal best = 2.0; // the nearest edge, relative to its zone
++        if (left <= snapX && qreal(left) / snapX < best) { side = Left; best = qreal(left) / snapX; }
++        if (right <= snapX && qreal(right) / snapX < best) { side = Right; best = qreal(right) / snapX; }
++        if (bottom <= snapY && qreal(bottom) / snapY < best) { side = Bottom; best = qreal(bottom) / snapY; }
 +        if (side != Floating) dockTo(side);
 +    }
 +
@@ -358,6 +379,7 @@ index 227c606..5633dee 100644
 +        KisConfig(false).writeEntry("androidBrushPanelSide", int(Floating));
 +        setMargins(0, 0, 0);
 +        setLying(false);
++        setSquare(false);
 +        m_applying = true;
 +        const int width = panelThickness();
 +        m_dock->setFixedWidth(width);
@@ -400,9 +422,18 @@ index 227c606..5633dee 100644
 +            setMargins(m_side == Left ? thickness : 0, m_side == Right ? thickness : 0, 0);
 +        }
 +        m_dockedRect = r;
++        setSquare(true);
 +        if (m_dock->geometry() != r) m_dock->setGeometry(r);
 +        m_dock->raise();
 +        m_applying = false;
++    }
++
++    /// no rounded corners while docked (RoundedPanelPainter reads this)
++    void setSquare(bool square)
++    {
++        if (!m_dock || m_dock->property("_kritanova_squareCorners").toBool() == square) return;
++        m_dock->setProperty("_kritanova_squareCorners", square);
++        m_dock->update();
 +    }
 +
 +    void setMargins(int left, int right, int bottom)
@@ -475,6 +506,7 @@ index 227c606..5633dee 100644
 +    Side m_side {Floating};
 +    QRect m_dockedRect;
 +    QSize m_pressSize;
++    QPoint m_pressPos;
 +    QTimer m_settle;
 +    int m_waits {0};
 +    bool m_pressed {false};
@@ -485,7 +517,7 @@ index 227c606..5633dee 100644
  QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *viewManager, QStackedWidget *mainStack)
  {
      QDockWidget *topBar = createAndroidTopBarDock(mainWindow);
-@@ -1785,7 +2108,7 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+@@ -1785,7 +2131,7 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
      // with Settings > Toolbars Shown > Brush Panel). The top few pixels of a
      // floating panel resize it (patch 14), so the grip is tall enough to have
      // room to move it below that.
@@ -494,7 +526,7 @@ index 227c606..5633dee 100644
      RoundedPanelPainter::install(dock);
      dock->setTitleBarWidget(titleBar);
  
-@@ -1892,7 +2215,11 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+@@ -1892,7 +2238,11 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
      // ... and while the pen is in use
      new PanelFingerRouter(dock);
  

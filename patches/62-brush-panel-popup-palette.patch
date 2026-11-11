@@ -6,7 +6,7 @@ middle of the canvas, or hides it when it is open. It is highlighted while
 the palette is open.
 
 diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
-index 5633dee..7ecdbe5 100644
+index 220ccdf..3afd2cd 100644
 --- a/libs/ui/KisMainWindow.cpp
 +++ b/libs/ui/KisMainWindow.cpp
 @@ -140,6 +140,7 @@
@@ -17,7 +17,7 @@ index 5633dee..7ecdbe5 100644
  #include "kis_canvas_controller.h"
  #include "kis_canvas_resource_provider.h"
  #include "kis_clipboard.h"
-@@ -1843,6 +1844,94 @@ private:
+@@ -1849,6 +1850,94 @@ private:
      QTimer m_poll;
  };
  
@@ -112,7 +112,7 @@ index 5633dee..7ecdbe5 100644
  /**
   * Krita Nova (patch 61): the Brush Panel docks to the left, right or bottom
   * edge of the window. Drop it (by its grip) within a short distance of an
-@@ -2112,7 +2201,7 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+@@ -2135,7 +2224,7 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
      RoundedPanelPainter::install(dock);
      dock->setTitleBarWidget(titleBar);
  
@@ -121,7 +121,7 @@ index 5633dee..7ecdbe5 100644
      QWidget *container = new QWidget(dock);
      QVBoxLayout *layout = new QVBoxLayout(container);
      layout->setContentsMargins(3, 2, 3, 8); // thin sides, room at the bottom
-@@ -2207,6 +2296,9 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+@@ -2230,6 +2319,9 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
      // colour sampler button at the bottom of the panel
      layout->addWidget(new NovaColorSamplerButton(viewManager, container), 0, Qt::AlignHCenter);
  
