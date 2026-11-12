@@ -1,0 +1,38 @@
+Krita Nova 65 - Touch painting "automatic": remember that a pen was used
+
+With Settings > Configure Krita > General > Tools > "Touch painting" on its
+default, automatic, fingers paint until a pen input arrives - but only pen
+input of the current session counted, so after every start of Krita a
+finger painted on the canvas until the pen had been used once.
+
+The first pen input is now remembered (kritarc novaPenInputSeen): from then
+on, the automatic setting keeps fingers from painting right from the start.
+Choosing "Enabled" or "Disabled" for touch painting works as before.
+
+diff --git a/libs/ui/kis_config.cc b/libs/ui/kis_config.cc
+index 9ed7604..ffe2f45 100644
+--- a/libs/ui/kis_config.cc
++++ b/libs/ui/kis_config.cc
+@@ -165,7 +165,21 @@ bool KisConfig::disableTouchOnCanvas() const
+         // Automatic detection: enable or disable touch input based on whether
+         // we've received a tablet input during this session and therefore know
+         // that the user has a pen available.
+-        return KoPointerEvent::tabletInputReceived();
++        //
++        // Krita Nova: ...or in an earlier session. Only this session counted,
++        // so after every start fingers painted until the pen was used once.
++        // The first pen input is remembered (kritarc novaPenInputSeen).
++        if (KoPointerEvent::tabletInputReceived()) {
++            static bool remembered = false;
++            if (!remembered) {
++                remembered = true;
++                if (!m_cfg.readEntry("novaPenInputSeen", false)) {
++                    KisConfig(false).writeEntry("novaPenInputSeen", true);
++                }
++            }
++            return true;
++        }
++        return m_cfg.readEntry("novaPenInputSeen", false);
+     }
+ }
+ 

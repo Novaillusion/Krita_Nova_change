@@ -1,0 +1,301 @@
+Krita Nova 64 - Autosave to the documents' own files
+
+Settings > Configure Krita > General > File Handling gets "Save Documents
+to Their Own Files Automatically" (off by default) with "Save every: N min"
+(1-240, default 10), under Krita's own "Enable Autosaving", which stays as
+it is (a backup copy for crash recovery).
+
+When on, every N minutes KisNovaFileAutoSaver (created by KisPart) saves
+each open document that has unsaved changes over its own file, as File >
+Save does, without dialogs (the format's last export settings are used).
+Only documents that already have a file in a format that keeps layers
+(.kra, .psd, .ora) are saved; new unsaved images, recovered documents and
+other formats (e.g. .png, .jpg - saving would flatten them) are left to the
+backup autosave. A document that is being saved or whose image is busy is
+tried again 30 s later. kritarc: novaAutoSaveToFile,
+novaAutoSaveToFileInterval (minutes).
+
+diff --git a/libs/ui/CMakeLists.txt b/libs/ui/CMakeLists.txt
+index 5b38c5f..fc98bed 100644
+--- a/libs/ui/CMakeLists.txt
++++ b/libs/ui/CMakeLists.txt
+@@ -453,6 +453,7 @@ set(kritaui_LIB_SRCS
+     KisMainWindow.cpp
+     KisOpenPane.cpp
+     KisPart.cpp
++    KisNovaFileAutoSaver.cpp
+     KisTemplate.cpp
+     KisTemplateCreateDia.cpp
+     KisTemplateGroup.cpp
+diff --git a/libs/ui/KisNovaFileAutoSaver.cpp b/libs/ui/KisNovaFileAutoSaver.cpp
+new file mode 100644
+index 0000000..03e64c3
+--- /dev/null
++++ b/libs/ui/KisNovaFileAutoSaver.cpp
+@@ -0,0 +1,99 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "KisNovaFileAutoSaver.h"
++
++#include <QByteArray>
++
++#include <klocalizedstring.h>
++
++#include "KisDocument.h"
++#include "KisPart.h"
++#include "KisUsageLogger.h"
++#include "kis_config.h"
++#include "kis_config_notifier.h"
++#include "kis_image.h"
++#include "kis_properties_configuration.h"
++
++namespace {
++constexpr int RETRY_MS = 30 * 1000;
++}
++
++KisNovaFileAutoSaver::KisNovaFileAutoSaver(QObject *parent)
++    : QObject(parent)
++{
++    m_timer.setTimerType(Qt::VeryCoarseTimer);
++    connect(&m_timer, SIGNAL(timeout()), SLOT(slotSaveDocuments()));
++    m_retryTimer.setSingleShot(true);
++    m_retryTimer.setInterval(RETRY_MS);
++    connect(&m_retryTimer, SIGNAL(timeout()), SLOT(slotSaveDocuments()));
++    connect(KisConfigNotifier::instance(), SIGNAL(configChanged()), SLOT(slotConfigChanged()));
++    slotConfigChanged();
++}
++
++void KisNovaFileAutoSaver::slotConfigChanged()
++{
++    KisConfig cfg(true);
++    m_enabled = cfg.readEntry("novaAutoSaveToFile", false);
++    const int minutes = qBound(1, cfg.readEntry("novaAutoSaveToFileInterval", 10), 240);
++    if (!m_enabled) {
++        m_timer.stop();
++        m_retryTimer.stop();
++        return;
++    }
++    const int interval = minutes * 60 * 1000;
++    if (!m_timer.isActive() || m_timer.interval() != interval) {
++        m_timer.start(interval);
++    }
++}
++
++bool KisNovaFileAutoSaver::canSave(KisDocument *document)
++{
++    if (!document || !document->isModified() || !document->isReadWrite()) return false;
++    if (document->path().isEmpty() || document->isRecovered()) return false;
++    const QByteArray mime = document->mimeType();
++    // formats that keep the layers: no silent flattening of the user's file
++    return mime == KisDocument::nativeFormatMimeType()
++        || mime == "image/vnd.adobe.photoshop"
++        || mime == "image/openraster";
++}
++
++void KisNovaFileAutoSaver::slotSaveDocuments()
++{
++    if (!m_enabled) return;
++    bool postponed = false;
++
++    Q_FOREACH (QPointer<KisDocument> document, KisPart::instance()->documents()) {
++        if (!document || !canSave(document)) continue;
++        if (document->isSaving() || !document->image() || !document->image()->isIdle()) {
++            postponed = true; // busy (painting, a filter, a save): a little later
++            continue;
++        }
++
++        KisUsageLogger::log(QString("Krita Nova autosave to the document's own file: %1").arg(document->path()));
++        // no dialogs: the last export settings of the format are used
++        const bool wasBatch = document->fileBatchMode();
++        document->setFileBatchMode(true);
++        const bool started = document->save(false, KisPropertiesConfigurationSP());
++        if (!document->isSaving()) {
++            document->setFileBatchMode(wasBatch);
++        } else {
++            // a background save: give the batch mode back once it is done
++            QPointer<KisDocument> doc = document;
++            QTimer *waiter = new QTimer(this);
++            waiter->setInterval(500);
++            connect(waiter, &QTimer::timeout, this, [doc, wasBatch, waiter]() {
++                if (doc && doc->isSaving()) return;
++                if (doc) doc->setFileBatchMode(wasBatch);
++                waiter->stop();
++                waiter->deleteLater();
++            });
++            waiter->start();
++        }
++        if (!started) postponed = true;
++    }
++
++    if (postponed && !m_retryTimer.isActive()) m_retryTimer.start();
++}
+diff --git a/libs/ui/KisNovaFileAutoSaver.h b/libs/ui/KisNovaFileAutoSaver.h
+new file mode 100644
+index 0000000..f71d10a
+--- /dev/null
++++ b/libs/ui/KisNovaFileAutoSaver.h
+@@ -0,0 +1,46 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#ifndef KIS_NOVA_FILE_AUTO_SAVER_H
++#define KIS_NOVA_FILE_AUTO_SAVER_H
++
++#include <QObject>
++#include <QPointer>
++#include <QTimer>
++
++class KisDocument;
++
++/**
++ * Krita Nova: saves open documents to their own files every few minutes
++ * (Settings > Configure Krita > General > File Handling, "Save Documents to
++ * Their Own Files Automatically"; kritarc novaAutoSaveToFile and
++ * novaAutoSaveToFileInterval, in minutes).
++ *
++ * It is separate from Krita's own autosave, which writes a backup copy for
++ * crash recovery. A document is saved only when it has unsaved changes, has a
++ * file already, in a format that keeps layers (.kra, .psd, .ora), is not
++ * being saved and its image is not busy; a busy document is tried again a
++ * little later. Saving runs without dialogs (the last export settings of the
++ * format are used).
++ */
++class KisNovaFileAutoSaver : public QObject
++{
++    Q_OBJECT
++public:
++    explicit KisNovaFileAutoSaver(QObject *parent = nullptr);
++
++private Q_SLOTS:
++    void slotConfigChanged();
++    void slotSaveDocuments();
++
++private:
++    static bool canSave(KisDocument *document);
++
++    QTimer m_timer;
++    QTimer m_retryTimer; ///< a busy document is tried again soon
++    bool m_enabled {false};
++};
++
++#endif
+diff --git a/libs/ui/KisPart.cpp b/libs/ui/KisPart.cpp
+index 94c2193..d49688e 100644
+--- a/libs/ui/KisPart.cpp
++++ b/libs/ui/KisPart.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include "KisPart.h"
++#include "KisNovaFileAutoSaver.h"
+ 
+ #include <config-mlt.h>
+ 
+@@ -167,6 +168,9 @@ KisPart::KisPart()
+     // To save RAM, the MLT-based engine will be loaded later, once the KisImage in question becomes animated.
+     setPlaybackEngine(new KisPlaybackEngineQT(this));
+ 
++    // Krita Nova: autosave to the documents' own files (General settings)
++    new KisNovaFileAutoSaver(this);
++
+     d->animationCachePopulator.slotRequestRegeneration();
+     KisBusyWaitBroker::instance()->setFeedbackCallback(&busyWaitWithFeedback);
+ }
+diff --git a/libs/ui/dialogs/kis_dlg_preferences.cc b/libs/ui/dialogs/kis_dlg_preferences.cc
+index c9ac0be..30a669f 100644
+--- a/libs/ui/dialogs/kis_dlg_preferences.cc
++++ b/libs/ui/dialogs/kis_dlg_preferences.cc
+@@ -8,6 +8,7 @@
+  */
+ 
+ #include "kis_dlg_preferences.h"
++#include <QSpinBox>
+ 
+ #include <config-hdr.h>
+ #include <opengl/kis_opengl.h>
+@@ -874,6 +875,8 @@ void GeneralTab::setDefault()
+     m_chkPalmLargeContacts->setChecked(true);
+     m_spnPalmMaxContactMm->setValue(18);
+     m_chkPaintInsideCanvas->setChecked(false);
++    m_grpAutoSaveToFile->setChecked(false);
++    m_spnAutoSaveToFileInterval->setValue(10);
+     chkEnableTransformToolAfterPaste->setChecked(cfg.activateTransformToolAfterPaste(true));
+     chkZoomHorizontally->setChecked(cfg.zoomHorizontal(true));
+     m_chkConvertOnImport->setChecked(cfg.convertToImageColorspaceOnImport(true));
+@@ -1318,6 +1321,41 @@ void GeneralTab::setupPalmRejectionSettings(KisConfig &cfg)
+     } else if (QLayout *layout = chkEnableTransformToolAfterPaste->parentWidget()->layout()) {
+         layout->addWidget(m_chkPaintInsideCanvas);
+     }
++
++    // Krita Nova: save open documents to their own files automatically
++    // (KisNovaFileAutoSaver), next to the backup autosave of File Handling
++    m_grpAutoSaveToFile = new QGroupBox(i18n("Save Documents to Their Own Files Automatically"), this);
++    m_grpAutoSaveToFile->setCheckable(true);
++    m_grpAutoSaveToFile->setToolTip(i18n("Every few minutes, open documents with unsaved changes are saved over their own files, "
++                                         "as with File > Save. The backup autosave above is separate and keeps working."));
++    m_spnAutoSaveToFileInterval = new QSpinBox(m_grpAutoSaveToFile);
++    m_spnAutoSaveToFileInterval->setRange(1, 240);
++    m_spnAutoSaveToFileInterval->setSuffix(i18nc("unit of the autosave interval", " min"));
++    QLabel *autoSaveToFileNote = new QLabel(
++        i18n("Only images that already have a file in a format that keeps layers (.kra, .psd, .ora) are saved. "
++             "New, unsaved images and other formats are left to the backup autosave. "
++             "Saving waits until the image is not busy."), m_grpAutoSaveToFile);
++    autoSaveToFileNote->setWordWrap(true);
++    QFormLayout *autoSaveToFileForm = new QFormLayout(m_grpAutoSaveToFile);
++    autoSaveToFileForm->addRow(i18n("Save every:"), m_spnAutoSaveToFileInterval);
++    autoSaveToFileForm->addRow(autoSaveToFileNote);
++    m_grpAutoSaveToFile->setChecked(cfg.readEntry("novaAutoSaveToFile", false));
++    m_spnAutoSaveToFileInterval->setValue(cfg.readEntry("novaAutoSaveToFileInterval", 10));
++
++    QFormLayout *fileForm = qobject_cast<QFormLayout *>(m_autosaveCheckBox->parentWidget()->layout());
++    int fileRow = -1;
++    QFormLayout::ItemRole fileRole;
++    if (fileForm) {
++        fileForm->getWidgetPosition(m_autosaveCheckBox, &fileRow, &fileRole);
++    }
++    if (fileForm && fileRow >= 0) {
++        fileForm->insertRow(fileRow + 1, m_grpAutoSaveToFile);
++    } else if (QBoxLayout *box = qobject_cast<QBoxLayout *>(m_autosaveCheckBox->parentWidget()->layout())) {
++        const int index = box->indexOf(m_autosaveCheckBox);
++        box->insertWidget(index >= 0 ? index + 1 : box->count(), m_grpAutoSaveToFile);
++    } else if (QLayout *layout = m_autosaveCheckBox->parentWidget()->layout()) {
++        layout->addWidget(m_grpAutoSaveToFile);
++    }
+ }
+ 
+ void GeneralTab::updatePalmRejectionEnabled()
+@@ -1335,6 +1373,8 @@ void GeneralTab::savePalmRejectionSettings(KisConfig &cfg)
+     cfg.writeEntry("palmRejectionLargeContacts", m_chkPalmLargeContacts->isChecked());
+     cfg.writeEntry("palmRejectionMaxContactMm", m_spnPalmMaxContactMm->value());
+     cfg.writeEntry("paintOnlyInsideCanvas", m_chkPaintInsideCanvas->isChecked());
++    cfg.writeEntry("novaAutoSaveToFile", m_grpAutoSaveToFile->isChecked());
++    cfg.writeEntry("novaAutoSaveToFileInterval", m_spnAutoSaveToFileInterval->value());
+ }
+ 
+ void GeneralTab::updateTouchPressureSensitivityEnabled(int touchPainting)
+diff --git a/libs/ui/dialogs/kis_dlg_preferences.h b/libs/ui/dialogs/kis_dlg_preferences.h
+index 0d2450b..3c23372 100644
+--- a/libs/ui/dialogs/kis_dlg_preferences.h
++++ b/libs/ui/dialogs/kis_dlg_preferences.h
+@@ -15,6 +15,7 @@
+ #include <QMap>
+ #include <QCheckBox>
+ #include <QSpinBox>
++#include <QGroupBox>
+ #include <QString>
+ 
+ #include <kpagedialog.h>
+@@ -150,6 +151,8 @@ private:
+     QCheckBox *m_chkPalmLargeContacts {nullptr};
+     QSpinBox *m_spnPalmMaxContactMm {nullptr};
+     QCheckBox *m_chkPaintInsideCanvas {nullptr}; ///< Krita Nova: "Paint only inside the canvas"
++    QGroupBox *m_grpAutoSaveToFile {nullptr}; ///< Krita Nova: autosave to the documents' own files
++    QSpinBox *m_spnAutoSaveToFileInterval {nullptr};
+ };
+ 
+ 
