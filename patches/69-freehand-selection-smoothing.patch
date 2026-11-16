@@ -1,0 +1,327 @@
+Krita Nova 69 - Freehand selection: stroke smoothing
+
+The Freehand Selection tool's options get a "Stroke smoothing" section, as
+the freehand brush has:
+- None (as before), Weighted or Stabilizer.
+  Weighted: each point of the outline is a Gaussian-weighted average of the
+  cursor's path within the distance. Stabilizer: the outline follows the
+  cursor on a string of that length, so wobbles shorter than it are left
+  out; a dashed line shows the string while drawing.
+- Distance: 3-500 screen pixels (default 50), the same at any zoom.
+- Finish line (default on): when the pen is lifted, the outline goes on to
+  where the cursor is.
+Saved in kritarc [KisToolSelectOutline] novaSmoothing,
+novaSmoothingDistance, novaSmoothingFinishLine.
+The smoothing lives in KisToolOutlineBase (setOutlineSmoothing), off unless
+a tool turns it on; only the freehand selection does.
+
+diff --git a/libs/ui/tool/KisToolOutlineBase.cpp b/libs/ui/tool/KisToolOutlineBase.cpp
+index ceb8315..38d2c5a 100644
+--- a/libs/ui/tool/KisToolOutlineBase.cpp
++++ b/libs/ui/tool/KisToolOutlineBase.cpp
+@@ -20,6 +20,9 @@
+ #include <input/kis_input_manager.h>
+ 
+ #include "KisToolOutlineBase.h"
++#include "kis_algebra_2d.h"
++#include <cmath>
++#include <QPen>
+ #include "input/KisInputActionGroup.h"
+ 
+ KisToolOutlineBase::KisToolOutlineBase(KoCanvasBase * canvas, ToolType type, const QCursor & cursor)
+@@ -188,6 +191,7 @@ void KisToolOutlineBase::beginPrimaryAction(KoPointerEvent *event)
+         m_numberOfContinuedModePoints = 0;
+         m_points.append(convertToPixelCoord(event));
+     }
++    resetSmoothing(m_points.last());
+ }
+ 
+ void KisToolOutlineBase::continuePrimaryAction(KoPointerEvent *event)
+@@ -195,6 +199,15 @@ void KisToolOutlineBase::continuePrimaryAction(KoPointerEvent *event)
+     CHECK_MODE_SANITY_OR_RETURN(KisTool::PAINT_MODE);
+ 
+     QPointF point = convertToPixelCoord(event);
++    if (m_smoothing != SmoothingNone) {
++        // Krita Nova: smoothed, as the freehand brush is
++        m_lastRawPixelPos = point;
++        point = smoothedPoint(point);
++        updateStringFeedback();
++        if (!m_points.isEmpty() && KisAlgebra2D::norm(pixelToView(point) - pixelToView(m_points.last())) < 0.5) {
++            return; // the string has not pulled the line on yet
++        }
++    }
+     m_points.append(point);
+     updateFeedback();
+ }
+@@ -209,6 +222,11 @@ void KisToolOutlineBase::endPrimaryAction(KoPointerEvent *event)
+         // the operation. This prevents some issues with shapes being added
+         // after the image was closed while the shape was being made
+         if (event->spontaneous()) {
++            // Krita Nova: the smoothed line catches up with the cursor
++            if (m_smoothing != SmoothingNone && m_smoothingFinishLine && !m_points.isEmpty()
++                && m_points.last() != m_lastRawPixelPos) {
++                m_points.append(m_lastRawPixelPos);
++            }
+             endStroke();
+         } else {
+             cancelStroke();
+@@ -229,11 +247,87 @@ void KisToolOutlineBase::paint(QPainter& gc, const KoViewConverter &converter)
+             outline.lineTo(pixelToView(m_lastCursorPos));
+         }
+         paintToolOutline(&gc, outline);
++
++        // Krita Nova: the stabilizer's string, from the line to the cursor
++        if (m_smoothing == SmoothingStabilizer && mode() == KisTool::PAINT_MODE) {
++            QPainterPath string;
++            string.moveTo(pixelToView(m_points.last()));
++            string.lineTo(pixelToView(m_lastRawPixelPos));
++            gc.save();
++            QPen pen(QColor(128, 128, 128, 200), 1, Qt::DashLine);
++            pen.setCosmetic(true);
++            gc.setPen(pen);
++            gc.drawPath(string);
++            gc.restore();
++        }
+     }
+ 
+     KisToolShape::paint(gc, converter);
+ }
+ 
++void KisToolOutlineBase::setOutlineSmoothing(OutlineSmoothing mode, qreal distance, bool finishLine)
++{
++    m_smoothing = mode;
++    m_smoothingDistance = qMax<qreal>(1.0, distance);
++    m_smoothingFinishLine = finishLine;
++}
++
++void KisToolOutlineBase::resetSmoothing(const QPointF &pixelPos)
++{
++    m_lastRawPixelPos = pixelPos;
++    m_stabilizedViewPos = pixelToView(pixelPos);
++    m_smoothingHistory.clear();
++    m_smoothingHistory.append(m_stabilizedViewPos);
++    m_lastStringRect = QRectF();
++}
++
++QPointF KisToolOutlineBase::smoothedPoint(const QPointF &rawPixelPos)
++{
++    const QPointF raw = pixelToView(rawPixelPos);
++
++    if (m_smoothing == SmoothingStabilizer) {
++        // a string of m_smoothingDistance pulls the line's end behind the cursor
++        const QPointF d = raw - m_stabilizedViewPos;
++        const qreal length = KisAlgebra2D::norm(d);
++        if (length > m_smoothingDistance) {
++            m_stabilizedViewPos += d * ((length - m_smoothingDistance) / length);
++        }
++        return viewToPixel(m_stabilizedViewPos);
++    }
++
++    // weighted: a Gaussian-weighted average of the cursor path within
++    // m_smoothingDistance of the cursor (closer points weigh more)
++    m_smoothingHistory.append(raw);
++    const qreal sigma = qMax<qreal>(1.0, m_smoothingDistance / 3.0);
++    QPointF sum;
++    qreal weights = 0.0;
++    qreal pathLength = 0.0;
++    int oldestUsed = m_smoothingHistory.size() - 1;
++    for (int i = m_smoothingHistory.size() - 1; i >= 0; --i) {
++        if (i < m_smoothingHistory.size() - 1) {
++            pathLength += KisAlgebra2D::norm(m_smoothingHistory[i + 1] - m_smoothingHistory[i]);
++        }
++        if (pathLength > m_smoothingDistance) break;
++        const qreal w = std::exp(-(pathLength * pathLength) / (2.0 * sigma * sigma));
++        sum += m_smoothingHistory[i] * w;
++        weights += w;
++        oldestUsed = i;
++    }
++    if (oldestUsed > 64) {
++        m_smoothingHistory.remove(0, oldestUsed - 1); // keep the history short
++    }
++    return weights > 0.0 ? viewToPixel(sum / weights) : rawPixelPos;
++}
++
++void KisToolOutlineBase::updateStringFeedback()
++{
++    if (m_smoothing != SmoothingStabilizer || m_points.isEmpty()) return;
++    const QRectF rect = kisGrowRect(QRectF(pixelToView(m_points.last()), pixelToView(m_lastRawPixelPos)).normalized(),
++                                    FEEDBACK_LINE_WIDTH + 2);
++    updateCanvasViewRect(m_lastStringRect.isValid() ? rect.united(m_lastStringRect) : rect);
++    m_lastStringRect = rect;
++}
++
+ void KisToolOutlineBase::updateFeedback()
+ {
+     if (m_points.count() > 1) {
+diff --git a/libs/ui/tool/KisToolOutlineBase.h b/libs/ui/tool/KisToolOutlineBase.h
+index 40f3e11..2ec9b56 100644
+--- a/libs/ui/tool/KisToolOutlineBase.h
++++ b/libs/ui/tool/KisToolOutlineBase.h
+@@ -25,6 +25,14 @@ public:
+         SELECT
+     };
+ 
++    /// Krita Nova: smoothing of a freehand outline, as the freehand brush
++    /// has. Distances are in screen pixels, so it feels the same at any zoom.
++    enum OutlineSmoothing {
++        SmoothingNone = 0,
++        SmoothingWeighted = 1,   ///< a weighted average of the recent cursor path
++        SmoothingStabilizer = 2  ///< the line follows the cursor on a string of the given length
++    };
++
+     KisToolOutlineBase(KoCanvasBase *canvas,
+                        ToolType type,
+                        const QCursor & cursor=KisCursor::load("tool_outline_selection_cursor.png", 6, 6));
+@@ -54,6 +62,10 @@ public Q_SLOTS:
+ protected:
+     virtual void finishOutline(const QVector<QPointF>& points) = 0;
+ 
++    /// Krita Nova: smooth the outline while it is drawn. With finishLine, the
++    /// outline goes on to where the cursor was let go.
++    void setOutlineSmoothing(OutlineSmoothing mode, qreal distance, bool finishLine);
++
+ private:
+     static constexpr int FEEDBACK_LINE_WIDTH{2};
+ 
+@@ -66,6 +78,18 @@ private:
+     bool m_hasUserInteractionRunning;
+     QScopedPointer<KisInputActionGroupsMaskGuard> m_blockModifyingActionsGuard;
+ 
++    // Krita Nova: outline smoothing
++    OutlineSmoothing m_smoothing {SmoothingNone};
++    qreal m_smoothingDistance {50.0};
++    bool m_smoothingFinishLine {true};
++    QVector<QPointF> m_smoothingHistory; ///< recent cursor positions, view pixels
++    QPointF m_stabilizedViewPos;         ///< the end of the string, view pixels
++    QPointF m_lastRawPixelPos;           ///< where the cursor really is, image pixels
++    QRectF m_lastStringRect;             ///< the string drawn last, view pixels
++    void resetSmoothing(const QPointF &pixelPos);
++    QPointF smoothedPoint(const QPointF &rawPixelPos);
++    void updateStringFeedback();
++
+     void updateFeedback();
+     void updateContinuedMode();
+     void updateCanvas();
+diff --git a/plugins/tools/selectiontools/kis_tool_select_outline.cc b/plugins/tools/selectiontools/kis_tool_select_outline.cc
+index 6bb8f0b..94e7a82 100644
+--- a/plugins/tools/selectiontools/kis_tool_select_outline.cc
++++ b/plugins/tools/selectiontools/kis_tool_select_outline.cc
+@@ -39,6 +39,13 @@
+ 
+ #include "kis_algebra_2d.h"
+ 
++#include <QCheckBox>
++#include <QComboBox>
++#include <KConfigGroup>
++#include <KSharedConfig>
++#include <KisSpinBoxI18nHelper.h>
++#include "kis_slider_spin_box.h"
++
+ __KisToolSelectOutlineLocal::__KisToolSelectOutlineLocal(KoCanvasBase * canvas)
+     : KisToolOutlineBase(canvas, KisToolOutlineBase::SELECT,
+                          KisCursor::loadWithSize("tool_outline_selection_cursor.svg", 32, 32, 5, 5))
+@@ -49,7 +56,87 @@ __KisToolSelectOutlineLocal::__KisToolSelectOutlineLocal(KoCanvasBase * canvas)
+ 
+ KisToolSelectOutline::KisToolSelectOutline(KoCanvasBase * canvas)
+     : KisToolSelectBase<__KisToolSelectOutlineLocal>(canvas, i18n("Freehand Selection"))
+-{}
++{
++    applySmoothingSettings();
++}
++
++namespace {
++// Krita Nova: settings of the freehand selection's stroke smoothing
++// (a fixed group: toolId() is not known yet in the constructor)
++KConfigGroup smoothingConfig()
++{
++    return KSharedConfig::openConfig()->group("KisToolSelectOutline");
++}
++}
++
++void KisToolSelectOutline::applySmoothingSettings()
++{
++    const KConfigGroup cfg = smoothingConfig();
++    const int mode = qBound(0, cfg.readEntry("novaSmoothing", 0), 2);
++    setOutlineSmoothing(KisToolOutlineBase::OutlineSmoothing(mode),
++                        cfg.readEntry("novaSmoothingDistance", 50),
++                        cfg.readEntry("novaSmoothingFinishLine", true));
++}
++
++QWidget *KisToolSelectOutline::createOptionWidget()
++{
++    KisToolSelectBase::createOptionWidget();
++    KisSelectionOptions *selectionWidget = selectionOptionWidget();
++
++    // Krita Nova: stroke smoothing, as the freehand brush has
++    const KConfigGroup cfg = smoothingConfig();
++
++    QComboBox *cmbSmoothing = new QComboBox;
++    cmbSmoothing->addItem(i18nc("freehand selection smoothing", "None"));
++    cmbSmoothing->addItem(i18nc("freehand selection smoothing", "Weighted"));
++    cmbSmoothing->addItem(i18nc("freehand selection smoothing", "Stabilizer"));
++    cmbSmoothing->setToolTip(i18n("Smooths the outline while you draw it.\n"
++                                  "Weighted: averages the path of the cursor.\n"
++                                  "Stabilizer: the outline follows the cursor on a string, so wobbles shorter than the string are left out."));
++    cmbSmoothing->setCurrentIndex(qBound(0, cfg.readEntry("novaSmoothing", 0), 2));
++
++    KisSliderSpinBox *sldDistance = new KisSliderSpinBox;
++    sldDistance->setRange(3, 500);
++    sldDistance->setExponentRatio(3.0);
++    KisSpinBoxI18nHelper::setText(sldDistance,
++                                  i18nc("{n} is the number value, px the unit (screen pixels)", "Distance: {n} px"));
++    sldDistance->setToolTip(i18n("How far the smoothing reaches, in screen pixels: the longer, the smoother."));
++    sldDistance->setValue(qBound(3, cfg.readEntry("novaSmoothingDistance", 50), 500));
++
++    QCheckBox *chkFinishLine = new QCheckBox(i18n("Finish line"));
++    chkFinishLine->setToolTip(i18n("When you let go, the outline goes on to where the cursor is."));
++    chkFinishLine->setChecked(cfg.readEntry("novaSmoothingFinishLine", true));
++
++    auto updateEnabled = [sldDistance, chkFinishLine, cmbSmoothing]() {
++        const bool on = cmbSmoothing->currentIndex() != 0;
++        sldDistance->setEnabled(on);
++        chkFinishLine->setEnabled(on);
++    };
++    updateEnabled();
++
++    KisOptionCollectionWidgetWithHeader *section =
++        new KisOptionCollectionWidgetWithHeader(i18nc("section in the freehand selection tool options", "Stroke smoothing"));
++    section->appendWidget("cmbNovaSmoothing", cmbSmoothing);
++    section->appendWidget("sldNovaSmoothingDistance", sldDistance);
++    section->appendWidget("chkNovaSmoothingFinishLine", chkFinishLine);
++    selectionWidget->appendWidget("sectionNovaSmoothing", section);
++
++    connect(cmbSmoothing, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, updateEnabled](int index) {
++        smoothingConfig().writeEntry("novaSmoothing", index);
++        updateEnabled();
++        applySmoothingSettings();
++    });
++    connect(sldDistance, QOverload<int>::of(&KisSliderSpinBox::valueChanged), this, [this](int value) {
++        smoothingConfig().writeEntry("novaSmoothingDistance", value);
++        applySmoothingSettings();
++    });
++    connect(chkFinishLine, &QCheckBox::toggled, this, [this](bool on) {
++        smoothingConfig().writeEntry("novaSmoothingFinishLine", on);
++        applySmoothingSettings();
++    });
++
++    return selectionWidget;
++}
+ 
+ void KisToolSelectOutline::finishOutline(const QVector<QPointF>& points)
+ {
+diff --git a/plugins/tools/selectiontools/kis_tool_select_outline.h b/plugins/tools/selectiontools/kis_tool_select_outline.h
+index cb0b860..416e5fc 100644
+--- a/plugins/tools/selectiontools/kis_tool_select_outline.h
++++ b/plugins/tools/selectiontools/kis_tool_select_outline.h
+@@ -36,8 +36,11 @@ public:
+     bool primaryActionSupportsHiResEvents() const override;
+     bool alternateActionSupportsHiResEvents(KisTool::AlternateAction action) const override;
+     void resetCursorStyle() override;
++    QWidget *createOptionWidget() override;
+ 
+ private:
++    void applySmoothingSettings(); ///< Krita Nova: outline smoothing from the tool's settings
++
+     void finishOutline(const QVector<QPointF>& points) override;
+     void beginShape() override;
+     void endShape() override;
