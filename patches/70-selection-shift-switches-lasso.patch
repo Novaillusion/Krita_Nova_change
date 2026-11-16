@@ -18,7 +18,7 @@ KisToolPolylineBase::setShiftSwitchesToFreehand; only these two tools turn
 them on.)
 
 diff --git a/libs/ui/input/kis_tool_invocation_action.cpp b/libs/ui/input/kis_tool_invocation_action.cpp
-index 27fc366..a7dd160 100644
+index 27fc366..f77dbe0 100644
 --- a/libs/ui/input/kis_tool_invocation_action.cpp
 +++ b/libs/ui/input/kis_tool_invocation_action.cpp
 @@ -26,6 +26,7 @@ class KisToolInvocationAction::Private
@@ -29,7 +29,7 @@ index 27fc366..a7dd160 100644
      bool isUsingOtherColor {false};
  
      QPointer<KisToolProxy> activatedToolProxy;
-@@ -106,6 +107,16 @@ void KisToolInvocationAction::activate(int shortcut)
+@@ -106,6 +107,17 @@ void KisToolInvocationAction::activate(int shortcut)
              break;
      }
  
@@ -38,7 +38,8 @@ index 27fc366..a7dd160 100644
 +    // press goes to the selection tool, where Shift means Add to selection
 +    d->skippedToolSwitch = false;
 +    if (!temporaryToolId.isEmpty()
-+        && KoToolManager::instance()->activeToolId().startsWith(QLatin1String("KisToolSelect"))) {
++        && inputManager()->canvas()->canvasController()->toolManager()
++        && inputManager()->canvas()->canvasController()->toolManager()->activeToolId().startsWith(QLatin1String("KisToolSelect"))) {
 +        temporaryToolId.clear();
 +        d->skippedToolSwitch = true;
 +    }
@@ -46,7 +47,7 @@ index 27fc366..a7dd160 100644
      if (!temporaryToolId.isEmpty()) {
          inputManager()->canvas()->canvasController()->toolManager()->switchToolRequested(temporaryToolId);
      }
-@@ -140,7 +151,9 @@ void KisToolInvocationAction::deactivate(int shortcut)
+@@ -140,7 +152,9 @@ void KisToolInvocationAction::deactivate(int shortcut)
          d->activatedToolProxy.clear();
      }
  
