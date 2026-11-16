@@ -1,0 +1,34 @@
+Krita Nova 66 - Android: no canvas scrollbars
+
+On Android the canvas has no scrollbars by default (it is moved with
+fingers): Settings > Configure Krita > Display > "Hide canvas scrollbars"
+is on by default there, and is turned on once for an existing setting
+(kritarc novaAndroidScrollbarsHidden). Unticking it brings them back.
+Other platforms are unchanged.
+
+diff --git a/libs/ui/kis_config.cc b/libs/ui/kis_config.cc
+index ffe2f45..f88c239 100644
+--- a/libs/ui/kis_config.cc
++++ b/libs/ui/kis_config.cc
+@@ -1358,7 +1358,21 @@ void KisConfig::setCanvasBorderColor(const QColor& color) const
+ 
+ bool KisConfig::hideScrollbars(bool defaultValue) const
+ {
++#ifdef Q_OS_ANDROID
++    // Krita Nova: no canvas scrollbars on Android (the canvas is moved with
++    // fingers). Hidden by default, and hidden once for an existing setting;
++    // Display > "Hide canvas scrollbars" can bring them back.
++    if (defaultValue) return true;
++    if (!m_cfg.readEntry("novaAndroidScrollbarsHidden", false)) {
++        KisConfig cfg(false);
++        cfg.writeEntry("hideScrollbars", true);
++        cfg.writeEntry("novaAndroidScrollbarsHidden", true);
++        return true;
++    }
++    return m_cfg.readEntry("hideScrollbars", true);
++#else
+     return (defaultValue ? false : m_cfg.readEntry("hideScrollbars", false));
++#endif
+ }
+ 
+ void KisConfig::setHideScrollbars(bool value) const
