@@ -1,13 +1,18 @@
 Krita Nova 72 - Transform tool: a floating actions bar
 
-While the Transform tool is active, a small bar floats over the canvas, in
-the look of the selection actions bar: Flip Horizontally, Flip Vertically,
+While the Transform tool is active, a small bar floats over the canvas,
+drawn as the selection actions bar is (30 px buttons side by side with
+24 px icons, its outlines and background, its drag handle): Flip Horizontally, Flip Vertically,
 Rotate 90° counter-clockwise and clockwise (these four in Free Transform
 mode), Reset the transform, the transform mode (a menu: Free, Perspective,
 Warp, Cage, Liquify, Mesh; the button shows the current one), Cancel and
-Apply. It sits at the bottom middle of the canvas; its grip (the dots at its
-right end) moves it, and the place is remembered (kritarc
-[KisToolTransform] novaTransformBarOffset). Pen, touch and mouse work on it.
+Apply. Like the selection actions bar, it sticks to what is being transformed:
+centered 30 px under the transformed area, following it as it is moved,
+scaled or rotated and as the view is zoomed or panned (on the canvas
+always). Its grip (the dots at its right end) moves it away from there, and
+that offset is remembered (kritarc [KisToolTransform]
+novaTransformBarOffsetFromArea). With no transform running it waits at the
+bottom middle of the canvas. Pen, touch and mouse work on it.
 (plugins/tools/tool_transform2/kis_transform_actions_bar.*)
 
 diff --git a/plugins/tools/tool_transform2/CMakeLists.txt b/plugins/tools/tool_transform2/CMakeLists.txt
@@ -23,18 +28,29 @@ index f886da3..c57a362 100644
      kis_transform_strategy_base.cpp
      kis_warp_transform_strategy.cpp
 diff --git a/plugins/tools/tool_transform2/kis_tool_transform.cc b/plugins/tools/tool_transform2/kis_tool_transform.cc
-index 940c1fa..f04a0fb 100644
+index 940c1fa..3e38d4c 100644
 --- a/plugins/tools/tool_transform2/kis_tool_transform.cc
 +++ b/plugins/tools/tool_transform2/kis_tool_transform.cc
-@@ -64,6 +64,7 @@
+@@ -64,6 +64,8 @@
  #include "widgets/kis_progress_widget.h"
  
  #include "kis_transform_utils.h"
 +#include "kis_transform_actions_bar.h"
++#include "kis_coordinates_converter.h"
  #include "kis_warp_transform_strategy.h"
  #include "kis_cage_transform_strategy.h"
  #include "kis_liquify_transform_strategy.h"
-@@ -858,6 +859,36 @@ void KisToolTransform::activate(const QSet<KoShape*> &shapes)
+@@ -285,6 +287,9 @@ void KisToolTransform::paint(QPainter& gc, const KoViewConverter &converter)
+ {
+     Q_UNUSED(converter);
+ 
++    // Krita Nova: the actions bar follows the transformed area (zoom, pan, transform)
++    if (m_actionsBar) m_actionsBar->schedulePlace();
++
+     if (!m_strokeId || m_transaction.rootNodes().isEmpty()) return;
+ 
+     QRectF newRefRect = KisTransformUtils::imageToFlake(m_canvas->coordinatesConverter(), QRectF(0.0,0.0,1.0,1.0));
+@@ -858,6 +863,51 @@ void KisToolTransform::activate(const QSet<KoShape*> &shapes)
  
      startStroke(toArgsMode(nextActivationTransformMode), false);
      nextActivationTransformMode = KisToolTransform::FreeTransformMode;
@@ -64,6 +80,21 @@ index 940c1fa..f04a0fb 100644
 +    QMetaObject::invokeMethod(m_optionsWidget, clockwise ? "slotRotateCW" : "slotRotateCCW");
 +}
 +
++QRectF KisToolTransform::novaTransformZoneInWidget() const
++{
++    KisCanvas2 *kisCanvas = dynamic_cast<KisCanvas2 *>(canvas());
++    if (!m_strokeId || !kisCanvas || m_transaction.rootNodes().isEmpty()) return QRectF();
++    const QRectF original = m_transaction.originalRect();
++    if (original.isEmpty()) return QRectF();
++
++    QPolygonF zone(original);
++    const ToolTransformArgs::TransformMode mode = m_currentArgs.mode();
++    if (mode == ToolTransformArgs::FREE_TRANSFORM || mode == ToolTransformArgs::PERSPECTIVE_4POINT) {
++        zone = KisTransformUtils::MatricesPack(m_currentArgs).finalTransform().map(zone);
++    }
++    return kisCanvas->coordinatesConverter()->imageToWidget(zone).boundingRect();
++}
++
 +void KisToolTransform::novaResetTransform()
 +{
 +    if (!m_strokeId) return;
@@ -71,7 +102,7 @@ index 940c1fa..f04a0fb 100644
  }
  
  void KisToolTransform::slotToolActionRetriggered()
-@@ -869,6 +900,10 @@ void KisToolTransform::slotToolActionRetriggered()
+@@ -869,6 +919,10 @@ void KisToolTransform::slotToolActionRetriggered()
  
  void KisToolTransform::deactivate()
  {
@@ -83,7 +114,7 @@ index 940c1fa..f04a0fb 100644
      m_canvas->updateCanvas();
      m_actionConnections.clear();
 diff --git a/plugins/tools/tool_transform2/kis_tool_transform.h b/plugins/tools/tool_transform2/kis_tool_transform.h
-index eacfce3..729ce56 100644
+index eacfce3..46281b4 100644
 --- a/plugins/tools/tool_transform2/kis_tool_transform.h
 +++ b/plugins/tools/tool_transform2/kis_tool_transform.h
 @@ -51,6 +51,7 @@ class KisLiquifyTransformStrategy;
@@ -94,7 +125,7 @@ index eacfce3..729ce56 100644
  
  
  /**
-@@ -182,6 +183,11 @@ public:
+@@ -182,6 +183,13 @@ public:
  
      static ToolTransformArgs::TransformMode toArgsMode(KisToolTransform::TransformToolMode toolMode);
  
@@ -102,11 +133,13 @@ index eacfce3..729ce56 100644
 +    void novaFlip(bool horizontally);
 +    void novaRotate90(bool clockwise);
 +    void novaResetTransform();
++    /// the transformed area, in canvas widget pixels (empty with no transform)
++    QRectF novaTransformZoneInWidget() const;
 +
  public Q_SLOTS:
      void activate(const QSet<KoShape*> &shapes) override;
      void deactivate() override;
-@@ -276,6 +282,7 @@ private:
+@@ -276,6 +284,7 @@ private:
      QPainterPath m_selectionPath; // original (unscaled) selection outline, used for painting decorations
  
      KisToolTransformConfigWidget *m_optionsWidget {0};
@@ -116,10 +149,10 @@ index eacfce3..729ce56 100644
      TransformTransactionProperties m_transaction;
 diff --git a/plugins/tools/tool_transform2/kis_transform_actions_bar.cpp b/plugins/tools/tool_transform2/kis_transform_actions_bar.cpp
 new file mode 100644
-index 0000000..16fccd2
+index 0000000..18697bb
 --- /dev/null
 +++ b/plugins/tools/tool_transform2/kis_transform_actions_bar.cpp
-@@ -0,0 +1,325 @@
+@@ -0,0 +1,353 @@
 +/*
 + *  SPDX-FileCopyrightText: 2026 Krita Nova
 + *
@@ -150,9 +183,12 @@ index 0000000..16fccd2
 +
 +namespace {
 +
++// the sizes of the selection actions bar (kis_selection_actions_panel*.cpp)
 +constexpr int BUTTON_SIZE = 30;
-+constexpr int ICON_INSET = 7;
-+const char *OFFSET_KEY = "novaTransformBarOffset";
++constexpr int ICON_INSET = 3;    // ICON_SIZE_OFFSET / 2: 24 px icons
++constexpr int OUTLINE_WIDTH = 4;
++constexpr int MARGIN = OUTLINE_WIDTH + 1; // the outer contrast outline
++const char *OFFSET_KEY = "novaTransformBarOffsetFromArea"; // from its place under the transformed area
 +
 +/// a button of the bar: an icon, a highlight while pressed; takes pen and
 +/// touch presses (children of the canvas do not get them as mouse presses)
@@ -174,12 +210,13 @@ index 0000000..16fccd2
 +    {
 +        QPainter p(this);
 +        p.setRenderHint(QPainter::Antialiasing, true);
-+        const QRectF r = QRectF(rect()).adjusted(1, 1, -1, -1);
 +        if (isDown()) {
++            QPainterPath around;
++            around.addRoundedRect(QRectF(rect()), 3, 3);
 +            QPen pen(qApp->palette().highlight().color(), 2);
 +            p.setPen(pen);
 +            p.setBrush(Qt::NoBrush);
-+            p.drawRoundedRect(r, 3, 3);
++            p.drawPath(around);
 +        }
 +        const QIcon::Mode mode = isEnabled() ? QIcon::Normal : QIcon::Disabled;
 +        icon().paint(&p, rect().adjusted(ICON_INSET, ICON_INSET, -ICON_INSET, -ICON_INSET), Qt::AlignCenter, mode);
@@ -209,31 +246,28 @@ index 0000000..16fccd2
 +    }
 +};
 +
-+/// the grip: dots, drags the bar
++/// the grip: the selection bar's handle, drags the bar
 +class BarGrip : public QWidget
 +{
 +public:
 +    explicit BarGrip(QWidget *parent) : QWidget(parent)
 +    {
-+        setFixedSize(BUTTON_SIZE * 2 / 3, BUTTON_SIZE);
-+        setCursor(Qt::SizeAllCursor);
++        setFixedSize(BUTTON_SIZE, BUTTON_SIZE);
++        setCursor(Qt::OpenHandCursor);
 +        setToolTip(i18n("Drag to move the bar"));
 +        setAttribute(Qt::WA_AcceptTouchEvents);
++        m_icon = KisIconUtils::loadIcon(QStringLiteral("drag-handle"));
 +    }
 +
 +protected:
 +    void paintEvent(QPaintEvent *) override
 +    {
 +        QPainter p(this);
-+        p.setRenderHint(QPainter::Antialiasing, true);
-+        p.setPen(Qt::NoPen);
-+        p.setBrush(qApp->palette().windowText().color());
-+        const qreal cx = width() / 2.0, cy = height() / 2.0;
-+        for (int i = -1; i <= 1; ++i) {
-+            p.drawEllipse(QPointF(cx - 2.5, cy + i * 5.0), 1.6, 1.6);
-+            p.drawEllipse(QPointF(cx + 2.5, cy + i * 5.0), 1.6, 1.6);
-+        }
++        m_icon.paint(&p, QRect(QPoint(3, 0), QSize(BUTTON_SIZE, BUTTON_SIZE)));
 +    }
++
++private:
++    QIcon m_icon;
 +};
 +
 +} // namespace
@@ -244,32 +278,30 @@ index 0000000..16fccd2
 +    setObjectName(QStringLiteral("KritaNovaTransformActionsBar"));
 +    setAttribute(Qt::WA_AcceptTouchEvents);
 +
-+    QHBoxLayout *layout = new QHBoxLayout(this);
-+    layout->setContentsMargins(6, 4, 2, 4);
-+    layout->setSpacing(1);
-+
-+    auto addButton = [this, layout](const QString &icon, const QString &tip) {
++    QList<QWidget *> row;
++    auto addButton = [this, &row](const QString &icon, const QString &tip) {
 +        BarButton *b = new BarButton(icon, tip, this);
-+        layout->addWidget(b);
++        row.append(b);
 +        return b;
 +    };
-+    auto addGap = [layout]() { layout->addSpacing(6); };
 +
 +    BarButton *flipX = addButton(QStringLiteral("transform_icons_mirror_x"), i18n("Flip Horizontally"));
 +    BarButton *flipY = addButton(QStringLiteral("transform_icons_mirror_y"), i18n("Flip Vertically"));
 +    BarButton *rotCCW = addButton(QStringLiteral("transform_icons_rotate_ccw"), i18n("Rotate 90° Counter-Clockwise"));
 +    BarButton *rotCW = addButton(QStringLiteral("transform_icons_rotate_cw"), i18n("Rotate 90° Clockwise"));
 +    m_freeOnlyButtons = {flipX, flipY, rotCCW, rotCW};
-+    addGap();
 +    BarButton *reset = addButton(QStringLiteral("view-refresh"), i18n("Reset the Transform"));
 +    m_modeButton = addButton(QStringLiteral("transform_icons_main"), i18n("Transform Mode"));
-+    addGap();
 +    BarButton *cancel = addButton(QStringLiteral("dialog-cancel"), i18n("Cancel the Transform"));
 +    BarButton *apply = addButton(QStringLiteral("dialog-ok"), i18n("Apply the Transform"));
 +
 +    m_grip = new BarGrip(this);
-+    layout->addWidget(m_grip);
++    row.append(m_grip);
 +    m_grip->installEventFilter(this);
++    for (int i = 0; i < row.size(); ++i) {
++        row[i]->move(MARGIN + i * BUTTON_SIZE, MARGIN);
++    }
++    setFixedSize(row.size() * BUTTON_SIZE + 2 * MARGIN, BUTTON_SIZE + 2 * MARGIN);
 +
 +    connect(flipX, &QAbstractButton::clicked, this, [this]() { if (m_tool) m_tool->novaFlip(true); });
 +    connect(flipY, &QAbstractButton::clicked, this, [this]() { if (m_tool) m_tool->novaFlip(false); });
@@ -289,7 +321,6 @@ index 0000000..16fccd2
 +    poll->setInterval(300);
 +    connect(poll, &QTimer::timeout, this, [this]() { updateState(); });
 +    poll->start();
-+    adjustSize();
 +    updateState();
 +    place();
 +    show();
@@ -346,12 +377,33 @@ index 0000000..16fccd2
 +    }
 +}
 +
++void KisTransformActionsBar::schedulePlace()
++{
++    if (m_placePending) return;
++    m_placePending = true;
++    QTimer::singleShot(0, this, [this]() {
++        m_placePending = false;
++        if (!m_dragging) place();
++    });
++}
++
++QPoint KisTransformActionsBar::anchoredTopLeft() const
++{
++    // as the selection actions bar: centered, 30 px under the area
++    const QRectF zone = m_tool ? m_tool->novaTransformZoneInWidget() : QRectF();
++    if (zone.isValid() && m_canvasWidget) {
++        return QPoint(qRound(zone.center().x()) - width() / 2, qRound(zone.bottom()) + 30 - MARGIN);
++    }
++    // no transform running: the bottom middle of the canvas
++    const QRect area = m_canvasWidget ? m_canvasWidget->rect() : QRect();
++    return QPoint(area.center().x() - width() / 2, area.bottom() - height() - 24);
++}
++
 +void KisTransformActionsBar::place()
 +{
 +    if (!m_canvasWidget) return;
 +    const QRect area = m_canvasWidget->rect();
-+    QPoint topLeft(area.center().x() - width() / 2, area.bottom() - height() - 24);
-+    topLeft += m_offset;
++    QPoint topLeft = anchoredTopLeft() + m_offset;
 +    // keep it on the canvas
 +    topLeft.setX(qBound(area.left() + 4, topLeft.x(), qMax(area.left() + 4, area.right() - width() - 4)));
 +    topLeft.setY(qBound(area.top() + 4, topLeft.y(), qMax(area.top() + 4, area.bottom() - height() - 4)));
@@ -370,11 +422,7 @@ index 0000000..16fccd2
 +    m_offset = m_dragStartOffset + (globalPos - m_dragStartGlobal);
 +    place();
 +    // what was clipped at the canvas edge is not kept
-+    if (m_canvasWidget) {
-+        const QRect area = m_canvasWidget->rect();
-+        const QPoint natural(area.center().x() - width() / 2, area.bottom() - height() - 24);
-+        m_offset = pos() - natural;
-+    }
++    m_offset = pos() - anchoredTopLeft();
 +    if (end) {
 +        m_dragging = false;
 +        KConfigGroup group = KSharedConfig::openConfig()->group("KisToolTransform");
@@ -425,32 +473,45 @@ index 0000000..16fccd2
 +
 +void KisTransformActionsBar::paintEvent(QPaintEvent *)
 +{
-+    // the look of the selection actions bar
++    // the background of the selection actions bar
++    // (KisSelectionActionsPanel::drawActionBarBackground)
 +    QPainter p(this);
 +    p.setRenderHint(QPainter::Antialiasing, true);
-+    QColor outline = qApp->palette().window().color();
-+    QColor background = outline;
++    const qreal cornerRadius = 4;
++    const QColor outlineColor = qApp->palette().window().color();
++    QColor bgColor = outlineColor;
 +    if (!KisIconUtils::useDarkIcons()) {
-+        background = background.lighter(120);
++        bgColor = bgColor.lighter(120);
 +    }
-+    KisPaintingTweaks::dragColor(&background, outline, 0.25);
-+    QColor contrast = qApp->palette().windowText().color();
-+    contrast.setAlpha(90);
++    KisPaintingTweaks::dragColor(&bgColor, outlineColor, 0.25);
++    QColor bgColorTrans = bgColor;
++    bgColorTrans.setAlpha(80);
 +
-+    const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
-+    p.setPen(QPen(contrast, 1));
-+    p.setBrush(outline);
-+    p.drawRoundedRect(r, 6, 6);
-+    p.setPen(Qt::NoPen);
-+    p.setBrush(background);
-+    p.drawRoundedRect(r.adjusted(3, 3, -3 - m_grip->width(), -3), 4, 4);
++    const QRectF bar(MARGIN, MARGIN, width() - 2 * MARGIN, BUTTON_SIZE); // buttons and grip
++    const QRectF contrastOutline = bar.adjusted(-(OUTLINE_WIDTH + 1), -(OUTLINE_WIDTH + 1), OUTLINE_WIDTH + 1, OUTLINE_WIDTH + 1);
++    const QRectF midOutline = bar.adjusted(-OUTLINE_WIDTH, -OUTLINE_WIDTH, OUTLINE_WIDTH, OUTLINE_WIDTH);
++    const QRectF centerBackground(bar.topLeft() - QPointF(OUTLINE_WIDTH, OUTLINE_WIDTH) / 2,
++                                  QSizeF(bar.width() - BUTTON_SIZE + OUTLINE_WIDTH, BUTTON_SIZE + OUTLINE_WIDTH));
++
++    QPainterPath contrastPath, outlinePath, bgPath;
++    contrastPath.addRoundedRect(contrastOutline, cornerRadius, cornerRadius);
++    outlinePath.addRoundedRect(midOutline, cornerRadius, cornerRadius);
++    bgPath.addRoundedRect(centerBackground, cornerRadius, cornerRadius);
++    p.fillPath(contrastPath, bgColorTrans);
++    p.fillPath(outlinePath, outlineColor);
++    p.fillPath(bgPath, bgColor);
++
++    // the grip's block (KisSelectionActionsPanelHandle::draw)
++    if (m_grip) {
++        p.fillRect(m_grip->geometry().marginsAdded(QMargins(-3, 4, 1, 4)), outlineColor);
++    }
 +}
 diff --git a/plugins/tools/tool_transform2/kis_transform_actions_bar.h b/plugins/tools/tool_transform2/kis_transform_actions_bar.h
 new file mode 100644
-index 0000000..773d390
+index 0000000..23b53ed
 --- /dev/null
 +++ b/plugins/tools/tool_transform2/kis_transform_actions_bar.h
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,55 @@
 +/*
 + *  SPDX-FileCopyrightText: 2026 Krita Nova
 + *
@@ -479,6 +540,8 @@ index 0000000..773d390
 +
 +    /// show the current mode, enable what suits it
 +    void updateState();
++    /// move to stay under the transformed area (soon, not from inside a paint)
++    void schedulePlace();
 +
 +protected:
 +    void paintEvent(QPaintEvent *event) override;
@@ -498,6 +561,8 @@ index 0000000..773d390
 +    QPoint m_dragStartGlobal;
 +    QPoint m_dragStartOffset;
 +    bool m_dragging {false};
++    bool m_placePending {false};
++    QPoint anchoredTopLeft() const; ///< under the transformed area, before the offset
 +    int m_shownMode {-1};
 +};
 +
