@@ -1,0 +1,38 @@
+Krita Nova 71 - Transform tool: proportional scaling by default
+
+In the Transform tool's free transform, dragging a corner or side handle
+now keeps the width : height ratio; holding Shift while dragging scales
+width and height freely (the reverse of Krita, where Shift kept the ratio).
+The "keep aspect ratio" chain in the tool options still keeps it always.
+
+diff --git a/plugins/tools/tool_transform2/kis_free_transform_strategy.cpp b/plugins/tools/tool_transform2/kis_free_transform_strategy.cpp
+index a25cc69..207f41d 100644
+--- a/plugins/tools/tool_transform2/kis_free_transform_strategy.cpp
++++ b/plugins/tools/tool_transform2/kis_free_transform_strategy.cpp
+@@ -671,7 +671,7 @@ void KisFreeTransformStrategy::continuePrimaryAction(const QPointF &mousePos,
+             break;
+         }
+ 
+-        if (shiftModifierActive ||  m_d->currentArgs.keepAspectRatio()) {
++        if (!shiftModifierActive  ||  m_d->currentArgs.keepAspectRatio()) { // Krita Nova: proportional unless Shift
+             qreal aspectRatio = m_d->clickArgs.scaleX() / m_d->clickArgs.scaleY();
+             m_d->currentArgs.setScaleX(aspectRatio * result.scale);
+         }
+@@ -724,7 +724,7 @@ void KisFreeTransformStrategy::continuePrimaryAction(const QPointF &mousePos,
+             break;
+         }
+ 
+-        if (shiftModifierActive  ||  m_d->currentArgs.keepAspectRatio()) {
++        if (!shiftModifierActive  ||  m_d->currentArgs.keepAspectRatio()) { // Krita Nova: proportional unless Shift
+             qreal aspectRatio = m_d->clickArgs.scaleY() / m_d->clickArgs.scaleX();
+             m_d->currentArgs.setScaleY(aspectRatio * result.scale);
+         }
+@@ -765,7 +765,7 @@ void KisFreeTransformStrategy::continuePrimaryAction(const QPointF &mousePos,
+         QPointF staticPointInView = m_d->clickTransform.map(staticPoint);
+         QPointF movingPointInView = mousePos;
+ 
+-        if (shiftModifierActive  ||  m_d->currentArgs.keepAspectRatio()) {
++        if (!shiftModifierActive  ||  m_d->currentArgs.keepAspectRatio()) { // Krita Nova: proportional unless Shift
+             QPointF refDiff = m_d->clickTransform.map(movingPoint) - staticPointInView;
+             QPointF realDiff = mousePos - staticPointInView;
+             realDiff = kisProjectOnVector(refDiff, realDiff);

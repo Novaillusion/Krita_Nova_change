@@ -1,0 +1,504 @@
+Krita Nova 72 - Transform tool: a floating actions bar
+
+While the Transform tool is active, a small bar floats over the canvas, in
+the look of the selection actions bar: Flip Horizontally, Flip Vertically,
+Rotate 90° counter-clockwise and clockwise (these four in Free Transform
+mode), Reset the transform, the transform mode (a menu: Free, Perspective,
+Warp, Cage, Liquify, Mesh; the button shows the current one), Cancel and
+Apply. It sits at the bottom middle of the canvas; its grip (the dots at its
+right end) moves it, and the place is remembered (kritarc
+[KisToolTransform] novaTransformBarOffset). Pen, touch and mouse work on it.
+(plugins/tools/tool_transform2/kis_transform_actions_bar.*)
+
+diff --git a/plugins/tools/tool_transform2/CMakeLists.txt b/plugins/tools/tool_transform2/CMakeLists.txt
+index f886da3..c57a362 100644
+--- a/plugins/tools/tool_transform2/CMakeLists.txt
++++ b/plugins/tools/tool_transform2/CMakeLists.txt
+@@ -5,6 +5,7 @@ set(kritatooltransform_static_SRCS
+     kis_transform_mask_adapter.cpp
+     KisAnimatedTransformMaskParamsHolder.cpp
+     kis_tool_transform.cc
++    kis_transform_actions_bar.cpp
+     kis_tool_transform_config_widget.cpp
+     kis_transform_strategy_base.cpp
+     kis_warp_transform_strategy.cpp
+diff --git a/plugins/tools/tool_transform2/kis_tool_transform.cc b/plugins/tools/tool_transform2/kis_tool_transform.cc
+index 940c1fa..f04a0fb 100644
+--- a/plugins/tools/tool_transform2/kis_tool_transform.cc
++++ b/plugins/tools/tool_transform2/kis_tool_transform.cc
+@@ -64,6 +64,7 @@
+ #include "widgets/kis_progress_widget.h"
+ 
+ #include "kis_transform_utils.h"
++#include "kis_transform_actions_bar.h"
+ #include "kis_warp_transform_strategy.h"
+ #include "kis_cage_transform_strategy.h"
+ #include "kis_liquify_transform_strategy.h"
+@@ -858,6 +859,36 @@ void KisToolTransform::activate(const QSet<KoShape*> &shapes)
+ 
+     startStroke(toArgsMode(nextActivationTransformMode), false);
+     nextActivationTransformMode = KisToolTransform::FreeTransformMode;
++
++    // Krita Nova: the floating transform actions bar
++    if (!m_actionsBar) {
++        KisCanvas2 *kisCanvas = dynamic_cast<KisCanvas2 *>(canvas());
++        QWidget *canvasWidget = kisCanvas ? kisCanvas->canvasWidget() : nullptr;
++        if (canvasWidget) {
++            m_actionsBar = new KisTransformActionsBar(this, canvasWidget);
++            connect(this, &KisToolTransform::transformModeChanged, m_actionsBar.data(), [this]() {
++                if (m_actionsBar) m_actionsBar->updateState();
++            });
++        }
++    }
++}
++
++void KisToolTransform::novaFlip(bool horizontally)
++{
++    if (!m_strokeId || !m_optionsWidget) return;
++    QMetaObject::invokeMethod(m_optionsWidget, horizontally ? "slotFlipX" : "slotFlipY");
++}
++
++void KisToolTransform::novaRotate90(bool clockwise)
++{
++    if (!m_strokeId || !m_optionsWidget) return;
++    QMetaObject::invokeMethod(m_optionsWidget, clockwise ? "slotRotateCW" : "slotRotateCCW");
++}
++
++void KisToolTransform::novaResetTransform()
++{
++    if (!m_strokeId) return;
++    slotCancelTransform(); // what the options' Reset button does
+ }
+ 
+ void KisToolTransform::slotToolActionRetriggered()
+@@ -869,6 +900,10 @@ void KisToolTransform::slotToolActionRetriggered()
+ 
+ void KisToolTransform::deactivate()
+ {
++    if (m_actionsBar) {
++        m_actionsBar->deleteLater(); // Krita Nova: the bar goes with the tool
++        m_actionsBar = nullptr;
++    }
+     endStroke();
+     m_canvas->updateCanvas();
+     m_actionConnections.clear();
+diff --git a/plugins/tools/tool_transform2/kis_tool_transform.h b/plugins/tools/tool_transform2/kis_tool_transform.h
+index eacfce3..729ce56 100644
+--- a/plugins/tools/tool_transform2/kis_tool_transform.h
++++ b/plugins/tools/tool_transform2/kis_tool_transform.h
+@@ -51,6 +51,7 @@ class KisLiquifyTransformStrategy;
+ class KisFreeTransformStrategy;
+ class KisPerspectiveTransformStrategy;
+ class KisMeshTransformStrategy;
++class KisTransformActionsBar;
+ 
+ 
+ /**
+@@ -182,6 +183,11 @@ public:
+ 
+     static ToolTransformArgs::TransformMode toArgsMode(KisToolTransform::TransformToolMode toolMode);
+ 
++    // Krita Nova: for the floating transform actions bar
++    void novaFlip(bool horizontally);
++    void novaRotate90(bool clockwise);
++    void novaResetTransform();
++
+ public Q_SLOTS:
+     void activate(const QSet<KoShape*> &shapes) override;
+     void deactivate() override;
+@@ -276,6 +282,7 @@ private:
+     QPainterPath m_selectionPath; // original (unscaled) selection outline, used for painting decorations
+ 
+     KisToolTransformConfigWidget *m_optionsWidget {0};
++    QPointer<KisTransformActionsBar> m_actionsBar; ///< Krita Nova: floating bar over the canvas
+     QPointer<KisCanvas2> m_canvas;
+ 
+     TransformTransactionProperties m_transaction;
+diff --git a/plugins/tools/tool_transform2/kis_transform_actions_bar.cpp b/plugins/tools/tool_transform2/kis_transform_actions_bar.cpp
+new file mode 100644
+index 0000000..16fccd2
+--- /dev/null
++++ b/plugins/tools/tool_transform2/kis_transform_actions_bar.cpp
+@@ -0,0 +1,325 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "kis_transform_actions_bar.h"
++
++#include <QAbstractButton>
++#include <QApplication>
++#include <QHBoxLayout>
++#include <QMenu>
++#include <QMouseEvent>
++#include <QPainter>
++#include <QPainterPath>
++#include <QTabletEvent>
++#include <QTouchEvent>
++#include <QHash>
++#include <QTimer>
++
++#include <KConfigGroup>
++#include <KSharedConfig>
++#include <klocalizedstring.h>
++
++#include <kis_icon_utils.h>
++#include <kis_painting_tweaks.h>
++
++#include "kis_tool_transform.h"
++
++namespace {
++
++constexpr int BUTTON_SIZE = 30;
++constexpr int ICON_INSET = 7;
++const char *OFFSET_KEY = "novaTransformBarOffset";
++
++/// a button of the bar: an icon, a highlight while pressed; takes pen and
++/// touch presses (children of the canvas do not get them as mouse presses)
++class BarButton : public QAbstractButton
++{
++public:
++    BarButton(const QString &iconName, const QString &toolTip, QWidget *parent)
++        : QAbstractButton(parent)
++    {
++        setIcon(KisIconUtils::loadIcon(iconName));
++        setToolTip(toolTip);
++        setFixedSize(BUTTON_SIZE, BUTTON_SIZE);
++        setCursor(Qt::PointingHandCursor);
++        setAttribute(Qt::WA_AcceptTouchEvents);
++    }
++
++protected:
++    void paintEvent(QPaintEvent *) override
++    {
++        QPainter p(this);
++        p.setRenderHint(QPainter::Antialiasing, true);
++        const QRectF r = QRectF(rect()).adjusted(1, 1, -1, -1);
++        if (isDown()) {
++            QPen pen(qApp->palette().highlight().color(), 2);
++            p.setPen(pen);
++            p.setBrush(Qt::NoBrush);
++            p.drawRoundedRect(r, 3, 3);
++        }
++        const QIcon::Mode mode = isEnabled() ? QIcon::Normal : QIcon::Disabled;
++        icon().paint(&p, rect().adjusted(ICON_INSET, ICON_INSET, -ICON_INSET, -ICON_INSET), Qt::AlignCenter, mode);
++    }
++
++    bool event(QEvent *e) override
++    {
++        if (e->type() == QEvent::TabletPress || e->type() == QEvent::TabletRelease) {
++            QTabletEvent *t = static_cast<QTabletEvent *>(e);
++            QMouseEvent m(e->type() == QEvent::TabletPress ? QEvent::MouseButtonPress : QEvent::MouseButtonRelease,
++                          t->posF(), t->globalPosF(), Qt::LeftButton,
++                          e->type() == QEvent::TabletPress ? Qt::LeftButton : Qt::NoButton, t->modifiers());
++            QAbstractButton::event(&m);
++            e->accept();
++            return true;
++        }
++        if (e->type() == QEvent::TouchBegin) {
++            QTouchEvent *t = static_cast<QTouchEvent *>(e);
++            if (t->touchPoints().count() == 1 && isEnabled()) {
++                // pressed (signal pressed), then released (signal clicked)
++                animateClick();
++                e->accept();
++                return true;
++            }
++        }
++        return QAbstractButton::event(e);
++    }
++};
++
++/// the grip: dots, drags the bar
++class BarGrip : public QWidget
++{
++public:
++    explicit BarGrip(QWidget *parent) : QWidget(parent)
++    {
++        setFixedSize(BUTTON_SIZE * 2 / 3, BUTTON_SIZE);
++        setCursor(Qt::SizeAllCursor);
++        setToolTip(i18n("Drag to move the bar"));
++        setAttribute(Qt::WA_AcceptTouchEvents);
++    }
++
++protected:
++    void paintEvent(QPaintEvent *) override
++    {
++        QPainter p(this);
++        p.setRenderHint(QPainter::Antialiasing, true);
++        p.setPen(Qt::NoPen);
++        p.setBrush(qApp->palette().windowText().color());
++        const qreal cx = width() / 2.0, cy = height() / 2.0;
++        for (int i = -1; i <= 1; ++i) {
++            p.drawEllipse(QPointF(cx - 2.5, cy + i * 5.0), 1.6, 1.6);
++            p.drawEllipse(QPointF(cx + 2.5, cy + i * 5.0), 1.6, 1.6);
++        }
++    }
++};
++
++} // namespace
++
++KisTransformActionsBar::KisTransformActionsBar(KisToolTransform *tool, QWidget *canvasWidget)
++    : QWidget(canvasWidget), m_tool(tool), m_canvasWidget(canvasWidget)
++{
++    setObjectName(QStringLiteral("KritaNovaTransformActionsBar"));
++    setAttribute(Qt::WA_AcceptTouchEvents);
++
++    QHBoxLayout *layout = new QHBoxLayout(this);
++    layout->setContentsMargins(6, 4, 2, 4);
++    layout->setSpacing(1);
++
++    auto addButton = [this, layout](const QString &icon, const QString &tip) {
++        BarButton *b = new BarButton(icon, tip, this);
++        layout->addWidget(b);
++        return b;
++    };
++    auto addGap = [layout]() { layout->addSpacing(6); };
++
++    BarButton *flipX = addButton(QStringLiteral("transform_icons_mirror_x"), i18n("Flip Horizontally"));
++    BarButton *flipY = addButton(QStringLiteral("transform_icons_mirror_y"), i18n("Flip Vertically"));
++    BarButton *rotCCW = addButton(QStringLiteral("transform_icons_rotate_ccw"), i18n("Rotate 90° Counter-Clockwise"));
++    BarButton *rotCW = addButton(QStringLiteral("transform_icons_rotate_cw"), i18n("Rotate 90° Clockwise"));
++    m_freeOnlyButtons = {flipX, flipY, rotCCW, rotCW};
++    addGap();
++    BarButton *reset = addButton(QStringLiteral("view-refresh"), i18n("Reset the Transform"));
++    m_modeButton = addButton(QStringLiteral("transform_icons_main"), i18n("Transform Mode"));
++    addGap();
++    BarButton *cancel = addButton(QStringLiteral("dialog-cancel"), i18n("Cancel the Transform"));
++    BarButton *apply = addButton(QStringLiteral("dialog-ok"), i18n("Apply the Transform"));
++
++    m_grip = new BarGrip(this);
++    layout->addWidget(m_grip);
++    m_grip->installEventFilter(this);
++
++    connect(flipX, &QAbstractButton::clicked, this, [this]() { if (m_tool) m_tool->novaFlip(true); });
++    connect(flipY, &QAbstractButton::clicked, this, [this]() { if (m_tool) m_tool->novaFlip(false); });
++    connect(rotCCW, &QAbstractButton::clicked, this, [this]() { if (m_tool) m_tool->novaRotate90(false); });
++    connect(rotCW, &QAbstractButton::clicked, this, [this]() { if (m_tool) m_tool->novaRotate90(true); });
++    connect(reset, &QAbstractButton::clicked, this, [this]() { if (m_tool) m_tool->novaResetTransform(); });
++    connect(cancel, &QAbstractButton::clicked, this, [this]() { if (m_tool) m_tool->requestStrokeCancellation(); });
++    connect(apply, &QAbstractButton::clicked, this, [this]() { if (m_tool) m_tool->requestStrokeEnd(); });
++    // the menu opens on press: on Android a popup opened on release closes at once
++    connect(m_modeButton, &QAbstractButton::pressed, this, [this]() { showModeMenu(); });
++
++    m_offset = KSharedConfig::openConfig()->group("KisToolTransform").readEntry(OFFSET_KEY, QPoint());
++
++    canvasWidget->installEventFilter(this);
++    // the mode can also change from the tool options: follow it
++    QTimer *poll = new QTimer(this);
++    poll->setInterval(300);
++    connect(poll, &QTimer::timeout, this, [this]() { updateState(); });
++    poll->start();
++    adjustSize();
++    updateState();
++    place();
++    show();
++    raise();
++}
++
++void KisTransformActionsBar::updateState()
++{
++    if (!m_tool) return;
++    static const QHash<int, QString> icons = {
++        {KisToolTransform::FreeTransformMode, QStringLiteral("transform_icons_main")},
++        {KisToolTransform::WarpTransformMode, QStringLiteral("transform_icons_warp")},
++        {KisToolTransform::CageTransformMode, QStringLiteral("transform_icons_cage")},
++        {KisToolTransform::LiquifyTransformMode, QStringLiteral("transform_icons_liquify_main")},
++        {KisToolTransform::PerspectiveTransformMode, QStringLiteral("transform_icons_perspective")},
++        {KisToolTransform::MeshTransformMode, QStringLiteral("transform_icons_mesh")},
++    };
++    const int mode = m_tool->transformMode();
++    if (mode == m_shownMode) return;
++    m_shownMode = mode;
++    m_modeButton->setIcon(KisIconUtils::loadIcon(icons.value(mode, QStringLiteral("transform_icons_main"))));
++    const bool free = mode == KisToolTransform::FreeTransformMode;
++    Q_FOREACH (QAbstractButton *b, m_freeOnlyButtons) {
++        b->setEnabled(free);
++    }
++    update();
++}
++
++void KisTransformActionsBar::showModeMenu()
++{
++    if (!m_tool) return;
++    QMenu menu;
++    struct Entry { KisToolTransform::TransformToolMode mode; const char *icon; QString text; };
++    const QList<Entry> entries = {
++        {KisToolTransform::FreeTransformMode, "transform_icons_main", i18n("Free Transform")},
++        {KisToolTransform::PerspectiveTransformMode, "transform_icons_perspective", i18n("Perspective")},
++        {KisToolTransform::WarpTransformMode, "transform_icons_warp", i18n("Warp")},
++        {KisToolTransform::CageTransformMode, "transform_icons_cage", i18n("Cage")},
++        {KisToolTransform::LiquifyTransformMode, "transform_icons_liquify_main", i18n("Liquify")},
++        {KisToolTransform::MeshTransformMode, "transform_icons_mesh", i18n("Mesh")},
++    };
++    const int current = m_tool->transformMode();
++    Q_FOREACH (const Entry &e, entries) {
++        QAction *a = menu.addAction(KisIconUtils::loadIcon(QString::fromLatin1(e.icon)), e.text);
++        a->setCheckable(true);
++        a->setChecked(e.mode == current);
++        a->setData(int(e.mode));
++    }
++    QAction *chosen = menu.exec(m_modeButton->mapToGlobal(QPoint(0, -menu.sizeHint().height())));
++    if (m_modeButton) m_modeButton->setDown(false);
++    if (chosen && m_tool) {
++        m_tool->setTransformMode(KisToolTransform::TransformToolMode(chosen->data().toInt()));
++        updateState();
++    }
++}
++
++void KisTransformActionsBar::place()
++{
++    if (!m_canvasWidget) return;
++    const QRect area = m_canvasWidget->rect();
++    QPoint topLeft(area.center().x() - width() / 2, area.bottom() - height() - 24);
++    topLeft += m_offset;
++    // keep it on the canvas
++    topLeft.setX(qBound(area.left() + 4, topLeft.x(), qMax(area.left() + 4, area.right() - width() - 4)));
++    topLeft.setY(qBound(area.top() + 4, topLeft.y(), qMax(area.top() + 4, area.bottom() - height() - 4)));
++    move(topLeft);
++}
++
++void KisTransformActionsBar::dragBy(const QPoint &globalPos, bool start, bool end)
++{
++    if (start) {
++        m_dragging = true;
++        m_dragStartGlobal = globalPos;
++        m_dragStartOffset = m_offset;
++        return;
++    }
++    if (!m_dragging) return;
++    m_offset = m_dragStartOffset + (globalPos - m_dragStartGlobal);
++    place();
++    // what was clipped at the canvas edge is not kept
++    if (m_canvasWidget) {
++        const QRect area = m_canvasWidget->rect();
++        const QPoint natural(area.center().x() - width() / 2, area.bottom() - height() - 24);
++        m_offset = pos() - natural;
++    }
++    if (end) {
++        m_dragging = false;
++        KConfigGroup group = KSharedConfig::openConfig()->group("KisToolTransform");
++        group.writeEntry(OFFSET_KEY, m_offset);
++    }
++}
++
++bool KisTransformActionsBar::eventFilter(QObject *watched, QEvent *event)
++{
++    if (watched == m_canvasWidget && event->type() == QEvent::Resize) {
++        place();
++        return false;
++    }
++    if (watched != m_grip) return false;
++
++    switch (event->type()) {
++    case QEvent::MouseButtonPress:
++    case QEvent::MouseMove:
++    case QEvent::MouseButtonRelease: {
++        QMouseEvent *m = static_cast<QMouseEvent *>(event);
++        dragBy(m->globalPos(), event->type() == QEvent::MouseButtonPress, event->type() == QEvent::MouseButtonRelease);
++        return true;
++    }
++    case QEvent::TabletPress:
++    case QEvent::TabletMove:
++    case QEvent::TabletRelease: {
++        QTabletEvent *t = static_cast<QTabletEvent *>(event);
++        dragBy(t->globalPos(), event->type() == QEvent::TabletPress, event->type() == QEvent::TabletRelease);
++        return true;
++    }
++    case QEvent::TouchBegin:
++    case QEvent::TouchUpdate:
++    case QEvent::TouchEnd:
++    case QEvent::TouchCancel: {
++        QTouchEvent *t = static_cast<QTouchEvent *>(event);
++        if (!t->touchPoints().isEmpty()) {
++            dragBy(t->touchPoints().first().screenPos().toPoint(), event->type() == QEvent::TouchBegin,
++                   event->type() == QEvent::TouchEnd || event->type() == QEvent::TouchCancel);
++        } else if (event->type() == QEvent::TouchEnd || event->type() == QEvent::TouchCancel) {
++            m_dragging = false;
++        }
++        return true;
++    }
++    default:
++        return false;
++    }
++}
++
++void KisTransformActionsBar::paintEvent(QPaintEvent *)
++{
++    // the look of the selection actions bar
++    QPainter p(this);
++    p.setRenderHint(QPainter::Antialiasing, true);
++    QColor outline = qApp->palette().window().color();
++    QColor background = outline;
++    if (!KisIconUtils::useDarkIcons()) {
++        background = background.lighter(120);
++    }
++    KisPaintingTweaks::dragColor(&background, outline, 0.25);
++    QColor contrast = qApp->palette().windowText().color();
++    contrast.setAlpha(90);
++
++    const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
++    p.setPen(QPen(contrast, 1));
++    p.setBrush(outline);
++    p.drawRoundedRect(r, 6, 6);
++    p.setPen(Qt::NoPen);
++    p.setBrush(background);
++    p.drawRoundedRect(r.adjusted(3, 3, -3 - m_grip->width(), -3), 4, 4);
++}
+diff --git a/plugins/tools/tool_transform2/kis_transform_actions_bar.h b/plugins/tools/tool_transform2/kis_transform_actions_bar.h
+new file mode 100644
+index 0000000..773d390
+--- /dev/null
++++ b/plugins/tools/tool_transform2/kis_transform_actions_bar.h
+@@ -0,0 +1,51 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#ifndef KIS_TRANSFORM_ACTIONS_BAR_H
++#define KIS_TRANSFORM_ACTIONS_BAR_H
++
++#include <QPointer>
++#include <QWidget>
++
++class KisToolTransform;
++class QAbstractButton;
++
++/**
++ * Krita Nova: a small floating bar over the canvas while the Transform tool
++ * is active, in the manner of the selection actions bar: flip horizontally
++ * and vertically, rotate 90 degrees either way, reset, the transform mode,
++ * cancel and apply. It sits at the bottom middle of the canvas; its grip
++ * (the dots at its right end) moves it, and the place is remembered.
++ */
++class KisTransformActionsBar : public QWidget
++{
++public:
++    KisTransformActionsBar(KisToolTransform *tool, QWidget *canvasWidget);
++
++    /// show the current mode, enable what suits it
++    void updateState();
++
++protected:
++    void paintEvent(QPaintEvent *event) override;
++    bool eventFilter(QObject *watched, QEvent *event) override;
++
++private:
++    void place();
++    void dragBy(const QPoint &globalPos, bool start, bool end);
++    void showModeMenu();
++
++    QPointer<KisToolTransform> m_tool;
++    QPointer<QWidget> m_canvasWidget;
++    QList<QAbstractButton *> m_freeOnlyButtons; ///< flip / rotate: free transform only
++    QAbstractButton *m_modeButton {nullptr};
++    QWidget *m_grip {nullptr};
++    QPoint m_offset;          ///< from the bottom-middle place, remembered
++    QPoint m_dragStartGlobal;
++    QPoint m_dragStartOffset;
++    bool m_dragging {false};
++    int m_shownMode {-1};
++};
++
++#endif
