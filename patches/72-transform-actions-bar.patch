@@ -15,6 +15,62 @@ novaTransformBarOffsetFromArea). With no transform running it waits at the
 bottom middle of the canvas. Pen, touch and mouse work on it.
 (plugins/tools/tool_transform2/kis_transform_actions_bar.*)
 
+The bar shows only while a transform is running (not after Apply, Cancel
+or Esc), and while the Transform tool is active the selection actions bar
+is hidden, the transform bar standing in for it
+(KisSelectionDecoration::setActionsPanelSuppressed); it comes back when
+another tool is chosen.
+
+diff --git a/libs/ui/kis_selection_decoration.cc b/libs/ui/kis_selection_decoration.cc
+index c104d96..eada1ae 100644
+--- a/libs/ui/kis_selection_decoration.cc
++++ b/libs/ui/kis_selection_decoration.cc
+@@ -178,7 +178,21 @@ void KisSelectionDecoration::slotConfigChanged()
+     m_opacity = imageConfig.selectionOutlineOpacity();
+     m_maskColor = imageConfig.selectionOverlayMaskColor();
+     m_antialiasSelectionOutline = cfg.antialiasSelectionOutline();
+-    m_selectionActionsPanel->setEnabled(cfg.selectionActionBar());
++    m_selectionActionsPanel->setEnabled(cfg.selectionActionBar() && !m_actionsPanelSuppressed);
++}
++
++void KisSelectionDecoration::setActionsPanelSuppressed(bool suppressed)
++{
++    if (m_actionsPanelSuppressed == suppressed) return;
++    m_actionsPanelSuppressed = suppressed;
++    KisConfig cfg(true);
++    m_selectionActionsPanel->setEnabled(cfg.selectionActionBar() && !suppressed);
++    if (!suppressed) {
++        selectionChanged(); // shown again if there is a selection
++    }
++    if (view() && view()->canvasBase()) {
++        view()->canvasBase()->updateCanvas();
++    }
+ }
+ 
+ void KisSelectionDecoration::slotCanvasResourcesChanged(int key, const QVariant &v)
+diff --git a/libs/ui/kis_selection_decoration.h b/libs/ui/kis_selection_decoration.h
+index eb40c86..fd60e85 100644
+--- a/libs/ui/kis_selection_decoration.h
++++ b/libs/ui/kis_selection_decoration.h
+@@ -40,6 +40,10 @@ public:
+     void setCanvasWidget(KisCanvasWidgetBase* canvas) override;
+ 
+     void toggleSelectionVisibility();
++
++    /// Krita Nova: hide the selection actions bar while another bar (the
++    /// Transform tool's) stands in for it
++    void setActionsPanelSuppressed(bool suppressed);
+     bool selectionVisible();
+ 
+ protected:
+@@ -77,6 +81,7 @@ private:
+     KisSelectionActionsPanel *m_selectionActionsPanel;
+ 
+     bool m_selectionVisibility;
++    bool m_actionsPanelSuppressed {false}; ///< Krita Nova
+ };
+ 
+ #endif
 diff --git a/plugins/tools/tool_transform2/CMakeLists.txt b/plugins/tools/tool_transform2/CMakeLists.txt
 index f886da3..c57a362 100644
 --- a/plugins/tools/tool_transform2/CMakeLists.txt
@@ -28,19 +84,20 @@ index f886da3..c57a362 100644
      kis_transform_strategy_base.cpp
      kis_warp_transform_strategy.cpp
 diff --git a/plugins/tools/tool_transform2/kis_tool_transform.cc b/plugins/tools/tool_transform2/kis_tool_transform.cc
-index 940c1fa..3e38d4c 100644
+index 940c1fa..cde8766 100644
 --- a/plugins/tools/tool_transform2/kis_tool_transform.cc
 +++ b/plugins/tools/tool_transform2/kis_tool_transform.cc
-@@ -64,6 +64,8 @@
+@@ -64,6 +64,9 @@
  #include "widgets/kis_progress_widget.h"
  
  #include "kis_transform_utils.h"
 +#include "kis_transform_actions_bar.h"
 +#include "kis_coordinates_converter.h"
++#include "kis_selection_decoration.h"
  #include "kis_warp_transform_strategy.h"
  #include "kis_cage_transform_strategy.h"
  #include "kis_liquify_transform_strategy.h"
-@@ -285,6 +287,9 @@ void KisToolTransform::paint(QPainter& gc, const KoViewConverter &converter)
+@@ -285,6 +288,9 @@ void KisToolTransform::paint(QPainter& gc, const KoViewConverter &converter)
  {
      Q_UNUSED(converter);
  
@@ -50,10 +107,13 @@ index 940c1fa..3e38d4c 100644
      if (!m_strokeId || m_transaction.rootNodes().isEmpty()) return;
  
      QRectF newRefRect = KisTransformUtils::imageToFlake(m_canvas->coordinatesConverter(), QRectF(0.0,0.0,1.0,1.0));
-@@ -858,6 +863,51 @@ void KisToolTransform::activate(const QSet<KoShape*> &shapes)
+@@ -858,6 +864,64 @@ void KisToolTransform::activate(const QSet<KoShape*> &shapes)
  
      startStroke(toArgsMode(nextActivationTransformMode), false);
      nextActivationTransformMode = KisToolTransform::FreeTransformMode;
++
++    // Krita Nova: the transform bar stands in for the selection actions bar
++    novaSuppressSelectionBar(true);
 +
 +    // Krita Nova: the floating transform actions bar
 +    if (!m_actionsBar) {
@@ -80,6 +140,16 @@ index 940c1fa..3e38d4c 100644
 +    QMetaObject::invokeMethod(m_optionsWidget, clockwise ? "slotRotateCW" : "slotRotateCCW");
 +}
 +
++void KisToolTransform::novaSuppressSelectionBar(bool suppress)
++{
++    KisCanvas2 *kisCanvas = dynamic_cast<KisCanvas2 *>(canvas());
++    if (!kisCanvas) return;
++    KisCanvasDecorationSP decoration = kisCanvas->decoration(QStringLiteral("selection"));
++    if (KisSelectionDecoration *selectionDecoration = dynamic_cast<KisSelectionDecoration *>(decoration.data())) {
++        selectionDecoration->setActionsPanelSuppressed(suppress);
++    }
++}
++
 +QRectF KisToolTransform::novaTransformZoneInWidget() const
 +{
 +    KisCanvas2 *kisCanvas = dynamic_cast<KisCanvas2 *>(canvas());
@@ -102,19 +172,21 @@ index 940c1fa..3e38d4c 100644
  }
  
  void KisToolTransform::slotToolActionRetriggered()
-@@ -869,6 +919,10 @@ void KisToolTransform::slotToolActionRetriggered()
+@@ -869,6 +933,12 @@ void KisToolTransform::slotToolActionRetriggered()
  
  void KisToolTransform::deactivate()
  {
 +    if (m_actionsBar) {
++        m_actionsBar->hide();
 +        m_actionsBar->deleteLater(); // Krita Nova: the bar goes with the tool
 +        m_actionsBar = nullptr;
 +    }
++    novaSuppressSelectionBar(false);
      endStroke();
      m_canvas->updateCanvas();
      m_actionConnections.clear();
 diff --git a/plugins/tools/tool_transform2/kis_tool_transform.h b/plugins/tools/tool_transform2/kis_tool_transform.h
-index eacfce3..46281b4 100644
+index eacfce3..d9659c1 100644
 --- a/plugins/tools/tool_transform2/kis_tool_transform.h
 +++ b/plugins/tools/tool_transform2/kis_tool_transform.h
 @@ -51,6 +51,7 @@ class KisLiquifyTransformStrategy;
@@ -125,7 +197,7 @@ index eacfce3..46281b4 100644
  
  
  /**
-@@ -182,6 +183,13 @@ public:
+@@ -182,6 +183,16 @@ public:
  
      static ToolTransformArgs::TransformMode toArgsMode(KisToolTransform::TransformToolMode toolMode);
  
@@ -133,13 +205,16 @@ index eacfce3..46281b4 100644
 +    void novaFlip(bool horizontally);
 +    void novaRotate90(bool clockwise);
 +    void novaResetTransform();
++    void novaSuppressSelectionBar(bool suppress);
 +    /// the transformed area, in canvas widget pixels (empty with no transform)
 +    QRectF novaTransformZoneInWidget() const;
++    /// a transform is running (the bar shows only then)
++    bool novaIsTransforming() const { return !!m_strokeId; }
 +
  public Q_SLOTS:
      void activate(const QSet<KoShape*> &shapes) override;
      void deactivate() override;
-@@ -276,6 +284,7 @@ private:
+@@ -276,6 +287,7 @@ private:
      QPainterPath m_selectionPath; // original (unscaled) selection outline, used for painting decorations
  
      KisToolTransformConfigWidget *m_optionsWidget {0};
@@ -149,10 +224,10 @@ index eacfce3..46281b4 100644
      TransformTransactionProperties m_transaction;
 diff --git a/plugins/tools/tool_transform2/kis_transform_actions_bar.cpp b/plugins/tools/tool_transform2/kis_transform_actions_bar.cpp
 new file mode 100644
-index 0000000..18697bb
+index 0000000..1babdf8
 --- /dev/null
 +++ b/plugins/tools/tool_transform2/kis_transform_actions_bar.cpp
-@@ -0,0 +1,353 @@
+@@ -0,0 +1,362 @@
 +/*
 + *  SPDX-FileCopyrightText: 2026 Krita Nova
 + *
@@ -321,15 +396,23 @@ index 0000000..18697bb
 +    poll->setInterval(300);
 +    connect(poll, &QTimer::timeout, this, [this]() { updateState(); });
 +    poll->start();
-+    updateState();
++    hide();
++    updateState(); // shows it if a transform is running
 +    place();
-+    show();
-+    raise();
 +}
 +
 +void KisTransformActionsBar::updateState()
 +{
 +    if (!m_tool) return;
++    // shown only while a transform runs (not after Apply / Cancel / Esc)
++    const bool running = m_tool->novaIsTransforming();
++    if (running != isVisible()) {
++        setVisible(running);
++        if (running) {
++            place();
++            raise();
++        }
++    }
 +    static const QHash<int, QString> icons = {
 +        {KisToolTransform::FreeTransformMode, QStringLiteral("transform_icons_main")},
 +        {KisToolTransform::WarpTransformMode, QStringLiteral("transform_icons_warp")},
@@ -383,6 +466,7 @@ index 0000000..18697bb
 +    m_placePending = true;
 +    QTimer::singleShot(0, this, [this]() {
 +        m_placePending = false;
++        updateState();
 +        if (!m_dragging) place();
 +    });
 +}
