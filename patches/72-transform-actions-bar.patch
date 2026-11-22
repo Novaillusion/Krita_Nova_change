@@ -15,17 +15,27 @@ novaTransformBarOffsetFromArea). With no transform running it waits at the
 bottom middle of the canvas. Pen, touch and mouse work on it.
 (plugins/tools/tool_transform2/kis_transform_actions_bar.*)
 
-The bar shows only while a transform is running (not after Apply, Cancel
-or Esc), and while the Transform tool is active the selection actions bar
-is hidden, the transform bar standing in for it
-(KisSelectionDecoration::setActionsPanelSuppressed); it comes back when
-another tool is chosen.
+One bar at a time: while a transform is running, the transform bar shows
+and the selection actions bar is hidden, the transform bar standing in for
+it (KisSelectionDecoration::setActionsPanelSuppressed); after Apply, Cancel
+or Esc, or with another tool, the transform bar goes and the selection
+bar comes back (looked for again a moment later too, as a cancelled
+transform restores the selection a little after).
 
 diff --git a/libs/ui/kis_selection_decoration.cc b/libs/ui/kis_selection_decoration.cc
-index c104d96..eada1ae 100644
+index c104d96..5103c41 100644
 --- a/libs/ui/kis_selection_decoration.cc
 +++ b/libs/ui/kis_selection_decoration.cc
-@@ -178,7 +178,21 @@ void KisSelectionDecoration::slotConfigChanged()
+@@ -5,6 +5,8 @@
+  */
+ 
+ #include "kis_selection_decoration.h"
++#include <QPointer>
++#include <QTimer>
+ #include "kis_selection_actions_panel.h"
+ 
+ #include <QPainter>
+@@ -178,7 +180,29 @@ void KisSelectionDecoration::slotConfigChanged()
      m_opacity = imageConfig.selectionOutlineOpacity();
      m_maskColor = imageConfig.selectionOverlayMaskColor();
      m_antialiasSelectionOutline = cfg.antialiasSelectionOutline();
@@ -41,6 +51,14 @@ index c104d96..eada1ae 100644
 +    m_selectionActionsPanel->setEnabled(cfg.selectionActionBar() && !suppressed);
 +    if (!suppressed) {
 +        selectionChanged(); // shown again if there is a selection
++        // the selection may come back a moment later (a cancelled
++        // transform restores it): look again then
++        QPointer<KisSelectionDecoration> self(this);
++        for (int delay : {150, 500}) {
++            QTimer::singleShot(delay, this, [self]() {
++                if (self && !self->m_actionsPanelSuppressed) self->selectionChanged();
++            });
++        }
 +    }
 +    if (view() && view()->canvasBase()) {
 +        view()->canvasBase()->updateCanvas();
@@ -84,7 +102,7 @@ index f886da3..c57a362 100644
      kis_transform_strategy_base.cpp
      kis_warp_transform_strategy.cpp
 diff --git a/plugins/tools/tool_transform2/kis_tool_transform.cc b/plugins/tools/tool_transform2/kis_tool_transform.cc
-index 940c1fa..cde8766 100644
+index 940c1fa..6237fc9 100644
 --- a/plugins/tools/tool_transform2/kis_tool_transform.cc
 +++ b/plugins/tools/tool_transform2/kis_tool_transform.cc
 @@ -64,6 +64,9 @@
@@ -107,14 +125,13 @@ index 940c1fa..cde8766 100644
      if (!m_strokeId || m_transaction.rootNodes().isEmpty()) return;
  
      QRectF newRefRect = KisTransformUtils::imageToFlake(m_canvas->coordinatesConverter(), QRectF(0.0,0.0,1.0,1.0));
-@@ -858,6 +864,64 @@ void KisToolTransform::activate(const QSet<KoShape*> &shapes)
+@@ -858,6 +864,63 @@ void KisToolTransform::activate(const QSet<KoShape*> &shapes)
  
      startStroke(toArgsMode(nextActivationTransformMode), false);
      nextActivationTransformMode = KisToolTransform::FreeTransformMode;
 +
-+    // Krita Nova: the transform bar stands in for the selection actions bar
-+    novaSuppressSelectionBar(true);
-+
++    // (Krita Nova: while a transform runs, the transform bar stands in for
++    // the selection actions bar - KisTransformActionsBar::updateState)
 +    // Krita Nova: the floating transform actions bar
 +    if (!m_actionsBar) {
 +        KisCanvas2 *kisCanvas = dynamic_cast<KisCanvas2 *>(canvas());
@@ -172,7 +189,7 @@ index 940c1fa..cde8766 100644
  }
  
  void KisToolTransform::slotToolActionRetriggered()
-@@ -869,6 +933,12 @@ void KisToolTransform::slotToolActionRetriggered()
+@@ -869,6 +932,12 @@ void KisToolTransform::slotToolActionRetriggered()
  
  void KisToolTransform::deactivate()
  {
@@ -224,10 +241,10 @@ index eacfce3..d9659c1 100644
      TransformTransactionProperties m_transaction;
 diff --git a/plugins/tools/tool_transform2/kis_transform_actions_bar.cpp b/plugins/tools/tool_transform2/kis_transform_actions_bar.cpp
 new file mode 100644
-index 0000000..1babdf8
+index 0000000..1901cfe
 --- /dev/null
 +++ b/plugins/tools/tool_transform2/kis_transform_actions_bar.cpp
-@@ -0,0 +1,362 @@
+@@ -0,0 +1,365 @@
 +/*
 + *  SPDX-FileCopyrightText: 2026 Krita Nova
 + *
@@ -407,6 +424,9 @@ index 0000000..1babdf8
 +    // shown only while a transform runs (not after Apply / Cancel / Esc)
 +    const bool running = m_tool->novaIsTransforming();
 +    if (running != isVisible()) {
++        // one bar at a time: the selection actions bar steps aside while
++        // a transform runs, and comes back after Apply / Cancel / Esc
++        m_tool->novaSuppressSelectionBar(running);
 +        setVisible(running);
 +        if (running) {
 +            place();

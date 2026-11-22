@@ -4,12 +4,58 @@ In Free Transform, holding Ctrl and dragging one of the frame's corner
 handles moves that corner freely (distort), as in Photoshop: the
 transform, unchanged so far, goes over to the Perspective (4 points) mode,
 whose corners move freely, and the drag goes on there. The bar's mode icon
-and the tool options follow. Ctrl + drag anywhere else does what it did
+and the tool options follow. The corner is found from the free transform's own handles
+(KisFreeTransformStrategy::novaCornerHandleAt); Ctrl + click reaches the
+tool as a sampling action (Ctrl, or Ctrl + Alt, of any input profile) or as
+a plain press with Ctrl held. Ctrl + drag anywhere else does what it did
 (the 3D perspective of Krita's free transform). Not for vector layers,
 which cannot take a perspective.
 
+diff --git a/plugins/tools/tool_transform2/kis_free_transform_strategy.cpp b/plugins/tools/tool_transform2/kis_free_transform_strategy.cpp
+index 207f41d..a9d4f86 100644
+--- a/plugins/tools/tool_transform2/kis_free_transform_strategy.cpp
++++ b/plugins/tools/tool_transform2/kis_free_transform_strategy.cpp
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include "kis_free_transform_strategy.h"
++#include "kis_global.h"
+ 
+ #include <QPointF>
+ #include <QPainter>
+@@ -179,6 +180,16 @@ void KisFreeTransformStrategy::Private::recalculateBounds()
+ }
+ 
+ 
++bool KisFreeTransformStrategy::novaCornerHandleAt(const QPointF &imagePos) const
++{
++    const qreal radius = KisTransformUtils::effectiveHandleGrabRadius(m_d->converter);
++    for (const QPointF &corner : {m_d->transformedHandles.topLeft, m_d->transformedHandles.topRight,
++                                  m_d->transformedHandles.bottomLeft, m_d->transformedHandles.bottomRight}) {
++        if (kisDistance(corner, imagePos) <= radius) return true;
++    }
++    return false;
++}
++
+ void KisFreeTransformStrategy::Private::recalculateTransformedHandles()
+ {
+     QTransform boundsFullTransform = boundsTransform * transform;
+diff --git a/plugins/tools/tool_transform2/kis_free_transform_strategy.h b/plugins/tools/tool_transform2/kis_free_transform_strategy.h
+index 4097c8e..9745ea9 100644
+--- a/plugins/tools/tool_transform2/kis_free_transform_strategy.h
++++ b/plugins/tools/tool_transform2/kis_free_transform_strategy.h
+@@ -32,6 +32,9 @@ public:
+     void setTransformFunction(const QPointF &mousePos, bool perspectiveModifierActive, bool shiftModifierActive, bool altModifierActive) override;
+     bool shiftModifierIsUsed() const override;
+ 
++    /// Krita Nova: one of the frame's four corner handles is at this image point
++    bool novaCornerHandleAt(const QPointF &imagePos) const;
++
+     void paint(QPainter &gc, const KoColorDisplayRendererInterface *displayRendererInterface) override;
+     QCursor getCurrentCursor() const override;
+ 
 diff --git a/plugins/tools/tool_transform2/kis_tool_transform.cc b/plugins/tools/tool_transform2/kis_tool_transform.cc
-index cde8766..c9916d3 100644
+index 6237fc9..3267946 100644
 --- a/plugins/tools/tool_transform2/kis_tool_transform.cc
 +++ b/plugins/tools/tool_transform2/kis_tool_transform.cc
 @@ -363,6 +363,11 @@ void KisToolTransform::beginActionImpl(KoPointerEvent *event, bool usePrimaryAct
@@ -17,7 +63,7 @@ index cde8766..c9916d3 100644
          bool result = false;
  
 +        // Krita Nova: Ctrl + drag on a corner handle: distort (the corner moves freely)
-+        if (!usePrimaryAction && novaStartCornerDistort(event, action)) {
++        if (novaStartCornerDistort(event, usePrimaryAction ? KisTool::NONE : action)) {
 +            usePrimaryAction = true;
 +        }
 +
@@ -44,15 +90,21 @@ index cde8766..c9916d3 100644
      if (m_actuallyMoveWhileSelected ||
          currentStrategy()->acceptsClicks()) {
  
-@@ -903,6 +914,43 @@ void KisToolTransform::novaSuppressSelectionBar(bool suppress)
+@@ -902,6 +913,40 @@ void KisToolTransform::novaSuppressSelectionBar(bool suppress)
      }
  }
  
 +bool KisToolTransform::novaStartCornerDistort(KoPointerEvent *event, KisTool::AlternateAction action)
 +{
-+    // Ctrl + click: a sampling action, which the free transform otherwise
-+    // uses for its 3D (camera) perspective
-+    if (action != KisTool::SampleFgImage) {
++    // Ctrl (+ Alt) + click: one of the sampling actions, which the free
++    // transform otherwise uses for its 3D (camera) perspective; or a plain
++    // press with Ctrl held (input profiles that give Ctrl + click no action)
++    const bool samplingAction =
++        action == KisTool::SampleFgImage || action == KisTool::SampleBgImage ||
++        action == KisTool::SampleFgNode || action == KisTool::SampleBgNode ||
++        action == KisTool::SampleFgGroup || action == KisTool::SampleBgGroup;
++    const bool ctrlPress = action == KisTool::NONE && (event->modifiers() & Qt::ControlModifier);
++    if (!samplingAction && !ctrlPress) {
 +        return false;
 +    }
 +    if (m_currentArgs.mode() != ToolTransformArgs::FREE_TRANSFORM ||
@@ -62,18 +114,9 @@ index cde8766..c9916d3 100644
 +    KisCanvas2 *kisCanvas = dynamic_cast<KisCanvas2 *>(canvas());
 +    if (!kisCanvas) return false;
 +
-+    const QRectF original = m_transaction.originalRect();
-+    const QTransform t = KisTransformUtils::MatricesPack(m_currentArgs).finalTransform();
-+    const QPointF pos = convertToPixelCoord(event);
-+    const qreal radius = KisTransformUtils::effectiveHandleGrabRadius(kisCanvas->coordinatesConverter());
-+    bool onCorner = false;
-+    for (const QPointF &corner : {original.topLeft(), original.topRight(), original.bottomLeft(), original.bottomRight()}) {
-+        if (kisDistance(t.map(corner), pos) <= radius) {
-+            onCorner = true;
-+            break;
-+        }
-+    }
-+    if (!onCorner) return false;
++    // the corner handles as the free transform draws them, in image pixels
++    const QPointF imagePos = kisCanvas->coordinatesConverter()->documentToImage(event->point);
++    if (!m_freeStrategy || !m_freeStrategy->novaCornerHandleAt(imagePos)) return false;
 +
 +    // the same transform, now in the perspective (4 points) mode, whose
 +    // corners move freely; the drag goes on there as a plain drag
