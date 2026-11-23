@@ -1,0 +1,108 @@
+Krita Nova 76 - Transform bar: the mode menu switches the mode (Android)
+
+The transform bar's mode menu (patch 72) ran its own event loop from the
+press (QMenu::exec); on Android the tap on a mode could get lost - the
+mode stayed Free Transform - and the bar or the tool could go away while
+the menu was open, which could crash Krita. The menu now opens without
+an event loop of its own (popup; deleted when closed), the chosen mode is
+set once the menu has closed, and it is set through
+KisToolTransform::novaSetTransformMode, which also works when the tool
+options widget has not been made.
+
+diff --git a/plugins/tools/tool_transform2/kis_tool_transform.cc b/plugins/tools/tool_transform2/kis_tool_transform.cc
+index 3267946..f06af84 100644
+--- a/plugins/tools/tool_transform2/kis_tool_transform.cc
++++ b/plugins/tools/tool_transform2/kis_tool_transform.cc
+@@ -903,6 +903,19 @@ void KisToolTransform::novaRotate90(bool clockwise)
+     QMetaObject::invokeMethod(m_optionsWidget, clockwise ? "slotRotateCW" : "slotRotateCCW");
+ }
+ 
++void KisToolTransform::novaSetTransformMode(KisToolTransform::TransformToolMode newMode)
++{
++    if (m_optionsWidget) {
++        setTransformMode(newMode); // through the options widget, which follows
++        return;
++    }
++    const ToolTransformArgs::TransformMode mode = toArgsMode(newMode);
++    if (mode != m_currentArgs.mode()) {
++        slotResetTransform(mode);
++        Q_EMIT transformModeChanged();
++    }
++}
++
+ void KisToolTransform::novaSuppressSelectionBar(bool suppress)
+ {
+     KisCanvas2 *kisCanvas = dynamic_cast<KisCanvas2 *>(canvas());
+diff --git a/plugins/tools/tool_transform2/kis_tool_transform.h b/plugins/tools/tool_transform2/kis_tool_transform.h
+index 4e06c65..4ddbe14 100644
+--- a/plugins/tools/tool_transform2/kis_tool_transform.h
++++ b/plugins/tools/tool_transform2/kis_tool_transform.h
+@@ -188,6 +188,9 @@ public:
+     void novaRotate90(bool clockwise);
+     void novaResetTransform();
+     void novaSuppressSelectionBar(bool suppress);
++    /// switch the mode as the tool options' mode buttons do (also with no
++    /// tool options widget made)
++    void novaSetTransformMode(KisToolTransform::TransformToolMode mode);
+     /// Ctrl + drag on a corner of the free transform frame: that corner
+     /// moves freely (distort), as in Photoshop
+     bool novaStartCornerDistort(KoPointerEvent *event, KisTool::AlternateAction action);
+diff --git a/plugins/tools/tool_transform2/kis_transform_actions_bar.cpp b/plugins/tools/tool_transform2/kis_transform_actions_bar.cpp
+index 1901cfe..18d0fce 100644
+--- a/plugins/tools/tool_transform2/kis_transform_actions_bar.cpp
++++ b/plugins/tools/tool_transform2/kis_transform_actions_bar.cpp
+@@ -15,6 +15,7 @@
+ #include <QTabletEvent>
+ #include <QTouchEvent>
+ #include <QHash>
++#include <QPointer>
+ #include <QTimer>
+ 
+ #include <KConfigGroup>
+@@ -208,7 +209,10 @@ void KisTransformActionsBar::updateState()
+ void KisTransformActionsBar::showModeMenu()
+ {
+     if (!m_tool) return;
+-    QMenu menu;
++    // not exec(): a menu running its own event loop from a press can lose
++    // the tap on Android, and the bar (or the tool) may go away meanwhile
++    QMenu *menu = new QMenu(this);
++    menu->setAttribute(Qt::WA_DeleteOnClose);
+     struct Entry { KisToolTransform::TransformToolMode mode; const char *icon; QString text; };
+     const QList<Entry> entries = {
+         {KisToolTransform::FreeTransformMode, "transform_icons_main", i18n("Free Transform")},
+@@ -220,17 +224,27 @@ void KisTransformActionsBar::showModeMenu()
+     };
+     const int current = m_tool->transformMode();
+     Q_FOREACH (const Entry &e, entries) {
+-        QAction *a = menu.addAction(KisIconUtils::loadIcon(QString::fromLatin1(e.icon)), e.text);
++        QAction *a = menu->addAction(KisIconUtils::loadIcon(QString::fromLatin1(e.icon)), e.text);
+         a->setCheckable(true);
+         a->setChecked(e.mode == current);
+         a->setData(int(e.mode));
+     }
+-    QAction *chosen = menu.exec(m_modeButton->mapToGlobal(QPoint(0, -menu.sizeHint().height())));
+-    if (m_modeButton) m_modeButton->setDown(false);
+-    if (chosen && m_tool) {
+-        m_tool->setTransformMode(KisToolTransform::TransformToolMode(chosen->data().toInt()));
+-        updateState();
+-    }
++    QPointer<KisToolTransform> tool = m_tool;
++    QPointer<KisTransformActionsBar> self(this);
++    connect(menu, &QMenu::triggered, this, [tool, self](QAction *chosen) {
++        const int mode = chosen->data().toInt();
++        // after the menu has closed
++        QTimer::singleShot(0, self.data(), [tool, self, mode]() {
++            if (!tool) return;
++            tool->novaSetTransformMode(KisToolTransform::TransformToolMode(mode));
++            if (self) self->updateState();
++        });
++    });
++    connect(menu, &QMenu::aboutToHide, this, [self]() {
++        if (self && self->m_modeButton) self->m_modeButton->setDown(false);
++    });
++    const QSize size = menu->sizeHint();
++    menu->popup(m_modeButton->mapToGlobal(QPoint(0, -size.height())));
+ }
+ 
+ void KisTransformActionsBar::schedulePlace()
