@@ -1,0 +1,101 @@
+Krita Nova 74 - Polygonal Selection: drag draws freehand by default
+
+The Polygonal Selection tool works as if Shift were held (patch 70): a
+click adds a corner, a drag draws that stretch freehand - from the first
+press on. Holding Shift while drawing turns it back: drags give straight
+lines (the release adds the corner), as in Krita. Shift held when the
+selection starts still means Add to selection. A double click, Enter or a
+click on the first point finishes, as before.
+(KisToolPolylineBase::setFreehandDragByDefault; only the polygonal
+selection turns it on.)
+
+diff --git a/libs/ui/tool/kis_tool_polyline_base.cpp b/libs/ui/tool/kis_tool_polyline_base.cpp
+index 8b7d91b..379af95 100644
+--- a/libs/ui/tool/kis_tool_polyline_base.cpp
++++ b/libs/ui/tool/kis_tool_polyline_base.cpp
+@@ -135,7 +135,7 @@ void KisToolPolylineBase::beginPrimaryAction(KoPointerEvent *event)
+     if(m_dragging && m_closeSnappingActivated) {
+         m_points.append(m_points.first());
+         endStroke();
+-    } else if (m_dragging && m_shiftFreehand) {
++    } else if (m_dragging && freehandDrag()) {
+         // Krita Nova: a freehand stretch starts where the pen went down
+         const QPointF p = convertToPixelCoord(event);
+         if (m_points.isEmpty() || KisAlgebra2D::norm(pixelToView(p) - pixelToView(m_points.last())) > 1.0) {
+@@ -146,15 +146,21 @@ void KisToolPolylineBase::beginPrimaryAction(KoPointerEvent *event)
+     } else {
+         beginShape();
+         m_dragging = true;
++        if (freehandDrag()) {
++            // Krita Nova: the outline starts where the pen went down, so a
++            // first drag draws freehand too
++            m_dragStart = m_dragEnd = convertToPixelCoordAndSnap(event);
++            m_points.append(m_dragStart);
++        }
+     }
+ }
+ 
+ void KisToolPolylineBase::continuePrimaryAction(KoPointerEvent *event)
+ {
+     CHECK_MODE_SANITY_OR_RETURN(KisTool::PAINT_MODE);
+-    if (!m_dragging || !m_shiftFreehand || m_points.isEmpty()) return;
++    if (!m_dragging || !freehandDrag() || m_points.isEmpty()) return;
+ 
+-    // Krita Nova: Shift held: dragging draws freehand
++    // Krita Nova: dragging draws freehand (Shift held, or by default)
+     const QPointF p = convertToPixelCoord(event);
+     if (KisAlgebra2D::norm(pixelToView(p) - pixelToView(m_points.last())) > 1.5) {
+         const QRectF rect = pixelToView(QRectF(m_points.last(), p).normalized());
+@@ -188,7 +194,12 @@ void KisToolPolylineBase::endPrimaryAction(KoPointerEvent *event)
+     if(m_dragging) {
+         m_dragStart = convertToPixelCoordAndSnap(event);
+         m_dragEnd = m_dragStart;
+-        m_points.append(m_dragStart);
++        // Krita Nova: a click (no drag) where the freehand stretch already
++        // put its first point adds no second, same corner
++        if (!freehandDrag() || m_points.isEmpty()
++            || KisAlgebra2D::norm(pixelToView(m_dragStart) - pixelToView(m_points.last())) > 1.0) {
++            m_points.append(m_dragStart);
++        }
+     }
+ }
+ 
+diff --git a/libs/ui/tool/kis_tool_polyline_base.h b/libs/ui/tool/kis_tool_polyline_base.h
+index f69dd9c..f167a4e 100644
+--- a/libs/ui/tool/kis_tool_polyline_base.h
++++ b/libs/ui/tool/kis_tool_polyline_base.h
+@@ -46,6 +46,9 @@ protected:
+     /// Krita Nova: Shift held while drawing the polygon: dragging draws
+     /// freehand, until Shift is let go
+     void setShiftSwitchesToFreehand(bool on) { m_shiftSwitches = on; }
++    /// Krita Nova: dragging draws freehand without Shift (a click still
++    /// adds a corner); Shift held makes drags straight lines again
++    void setFreehandDragByDefault(bool on) { m_freehandByDefault = on; }
+ 
+ private:
+     void endStroke();
+@@ -66,7 +69,9 @@ private:
+     ToolType m_type;
+     bool m_closeSnappingActivated;
+     bool m_shiftSwitches {false}; ///< Krita Nova
+-    bool m_shiftFreehand {false}; ///< Krita Nova: Shift held, dragging draws freehand
++    bool m_shiftFreehand {false}; ///< Krita Nova: Shift held (while drawing)
++    bool m_freehandByDefault {false}; ///< Krita Nova: drags draw freehand unless Shift is held
++    bool freehandDrag() const { return m_freehandByDefault ? !m_shiftFreehand : m_shiftFreehand; }
+ };
+ 
+ #endif // KIS_TOOL_POLYLINE_BASE_H
+diff --git a/plugins/tools/selectiontools/kis_tool_select_polygonal.cc b/plugins/tools/selectiontools/kis_tool_select_polygonal.cc
+index 371920d..d457ed0 100644
+--- a/plugins/tools/selectiontools/kis_tool_select_polygonal.cc
++++ b/plugins/tools/selectiontools/kis_tool_select_polygonal.cc
+@@ -33,7 +33,8 @@ __KisToolSelectPolygonalLocal::__KisToolSelectPolygonalLocal(KoCanvasBase *canva
+     : KisToolPolylineBase(canvas, KisToolPolylineBase::SELECT,
+                           KisCursor::loadWithSize("tool_polygonal_selection_cursor.svg", 32, 32, 6, 6))
+ {
+-    setShiftSwitchesToFreehand(true); // Krita Nova: Shift while drawing: freehand
++    setShiftSwitchesToFreehand(true);
++    setFreehandDragByDefault(true); // Krita Nova: drag = freehand, click = corner, Shift = straight drags
+     setObjectName("tool_select_polygonal");
+ }
+ 
