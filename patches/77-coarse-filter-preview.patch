@@ -1,0 +1,174 @@
+Krita Nova 77 - Filter dialog: a coarse preview while the settings change
+
+While the settings of a filter or adjustment (Filter > ..., Adjust > ...)
+are being changed - a slider dragged, a curve moved - the preview works at
+a quarter of the resolution (level of detail 2: 1/16 of the pixels), so it
+keeps up; once the settings rest for 0.45 s the preview is made again at
+full resolution, and OK always filters at full resolution (a coarse preview
+is filtered again). The first preview when the dialog opens is at full
+resolution. Uses Krita's level-of-detail ("instant preview") machinery:
+KisCanvas2::setNovaPreviewLod() raises the level of detail the canvas asks
+for; with no level-of-detail support (no OpenGL canvas) nothing changes.
+kritarc [filterdialog] novaCoarsePreview=false turns it off.
+With patch 41 (only the visible area is previewed) this is the CPU side of
+faster adjustment previews.
+
+diff --git a/libs/ui/canvas/kis_canvas2.cpp b/libs/ui/canvas/kis_canvas2.cpp
+index 5dafab7..ae1ba00 100644
+--- a/libs/ui/canvas/kis_canvas2.cpp
++++ b/libs/ui/canvas/kis_canvas2.cpp
+@@ -244,6 +244,7 @@ public:
+     QScopedPointer<KisCanvasAnimationState> animationPlayer;
+     KisAnimationFrameCacheSP frameCache;
+     bool lodPreferredInImage = false;
++    int novaPreviewLod = 0; ///< Krita Nova: see setNovaPreviewLod()
+     bool bootstrapLodBlocked = false;
+     QPointer<KoShapeManager> currentlyActiveShapeManager;
+     KisInputActionGroupsMask inputActionGroupsMask = AllActionGroup;
+@@ -1394,7 +1395,10 @@ void KisCanvas2::notifyLevelOfDetailChange()
+ 
+         KisConfig cfg(true);
+         const int maxLod = cfg.numMipmapLevels();
+-        const int lod = KisLodTransform::scaleToLod(effectiveZoom, maxLod);
++        int lod = KisLodTransform::scaleToLod(effectiveZoom, maxLod);
++        if (m_d->novaPreviewLod > lod) {
++            lod = qMin(m_d->novaPreviewLod, maxLod); // Krita Nova: coarse filter preview
++        }
+         KisLodPreferences::PreferenceFlags flags = KisLodPreferences::LodSupported;
+ 
+         if (m_d->lodPreferredInImage) {
+@@ -1404,6 +1408,13 @@ void KisCanvas2::notifyLevelOfDetailChange()
+     }
+ }
+ 
++void KisCanvas2::setNovaPreviewLod(int lod)
++{
++    if (m_d->novaPreviewLod == lod) return;
++    m_d->novaPreviewLod = lod;
++    notifyLevelOfDetailChange();
++}
++
+ KisViewManager* KisCanvas2::viewManager() const
+ {
+     if (m_d->view) {
+diff --git a/libs/ui/canvas/kis_canvas2.h b/libs/ui/canvas/kis_canvas2.h
+index 12bb9c0..63e6708 100644
+--- a/libs/ui/canvas/kis_canvas2.h
++++ b/libs/ui/canvas/kis_canvas2.h
+@@ -336,6 +336,11 @@ private:
+ 
+     void notifyLevelOfDetailChange();
+ 
++    /// Krita Nova: work at least at this level of detail (1/2^lod of the
++    /// resolution) - a coarse, fast preview while a filter is being
++    /// adjusted; 0 = as the zoom decides
++    void setNovaPreviewLod(int lod);
++
+     // Completes construction of canvas.
+     // To be called by KisView in its constructor, once it has been setup enough
+     // (to be defined what that means) for things KisCanvas2 expects from KisView
+diff --git a/libs/ui/dialogs/kis_dlg_filter.cpp b/libs/ui/dialogs/kis_dlg_filter.cpp
+index 50fc339..e4fc6cd 100644
+--- a/libs/ui/dialogs/kis_dlg_filter.cpp
++++ b/libs/ui/dialogs/kis_dlg_filter.cpp
+@@ -6,6 +6,7 @@
+  */
+ 
+ #include "kis_dlg_filter.h"
++#include <QTimer>
+ 
+ 
+ 
+@@ -59,6 +60,22 @@ struct KisDlgFilter::Private {
+     QScopedPointer<KisInputActionGroupsMaskGuard> blockModifyingActionsGuard;
+     KisSignalCompressor updateCompressor;
+     QRect previewArea; ///< Krita Nova: the part the running preview filters, empty = all
++
++    // Krita Nova: while the settings change, the preview works at a quarter
++    // of the resolution (level of detail 2); once they rest a moment, it is
++    // made again at full resolution
++    QTimer novaIdleTimer;
++    bool novaCoarse {false};
++    bool novaFirstPreviewDone {false};
++    bool novaCoarseAllowed {true};
++    void setCoarse(bool coarse)
++    {
++        if (novaCoarse == coarse) return;
++        novaCoarse = coarse;
++        if (KisCanvas2 *canvas = view ? view->canvasBase() : nullptr) {
++            canvas->setNovaPreviewLod(coarse ? 2 : 0);
++        }
++    }
+ };
+ 
+ KisDlgFilter::KisDlgFilter(KisViewManager *view, KisNodeSP node, KisFilterManager *filterManager, QWidget *parent) :
+@@ -118,6 +135,17 @@ KisDlgFilter::KisDlgFilter(KisViewManager *view, KisNodeSP node, KisFilterManage
+     restoreGeometry(KisConfig(true).readEntry("filterdialog/geometry", QByteArray()));
+     connect(&d->updateCompressor, SIGNAL(timeout()), this, SLOT(updatePreview()));
+ 
++    // Krita Nova: coarse preview while the settings change
++    d->novaCoarseAllowed = group.readEntry("novaCoarsePreview", true);
++    d->novaIdleTimer.setSingleShot(true);
++    d->novaIdleTimer.setInterval(450);
++    connect(&d->novaIdleTimer, &QTimer::timeout, this, [this]() {
++        if (d->novaCoarse) {
++            d->setCoarse(false);
++            d->updateCompressor.start(); // the full resolution preview
++        }
++    });
++
+     // Krita Nova: the preview filters only the visible area, see previewArea()
+     if (d->view->canvasBase()) {
+         connect(d->view->canvasBase(), SIGNAL(sigRegionOfInterestChanged(QRect)),
+@@ -128,6 +156,7 @@ KisDlgFilter::KisDlgFilter(KisViewManager *view, KisNodeSP node, KisFilterManage
+ 
+ KisDlgFilter::~KisDlgFilter()
+ {
++    d->setCoarse(false);
+     KisConfig(false).writeEntry("filterdialog/geometry", saveGeometry());
+     delete d;
+ }
+@@ -204,6 +233,7 @@ void KisDlgFilter::updatePreview()
+     if (d->uiFilterDialog.checkBoxPreview->isChecked()) {
+         KisFilterConfigurationSP config(d->uiFilterDialog.filterSelection->configuration());
+         startApplyingFilter(config, previewArea());
++        d->novaFirstPreviewDone = true;
+     }
+ 
+     d->uiFilterDialog.buttonBox->button(QDialogButtonBox::Ok)->setEnabled(true);
+@@ -221,8 +251,12 @@ void KisDlgFilter::slotFilterWidgetSizeChanged()
+ 
+ void KisDlgFilter::slotOnAccept()
+ {
+-    // Krita Nova: a preview of the visible area only is filtered again, whole
+-    if (!d->filterManager->isStrokeRunning() || d->filterManager->isPartialPreview()) {
++    // Krita Nova: a preview of the visible area only, or a coarse one, is
++    // filtered again, whole and at full resolution
++    d->novaIdleTimer.stop();
++    const bool wasCoarse = d->novaCoarse;
++    d->setCoarse(false);
++    if (!d->filterManager->isStrokeRunning() || d->filterManager->isPartialPreview() || wasCoarse) {
+         KisFilterConfigurationSP config(d->uiFilterDialog.filterSelection->configuration());
+         startApplyingFilter(config);
+     }
+@@ -237,6 +271,8 @@ void KisDlgFilter::slotOnAccept()
+ 
+ void KisDlgFilter::slotOnReject()
+ {
++    d->novaIdleTimer.stop();
++    d->setCoarse(false);
+     if (d->filterManager->isStrokeRunning()) {
+         d->filterManager->cancelRunningStroke();
+     }
+@@ -291,5 +327,11 @@ void KisDlgFilter::filterSelectionChanged()
+     d->currentFilter = filter;
+     const bool multiframeEnabled = d->uiFilterDialog.chkFilterSelectedFrames->isChecked();
+     d->uiFilterDialog.pushButtonCreateMaskEffect->setEnabled(filter.isNull() ? false : (filter->supportsAdjustmentLayers() && !multiframeEnabled));
++
++    // Krita Nova: settings changing after the first preview: coarse until they rest
++    if (d->novaFirstPreviewDone && d->novaCoarseAllowed && d->uiFilterDialog.checkBoxPreview->isChecked()) {
++        d->setCoarse(true);
++        d->novaIdleTimer.start();
++    }
+     d->updateCompressor.start();
+ }
