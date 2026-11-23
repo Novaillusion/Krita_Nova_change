@@ -1,0 +1,53 @@
+Krita Nova 75 - Photoshop brushes: version 10 files and 16-bit tips
+
+Krita's .abr reader (libs/brush/kis_abr_brush_collection.cpp) took only
+versions 1, 2 and 6 and refused newer Photoshop brush files (version 10,
+e.g. "swang_brushes_cc_gumroad.abr": "Could not read the brush tips").
+Their brush tips ("samp" section) are laid out as in version 6.2, so
+version 10 is now read as 6. Uncompressed 16-bit tips, which such files
+hold, are turned into the 8-bit tip images (the high byte of each sample)
+instead of being read as 8-bit data.
+
+diff --git a/libs/brush/kis_abr_brush_collection.cpp b/libs/brush/kis_abr_brush_collection.cpp
+index db2030f..5177f69 100644
+--- a/libs/brush/kis_abr_brush_collection.cpp
++++ b/libs/brush/kis_abr_brush_collection.cpp
+@@ -128,6 +128,7 @@ static bool abr_supported_content(AbrInfo *abr_hdr)
+         return true;
+         break;
+     case 6:
++    case 10: // Krita Nova: newer Photoshop files; the tips are laid out as in 6.2
+         if (abr_hdr->subversion == 1 || abr_hdr->subversion == 2)
+             return true;
+         break;
+@@ -247,6 +248,7 @@ static bool abr_read_content(QDataStream & abr, AbrInfo *abr_hdr)
+         abr >> abr_hdr->count;
+         break;
+     case 6:
++    case 10: // Krita Nova: as version 6
+         abr >> abr_hdr->subversion;
+         abr_hdr->count = find_sample_count_v6(abr, abr_hdr);
+         break;
+@@ -360,6 +362,14 @@ quint32 KisAbrBrushCollection::abr_brush_load_v6(QDataStream & abr, AbrInfo *abr
+         // not compressed - read raw bytes as brush data
+         //fread (buffer, size, 1, abr);
+         abr.readRawData(buffer, size);
++        // Krita Nova: 16-bit tips (big-endian) to the 8 bits the tip image
++        // is made of: the high byte of each sample
++        if (depth == 16) {
++            const qint32 pixels = width * height;
++            for (qint32 i = 0; i < pixels; ++i) {
++                buffer[i] = buffer[2 * i];
++            }
++        }
+     } else {
+         rle_decode(abr, buffer, height);
+     }
+@@ -511,6 +521,7 @@ qint32 KisAbrBrushCollection::abr_brush_load(QDataStream & abr, AbrInfo *abr_hdr
+         layer_ID = abr_brush_load_v12(abr, abr_hdr, filename, image_ID, id);
+         break;
+     case 6:
++    case 10: // Krita Nova: as version 6
+         layer_ID = abr_brush_load_v6(abr, abr_hdr, filename, image_ID, id);
+         break;
+     }
