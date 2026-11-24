@@ -52,21 +52,21 @@ index 5dafab7..ae1ba00 100644
  {
      if (m_d->view) {
 diff --git a/libs/ui/canvas/kis_canvas2.h b/libs/ui/canvas/kis_canvas2.h
-index 12bb9c0..63e6708 100644
+index 12bb9c0..f55ed49 100644
 --- a/libs/ui/canvas/kis_canvas2.h
 +++ b/libs/ui/canvas/kis_canvas2.h
-@@ -336,6 +336,11 @@ private:
+@@ -153,6 +153,11 @@ public: // KoCanvasBase implementation
+     KisReferenceImagesDecorationSP referenceImagesDecoration() const;
  
-     void notifyLevelOfDetailChange();
- 
+ public: // KisCanvas2 methods
 +    /// Krita Nova: work at least at this level of detail (1/2^lod of the
 +    /// resolution) - a coarse, fast preview while a filter is being
 +    /// adjusted; 0 = as the zoom decides
 +    void setNovaPreviewLod(int lod);
 +
-     // Completes construction of canvas.
-     // To be called by KisView in its constructor, once it has been setup enough
-     // (to be defined what that means) for things KisCanvas2 expects from KisView
+ 
+     KisImageWSP image() const;
+     KisViewManager* viewManager() const;
 diff --git a/libs/ui/dialogs/kis_dlg_filter.cpp b/libs/ui/dialogs/kis_dlg_filter.cpp
 index 50fc339..e4fc6cd 100644
 --- a/libs/ui/dialogs/kis_dlg_filter.cpp
