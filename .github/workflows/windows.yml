@@ -16,14 +16,12 @@ on:
         description: Krita commit to build (empty = the one in KRITA_REF)
         type: string
         default: ''
-  # Paused: Android is built first. Restoring the push trigger below (that
-  # commit touches this file) starts the Windows build.
-  # push:
-  #   branches: [main]
-  #   paths:
-  #     - 'patches/**'
-  #     - 'KRITA_REF'
-  #     - '.github/workflows/windows.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'patches/**'
+      - 'KRITA_REF'
+      - '.github/workflows/windows.yml'
 
 concurrency:
   group: windows-${{ github.ref }}
