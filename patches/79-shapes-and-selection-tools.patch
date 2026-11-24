@@ -1,0 +1,252 @@
+Krita Nova 79 - Select Shapes and the selection tools work across layer types
+
+The Select Shapes tool (the arrow) on a paint layer, or any layer without
+vector shapes, drags a rectangular pixel selection instead of showing
+"This tool only works on vector layers". It uses the selection tools'
+modifiers: Shift adds, Alt subtracts, Shift+Alt intersects. A click
+without a drag deselects.
+
+On a vector layer, a click with no modifier keys on a shape with the
+rectangle, ellipse, freehand, polygonal or Bezier selection tool selects
+that shape and switches to the Select Shapes tool when the button is
+released. A click on empty canvas, or with Shift/Alt/Ctrl held, makes a
+pixel selection as before. Magic wand, similar color and magnetic
+selection are not changed, since they work on colors.
+
+diff --git a/libs/ui/tool/kis_tool_select_base.h b/libs/ui/tool/kis_tool_select_base.h
+index 0857992..f62720a 100644
+--- a/libs/ui/tool/kis_tool_select_base.h
++++ b/libs/ui/tool/kis_tool_select_base.h
+@@ -26,6 +26,11 @@
+ #include "kis_selection_tool_helper.h"
+ #include "kis_assert.h"
+ #include <input/kis_extended_modifiers_mapper.h>
++#include <KoShapeManager.h>
++#include <KoSelection.h>
++#include <KoToolManager.h>
++#include <QPointer>
++#include <QTimer>
+ 
+ /**
+  * This is a basic template to create selection tools from basic path based drawing tools.
+@@ -422,11 +427,44 @@ public:
+         }
+ 
+         m_didMove = false;
++
++        // Krita Nova (patch 79): on a vector layer, clicking a shape with an
++        // outline selection tool (no modifier keys) selects that shape and
++        // hands over to the Select Shapes tool when the button is released
++        if (novaShapeUnderCursor(event)) {
++            m_novaHandOffToShapes = true;
++            return;
++        }
++
+         BaseClass::beginPrimaryAction(event);
+     }
+ 
++    KoShape *novaShapeUnderCursor(KoPointerEvent *event) {
++        if (event->modifiers() != Qt::NoModifier) return nullptr;
++        static const QStringList outlineTools = {
++            "KisToolSelectRectangular", "KisToolSelectElliptical",
++            "KisToolSelectOutline", "KisToolSelectPolygonal", "KisToolSelectPath"};
++        if (!outlineTools.contains(this->toolId())) return nullptr;
++
++        KisCanvas2* canvas = dynamic_cast<KisCanvas2*>(this->canvas());
++        if (!canvas || !canvas->localShapeManager()) return nullptr; // not a vector layer
++
++        // the same lookup the Select Shapes tool does on a click
++        KoShapeManager *shapeManager = canvas->shapeManager();
++        KoShape *shape = shapeManager->shapeAt(event->point, KoFlake::ShapeOnTop);
++        if (!shape) return nullptr;
++
++        KoSelection *selection = shapeManager->selection();
++        if (selection) {
++            selection->deselectAll();
++            selection->select(shape);
++        }
++        return shape;
++    }
++
+     void continuePrimaryAction(KoPointerEvent *event) override
+     {
++        if (m_novaHandOffToShapes) return;
+         if (isMovingSelection()) {
+             const QPointF pos = this->convertToPixelCoord(event->point);
+             const QPoint offset((pos - m_dragStartPos).toPoint());
+@@ -440,6 +478,18 @@ public:
+ 
+     void endPrimaryAction(KoPointerEvent *event) override
+     {
++        if (m_novaHandOffToShapes) {
++            m_novaHandOffToShapes = false;
++            KisCanvas2* canvas = dynamic_cast<KisCanvas2*>(this->canvas());
++            QPointer<KisViewManager> view = canvas ? canvas->viewManager() : nullptr;
++            // after the click is done: switching tools mid-action would cut it
++            QTimer::singleShot(0, [view]() {
++                if (view && view->toolManager()) {
++                    view->toolManager()->switchToolRequested("InteractionTool");
++                }
++            });
++            return;
++        }
+         if (isMovingSelection()) {
+             this->image()->endStroke(m_moveStrokeId);
+             m_moveStrokeId.clear();
+@@ -562,6 +612,7 @@ private:
+     QPointF m_currentPos;
+     KisStrokeId m_moveStrokeId;
+     bool m_didMove = false;
++    bool m_novaHandOffToShapes = false; ///< Krita Nova (patch 79)
+ 
+     KisSignalAutoConnectionsStore m_modeConnections;
+ };
+diff --git a/plugins/tools/defaulttool/defaulttool/DefaultTool.cpp b/plugins/tools/defaulttool/defaulttool/DefaultTool.cpp
+index 325897f..25d9ad9 100644
+--- a/plugins/tools/defaulttool/defaulttool/DefaultTool.cpp
++++ b/plugins/tools/defaulttool/defaulttool/DefaultTool.cpp
+@@ -54,6 +54,10 @@
+ #include "kis_node_manager.h"
+ #include "KisViewManager.h"
+ #include "kis_canvas2.h"
++#include "kis_selection_tool_helper.h"
++#include "kis_pixel_selection.h"
++#include "kis_default_bounds.h"
++#include "kis_image.h"
+ #include "kis_canvas_resource_provider.h"
+ #include "KisTextPropertiesManager.h"
+ #include <kis_signal_compressor.h>
+@@ -1107,8 +1111,57 @@ void DefaultTool::updateCursor()
+     }
+ }
+ 
++QRectF DefaultTool::novaPixelRectInDocument() const
++{
++    KisCanvas2 *kiscanvas = static_cast<KisCanvas2 *>(canvas());
++    if (!kiscanvas || !kiscanvas->image()) return QRectF();
++    const QRectF px = QRectF(m_novaPixelStart, m_novaPixelEnd).normalized();
++    return kiscanvas->image()->pixelToDocument(px);
++}
++
++void DefaultTool::novaFinishPixelSelection(Qt::KeyboardModifiers modifiers)
++{
++    KisCanvas2 *kiscanvas = static_cast<KisCanvas2 *>(canvas());
++    if (!kiscanvas || !kiscanvas->image() || !kiscanvas->viewManager()) return;
++
++    // the selection tools' default modifiers
++    SelectionAction action = SELECTION_REPLACE;
++    const bool shift = modifiers & Qt::ShiftModifier;
++    const bool alt = modifiers & Qt::AltModifier;
++    if (shift && alt) action = SELECTION_INTERSECT;
++    else if (shift) action = SELECTION_ADD;
++    else if (alt) action = SELECTION_SUBTRACT;
++
++    KisSelectionToolHelper helper(kiscanvas, kundo2_i18n("Select Rectangle"));
++    const QRect rc = QRectF(m_novaPixelStart, m_novaPixelEnd).normalized().toAlignedRect()
++            .intersected(kiscanvas->image()->bounds());
++
++    // a click without a drag deselects, as with the rectangle selection tool
++    const QRectF viewRect = kiscanvas->viewConverter()->documentToView(novaPixelRectInDocument());
++    if (helper.tryDeselectCurrentSelection(viewRect, action)) return;
++    if (helper.canShortcutToNoop(rc, action)) return;
++    if (rc.isEmpty()) return;
++
++    KisPixelSelectionSP tmpSel = new KisPixelSelection(new KisDefaultBounds(kiscanvas->image()));
++    tmpSel->select(rc);
++    helper.selectPixelSelection(tmpSel, action);
++}
++
+ void DefaultTool::paint(QPainter &painter, const KoViewConverter &converter)
+ {
++    if (m_novaPixelSelecting) {
++        const QRectF viewRect = converter.documentToView(novaPixelRectInDocument());
++        painter.save();
++        painter.setRenderHint(QPainter::Antialiasing, false);
++        painter.setBrush(Qt::NoBrush);
++        painter.setPen(QPen(Qt::white, 1));
++        painter.drawRect(viewRect);
++        QPen dash(Qt::black, 1, Qt::DashLine);
++        painter.setPen(dash);
++        painter.drawRect(viewRect);
++        painter.restore();
++        return;
++    }
+     KoSelection *selection = koSelection();
+     if (selection) {
+         m_decorator.reset(new SelectionDecorator(canvas()->resourceManager(), canvas()->displayRendererInterface()));
+@@ -1166,10 +1219,15 @@ void DefaultTool::mousePressEvent(KoPointerEvent *event)
+ {
+     // this tool only works on a vector layer right now, so give a warning if another layer type is trying to use it
+     if (!isValidForCurrentLayer()) {
++        // Krita Nova (patch 79): on a paint (or other non-vector) layer the
++        // arrow drags a rectangular pixel selection instead
+         KisCanvas2 *kiscanvas = static_cast<KisCanvas2 *>(canvas());
+-        kiscanvas->viewManager()->showFloatingMessage(
+-                i18n("This tool only works on vector layers. You probably want the move tool."),
+-                QIcon(), 2000, KisFloatingMessage::Medium, Qt::AlignCenter);
++        if (kiscanvas && kiscanvas->image()) {
++            m_novaPixelSelecting = true;
++            m_novaPixelStart = m_novaPixelEnd = kiscanvas->image()->documentToPixel(event->point);
++            event->accept();
++            return;
++        }
+         return;
+     }
+ 
+@@ -1186,6 +1244,13 @@ void DefaultTool::mousePressEvent(KoPointerEvent *event)
+ 
+ void DefaultTool::mouseMoveEvent(KoPointerEvent *event)
+ {
++    if (m_novaPixelSelecting) {
++        KisCanvas2 *kiscanvas = static_cast<KisCanvas2 *>(canvas());
++        const QRectF before = novaPixelRectInDocument();
++        m_novaPixelEnd = kiscanvas->image()->documentToPixel(event->point);
++        canvas()->updateCanvas(before.united(novaPixelRectInDocument()).adjusted(-50, -50, 50, 50));
++        return;
++    }
+     KoInteractionTool::mouseMoveEvent(event);
+     if (currentStrategy() == 0 && koSelection() && koSelection()->count() > 0) {
+         QRectF bound = handlesSize();
+@@ -1233,6 +1298,15 @@ QRectF DefaultTool::handlesSize()
+ 
+ void DefaultTool::mouseReleaseEvent(KoPointerEvent *event)
+ {
++    if (m_novaPixelSelecting) {
++        KisCanvas2 *kiscanvas = static_cast<KisCanvas2 *>(canvas());
++        m_novaPixelEnd = kiscanvas->image()->documentToPixel(event->point);
++        const QRectF dirty = novaPixelRectInDocument();
++        novaFinishPixelSelection(event->modifiers());
++        m_novaPixelSelecting = false;
++        canvas()->updateCanvas(dirty.adjusted(-50, -50, 50, 50));
++        return;
++    }
+     KoInteractionTool::mouseReleaseEvent(event);
+     updateCursor();
+ }
+@@ -1542,6 +1616,7 @@ void DefaultTool::activate(const QSet<KoShape *> &shapes)
+ 
+ void DefaultTool::deactivate()
+ {
++    m_novaPixelSelecting = false;
+     KoToolBase::deactivate();
+ 
+     QAction *actionBringToFront = action("object_order_front");
+diff --git a/plugins/tools/defaulttool/defaulttool/DefaultTool.h b/plugins/tools/defaulttool/defaulttool/DefaultTool.h
+index 709a83d..f6d5e2e 100644
+--- a/plugins/tools/defaulttool/defaulttool/DefaultTool.h
++++ b/plugins/tools/defaulttool/defaulttool/DefaultTool.h
+@@ -190,6 +190,14 @@ private:
+     KoFlake::SelectionHandle m_lastHandle;
+     KoFlake::AnchorPosition m_hotPosition;
+     bool m_mouseWasInsideHandles;
++
++    // Krita Nova (patch 79): on a layer without shapes the tool drags a
++    // rectangular pixel selection
++    bool m_novaPixelSelecting {false};
++    QPointF m_novaPixelStart;   ///< image pixels
++    QPointF m_novaPixelEnd;     ///< image pixels
++    void novaFinishPixelSelection(Qt::KeyboardModifiers modifiers);
++    QRectF novaPixelRectInDocument() const;
+     QPointF m_selectionBox[8];
+     QPolygonF m_selectionOutline;
+     QPointF m_lastPoint;
