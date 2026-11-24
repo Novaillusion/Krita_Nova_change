@@ -1,0 +1,76 @@
+Krita Nova 80 - Selection tools: right-click lists the layers under the cursor
+
+Like Photoshop, the right-click menu of the selection tools (rectangle,
+ellipse, freehand, polygonal, Bezier, magic wand, similar color, magnetic)
+now starts with a "Layers Under Cursor" section: every visible, editable
+layer with content at the cursor, top to bottom as in the Layers docker,
+indented by group depth, with the active layer checked. Picking one makes
+it the active layer. The selection actions follow as before.
+
+diff --git a/libs/ui/tool/kis_tool_select_base.h b/libs/ui/tool/kis_tool_select_base.h
+index f62720a..29a58d1 100644
+--- a/libs/ui/tool/kis_tool_select_base.h
++++ b/libs/ui/tool/kis_tool_select_base.h
+@@ -29,6 +29,11 @@
+ #include <KoShapeManager.h>
+ #include <KoSelection.h>
+ #include <KoToolManager.h>
++#include <klocalizedstring.h>
++#include "kis_tool_utils.h"
++#include "kis_node_manager.h"
++#include <QMenu>
++#include <QAction>
+ #include <QPointer>
+ #include <QTimer>
+ 
+@@ -514,7 +519,49 @@ public:
+         KisCanvas2 * kisCanvas = dynamic_cast<KisCanvas2*>(canvas());
+         KIS_SAFE_ASSERT_RECOVER_RETURN_VALUE(kisCanvas, 0);
+ 
+-        return KisSelectionToolHelper::getSelectionContextMenu(kisCanvas);
++        QMenu *menu = KisSelectionToolHelper::getSelectionContextMenu(kisCanvas);
++        novaAddLayersUnderCursor(menu, kisCanvas);
++        return menu;
++    }
++
++    // Krita Nova (patch 80): like Photoshop, the right-click menu starts with
++    // the layers that have visible content under the cursor, top to bottom;
++    // picking one makes it the active layer
++    void novaAddLayersUnderCursor(QMenu *menu, KisCanvas2 *kisCanvas) {
++        if (!menu || !kisCanvas || !kisCanvas->viewManager()) return;
++        KisImageSP image = this->image();
++        if (!image || !image->root()) return;
++
++        const QPoint pos = m_currentPos.toPoint();
++        if (!image->bounds().contains(pos)) return;
++
++        const KisNodeList found =
++            KisToolUtils::findNodes(image->root()->firstChild(), pos, false, false);
++        if (found.isEmpty()) return;
++
++        QPointer<KisViewManager> view = kisCanvas->viewManager();
++        const KisNodeSP active = this->currentNode();
++        QAction *before = menu->actions().value(0);
++
++        menu->insertSection(before, i18n("Layers Under Cursor"));
++
++        // findNodes() lists bottom to top: reverse, so the menu reads like
++        // the Layers docker
++        for (int i = found.size() - 1; i >= 0; --i) {
++            KisNodeSP node = found[i];
++            int indentation = -1;
++            for (KisNodeSP n = node; n->parent(); n = n->parent()) ++indentation;
++
++            QAction *action = new QAction(QString(4 * qMax(0, indentation), ' ') + node->name(), menu);
++            action->setCheckable(true);
++            action->setChecked(node == active);
++            QObject::connect(action, &QAction::triggered, [view, node]() {
++                if (view && view->nodeManager() && node->graphListener()) {
++                    view->nodeManager()->slotImageRequestNodeReselection(node, {node});
++                }
++            });
++            menu->insertAction(before, action);
++        }
+     }
+ 
+     KisPopupWidgetInterface* popupWidget() override
