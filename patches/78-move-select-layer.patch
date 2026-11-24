@@ -1,0 +1,202 @@
+Krita Nova 78 - Move tool: "Move and select layer with content"
+
+A fourth Selection Mode in the Move tool options. Like "Move layer with
+content" it moves the first layer with visible content under the cursor,
+and it also makes that layer the active layer in the Layers docker (like
+Photoshop's Auto-Select). The layer is picked when the drag (or click)
+starts, inside the isolated group if isolation is on; with an active
+selection the current layer is kept, since the move then works on the
+selected pixels. Saved in kritarc [KritaTransform/KisToolMove]
+novaSelectPickedLayer. The mode radio buttons now only react when checked.
+
+diff --git a/plugins/tools/basictools/kis_tool_move.cc b/plugins/tools/basictools/kis_tool_move.cc
+index e1aded5..800487c 100644
+--- a/plugins/tools/basictools/kis_tool_move.cc
++++ b/plugins/tools/basictools/kis_tool_move.cc
+@@ -19,6 +19,7 @@
+ #include "kis_image.h"
+ 
+ #include "kis_tool_utils.h"
++#include "kis_layer_utils.h"
+ #include "kis_paint_layer.h"
+ #include "strokes/move_stroke_strategy.h"
+ #include "kis_tool_movetooloptionswidget.h"
+@@ -661,6 +662,14 @@ void KisToolMove::startAction(KoPointerEvent *event, MoveToolMode mode)
+     m_dragStart = pos;
+     m_dragPos = pos;
+ 
++    // Krita Nova (patch 78): "Move and select layer with content" makes the
++    // layer under the cursor the active layer too (like Photoshop's
++    // auto-select). Done before the stroke starts: activating a layer ends
++    // any running stroke.
++    if (mode == MoveFirstLayer && m_optionsWidget && m_optionsWidget->selectPickedLayer()) {
++        novaSelectLayerUnder(convertToPixelCoord(event).toPoint());
++    }
++
+     if (startStrokeImpl(mode, &pos)) {
+         setMode(KisTool::PAINT_MODE);
+ 
+@@ -843,6 +852,30 @@ void KisToolMove::cancelStroke()
+     qobject_cast<KisCanvas2*>(canvas())->updateCanvas();
+ }
+ 
++bool KisToolMove::novaSelectLayerUnder(const QPoint &pos)
++{
++    KisCanvas2 *kisCanvas = dynamic_cast<KisCanvas2 *>(canvas());
++    if (!kisCanvas || !kisCanvas->viewManager() || !kisCanvas->viewManager()->nodeManager()) return false;
++    KisImageSP image = this->image();
++    if (!image) return false;
++
++    // with an active selection the move works on the selected pixels of the
++    // current layer: keep that layer
++    KisSelectionSP selection = kisCanvas->viewManager()->selection();
++    if (selection && !selection->selectedExactRect().isEmpty()) return false;
++
++    const KisNodeList selected = this->selectedNodes();
++    KisNodeSP root = selected.isEmpty() ? KisNodeSP() : KisLayerUtils::findIsolationRoot(selected.first());
++    if (!root) root = image->root();
++
++    KisNodeSP node = KisToolUtils::findNode(root, pos, false);
++    if (!node) return false;
++    if (selected.size() == 1 && selected.first() == node) return false; // already active
++
++    kisCanvas->viewManager()->nodeManager()->slotImageRequestNodeReselection(node, {node});
++    return true;
++}
++
+ QWidget* KisToolMove::createOptionWidget()
+ {
+     return m_optionsWidget;
+diff --git a/plugins/tools/basictools/kis_tool_move.h b/plugins/tools/basictools/kis_tool_move.h
+index 9cf8bc2..1df72ca 100644
+--- a/plugins/tools/basictools/kis_tool_move.h
++++ b/plugins/tools/basictools/kis_tool_move.h
+@@ -165,6 +165,7 @@ private:
+     KisNodeList m_currentlyProcessingNodes;
+     bool m_currentlyUsingSelection {false};
+     bool m_duplicating {false}; ///< Krita Nova: the current stroke moves a duplicate (Alt is not precision mode)
++    bool novaSelectLayerUnder(const QPoint &pos); ///< Krita Nova (patch 78)
+     KisNodeList m_pendingReselection; ///< Krita Nova (patch 40): copies to select on release
+     MoveToolMode m_currentMode {MoveSelectedLayer};
+ 
+diff --git a/plugins/tools/basictools/kis_tool_movetooloptionswidget.cpp b/plugins/tools/basictools/kis_tool_movetooloptionswidget.cpp
+index ba84ee2..35fb9c1 100644
+--- a/plugins/tools/basictools/kis_tool_movetooloptionswidget.cpp
++++ b/plugins/tools/basictools/kis_tool_movetooloptionswidget.cpp
+@@ -21,8 +21,13 @@ MoveToolOptionsWidget::MoveToolOptionsWidget(QWidget *parent, int resolution, QS
+ 
+     // load radio button
+     m_moveToolMode = static_cast<KisToolMove::MoveToolMode>(m_configGroup.readEntry("moveToolMode", 0));
++    // Krita Nova (patch 78): "Move and select layer with content" is the
++    // layer-with-content mode plus making that layer the active one
++    m_selectPickedLayer = m_configGroup.readEntry("novaSelectPickedLayer", false);
+     if(m_moveToolMode == KisToolMove::MoveSelectedLayer)
+         radioSelectedLayer->setChecked(true);
++    else if (m_moveToolMode == KisToolMove::MoveFirstLayer && m_selectPickedLayer)
++        radioFirstLayerSelect->setChecked(true);
+     else if (m_moveToolMode == KisToolMove::MoveFirstLayer)
+         radioFirstLayer->setChecked(true);
+     else
+@@ -103,22 +108,43 @@ void MoveToolOptionsWidget::on_cmbUnit_currentIndexChanged(int newUnit)
+ 
+ void MoveToolOptionsWidget::on_radioSelectedLayer_toggled(bool checked)
+ {
+-    Q_UNUSED(checked);
++    if (!checked) return; // Krita Nova: only the button being checked sets the mode
++    setSelectPickedLayer(false);
+     setMoveToolMode(KisToolMove::MoveSelectedLayer);
+ }
+ 
+ void MoveToolOptionsWidget::on_radioFirstLayer_toggled(bool checked)
+ {
+-    Q_UNUSED(checked);
++    if (!checked) return; // Krita Nova: only the button being checked sets the mode
++    setSelectPickedLayer(false);
+     setMoveToolMode(KisToolMove::MoveFirstLayer);
+ }
+ 
+ void MoveToolOptionsWidget::on_radioGroup_toggled(bool checked)
+ {
+-    Q_UNUSED(checked);
++    if (!checked) return; // Krita Nova: only the button being checked sets the mode
++    setSelectPickedLayer(false);
+     setMoveToolMode(KisToolMove::MoveGroup);
+ }
+ 
++void MoveToolOptionsWidget::on_radioFirstLayerSelect_toggled(bool checked)
++{
++    if (!checked) return;
++    setSelectPickedLayer(true);
++    setMoveToolMode(KisToolMove::MoveFirstLayer);
++}
++
++void MoveToolOptionsWidget::setSelectPickedLayer(bool value)
++{
++    m_selectPickedLayer = value;
++    m_configGroup.writeEntry("novaSelectPickedLayer", value);
++}
++
++bool MoveToolOptionsWidget::selectPickedLayer() const
++{
++    return m_selectPickedLayer;
++}
++
+ void MoveToolOptionsWidget::setMoveToolMode(KisToolMove::MoveToolMode newMode)
+ {
+     m_moveToolMode = newMode;
+diff --git a/plugins/tools/basictools/kis_tool_movetooloptionswidget.h b/plugins/tools/basictools/kis_tool_movetooloptionswidget.h
+index 69bf693..cc948ec 100644
+--- a/plugins/tools/basictools/kis_tool_movetooloptionswidget.h
++++ b/plugins/tools/basictools/kis_tool_movetooloptionswidget.h
+@@ -20,6 +20,7 @@ public:
+     int moveStep();
+     double moveScale();
+     KisToolMove::MoveToolMode mode();
++    bool selectPickedLayer() const; ///< Krita Nova (patch 78)
+     bool showCoordinates() const;
+ 
+ public Q_SLOTS:
+@@ -40,6 +41,8 @@ private Q_SLOTS:
+ 
+     void on_radioGroup_toggled(bool checked);
+ 
++    void on_radioFirstLayerSelect_toggled(bool checked);
++
+     void on_chkShowCoordinates_toggled(bool checked);
+ 
+     void on_translateXBox_valueChanged(int arg1);
+@@ -57,11 +60,13 @@ Q_SIGNALS:
+ private:
+     void updateUIUnit(int newUnit);
+     void setMoveToolMode(KisToolMove::MoveToolMode newMode);
++    void setSelectPickedLayer(bool value);
+     int m_resolution;
+     int m_moveStep;
+     int m_moveStepUnit;
+     qreal m_moveScale;
+     KisToolMove::MoveToolMode m_moveToolMode;
++    bool m_selectPickedLayer {false};
+     bool m_showCoordinates;
+ 
+     int m_TranslateX;
+diff --git a/plugins/tools/basictools/wdgmovetool.ui b/plugins/tools/basictools/wdgmovetool.ui
+index 834f0ea..bdec371 100644
+--- a/plugins/tools/basictools/wdgmovetool.ui
++++ b/plugins/tools/basictools/wdgmovetool.ui
+@@ -69,6 +69,16 @@
+        </widget>
+       </item>
+       <item row="2" column="0">
++       <widget class="QRadioButton" name="radioFirstLayerSelect">
++        <property name="toolTip">
++         <string>Move the first layer with visible content at the place where you click, and make it the active layer in the Layers docker.</string>
++        </property>
++        <property name="text">
++         <string>Move and &amp;select layer with content</string>
++        </property>
++       </widget>
++      </item>
++      <item row="3" column="0">
+        <widget class="QRadioButton" name="radioGroup">
+         <property name="toolTip">
+          <string>Move the group containing the first layer that contains visible content. Shortcut: ctrl-click.</string>
