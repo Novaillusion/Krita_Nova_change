@@ -1,0 +1,262 @@
+Krita Nova 81 - Right-click layer list for the Move tool and Select Shapes
+
+The "Layers Under Cursor" list of patch 80 (the layers with content under
+the cursor, top to bottom, the active one checked; picking one activates
+it) is now KisToolUtils::novaAddLayersUnderCursor() and is also shown:
+- by the Move tool, which had no right-click menu: right-click shows just
+  the list (like Photoshop's Move tool); nothing when no layer is there;
+- by the Select Shapes tool, above the Vector Shape Actions; on a layer
+  without shapes (where the arrow makes pixel selections, patch 79) the
+  selection actions follow instead of the vector shape actions.
+Right-click reaches tools through the "Show Popup Widget" canvas input
+action (right button in Krita's profiles).
+
+diff --git a/libs/ui/tool/kis_tool_select_base.h b/libs/ui/tool/kis_tool_select_base.h
+index 29a58d1..e94c2d9 100644
+--- a/libs/ui/tool/kis_tool_select_base.h
++++ b/libs/ui/tool/kis_tool_select_base.h
+@@ -528,40 +528,7 @@ public:
+     // the layers that have visible content under the cursor, top to bottom;
+     // picking one makes it the active layer
+     void novaAddLayersUnderCursor(QMenu *menu, KisCanvas2 *kisCanvas) {
+-        if (!menu || !kisCanvas || !kisCanvas->viewManager()) return;
+-        KisImageSP image = this->image();
+-        if (!image || !image->root()) return;
+-
+-        const QPoint pos = m_currentPos.toPoint();
+-        if (!image->bounds().contains(pos)) return;
+-
+-        const KisNodeList found =
+-            KisToolUtils::findNodes(image->root()->firstChild(), pos, false, false);
+-        if (found.isEmpty()) return;
+-
+-        QPointer<KisViewManager> view = kisCanvas->viewManager();
+-        const KisNodeSP active = this->currentNode();
+-        QAction *before = menu->actions().value(0);
+-
+-        menu->insertSection(before, i18n("Layers Under Cursor"));
+-
+-        // findNodes() lists bottom to top: reverse, so the menu reads like
+-        // the Layers docker
+-        for (int i = found.size() - 1; i >= 0; --i) {
+-            KisNodeSP node = found[i];
+-            int indentation = -1;
+-            for (KisNodeSP n = node; n->parent(); n = n->parent()) ++indentation;
+-
+-            QAction *action = new QAction(QString(4 * qMax(0, indentation), ' ') + node->name(), menu);
+-            action->setCheckable(true);
+-            action->setChecked(node == active);
+-            QObject::connect(action, &QAction::triggered, [view, node]() {
+-                if (view && view->nodeManager() && node->graphListener()) {
+-                    view->nodeManager()->slotImageRequestNodeReselection(node, {node});
+-                }
+-            });
+-            menu->insertAction(before, action);
+-        }
++        KisToolUtils::novaAddLayersUnderCursor(menu, kisCanvas, m_currentPos.toPoint());
+     }
+ 
+     KisPopupWidgetInterface* popupWidget() override
+diff --git a/libs/ui/tool/kis_tool_utils.cpp b/libs/ui/tool/kis_tool_utils.cpp
+index 7e0a3db..112993d 100644
+--- a/libs/ui/tool/kis_tool_utils.cpp
++++ b/libs/ui/tool/kis_tool_utils.cpp
+@@ -36,9 +36,50 @@
+ #include "KisAnimAutoKey.h"
+ 
+ #include <QApplication>
++#include <QMenu>
++#include <QAction>
++#include <QPointer>
++#include <klocalizedstring.h>
+ 
+ namespace KisToolUtils {
+ 
++    int novaAddLayersUnderCursor(QMenu *menu, KisCanvas2 *canvas, const QPoint &pixelPos)
++    {
++        if (!menu || !canvas || !canvas->viewManager()) return 0;
++        KisImageSP image = canvas->image();
++        if (!image || !image->root()) return 0;
++        if (!image->bounds().contains(pixelPos)) return 0;
++
++        const KisNodeList found = findNodes(image->root()->firstChild(), pixelPos, false, false);
++        if (found.isEmpty()) return 0;
++
++        QPointer<KisViewManager> view = canvas->viewManager();
++        const KisNodeSP active = view->activeNode();
++        QAction *before = menu->actions().value(0);
++
++        menu->insertSection(before, i18n("Layers Under Cursor"));
++
++        // findNodes() lists bottom to top: reverse, so the menu reads like
++        // the Layers docker
++        for (int i = found.size() - 1; i >= 0; --i) {
++            KisNodeSP node = found[i];
++            int indentation = -1;
++            for (KisNodeSP n = node; n->parent(); n = n->parent()) ++indentation;
++
++            QAction *action = new QAction(QString(4 * qMax(0, indentation), ' ') + node->name(), menu);
++            action->setCheckable(true);
++            action->setChecked(node == active);
++            QObject::connect(action, &QAction::triggered, [view, node]() {
++                if (view && view->nodeManager() && node->graphListener()) {
++                    view->nodeManager()->slotImageRequestNodeReselection(node, {node});
++                }
++            });
++            menu->insertAction(before, action);
++        }
++        if (before) menu->insertSeparator(before);
++        return found.size();
++    }
++
+     bool sampleColor(KoColor &out_color, KisPaintDeviceSP dev, const QPoint &pos,
+                    KoColor const *const blendColor, int radius, int blend, bool pure)
+     {
+diff --git a/libs/ui/tool/kis_tool_utils.h b/libs/ui/tool/kis_tool_utils.h
+index 777ab00..31efd98 100644
+--- a/libs/ui/tool/kis_tool_utils.h
++++ b/libs/ui/tool/kis_tool_utils.h
+@@ -15,6 +15,8 @@ class QPoint;
+ class KoColor;
+ class KoCanvasBase;
+ class QPainterPath;
++class QMenu;
++class KisCanvas2;
+ 
+ namespace KisToolUtils {
+ 
+@@ -63,6 +65,14 @@ bool KRITAUI_EXPORT sampleColor(KoColor &out_color, KisPaintDeviceSP dev, const
+  */
+ KisNodeSP KRITAUI_EXPORT findNode(KisNodeSP node, const QPoint &point, bool wholeGroup, bool editableOnly = true);
+ 
++/**
++ * Krita Nova: put a "Layers Under Cursor" section at the top of \p menu:
++ * the layers with visible content at \p pixelPos, top to bottom as in the
++ * Layers docker; picking one makes it the active layer. Returns the number
++ * of layers added.
++ */
++int KRITAUI_EXPORT novaAddLayersUnderCursor(QMenu *menu, KisCanvas2 *canvas, const QPoint &pixelPos);
++
+ KisNodeList KRITAUI_EXPORT findNodes(KisNodeSP node, const QPoint &point, bool wholeGroup,
+                                      bool includeGroups = true, bool editableOnly = true);
+ 
+diff --git a/plugins/tools/basictools/kis_tool_move.cc b/plugins/tools/basictools/kis_tool_move.cc
+index 800487c..ec54146 100644
+--- a/plugins/tools/basictools/kis_tool_move.cc
++++ b/plugins/tools/basictools/kis_tool_move.cc
+@@ -876,6 +876,22 @@ bool KisToolMove::novaSelectLayerUnder(const QPoint &pos)
+     return true;
+ }
+ 
++QMenu *KisToolMove::popupActionsMenu()
++{
++    // Krita Nova (patch 81): like Photoshop's Move tool, right-click lists
++    // the layers with content under the cursor; picking one activates it
++    if (mode() == KisTool::PAINT_MODE) return nullptr;
++    KisCanvas2 *kisCanvas = dynamic_cast<KisCanvas2 *>(canvas());
++    if (!kisCanvas) return nullptr;
++
++    if (!m_novaLayersMenu) m_novaLayersMenu.reset(new QMenu());
++    m_novaLayersMenu->clear();
++    if (!KisToolUtils::novaAddLayersUnderCursor(m_novaLayersMenu.data(), kisCanvas, m_lastCursorPos)) {
++        return nullptr;
++    }
++    return m_novaLayersMenu.data();
++}
++
+ QWidget* KisToolMove::createOptionWidget()
+ {
+     return m_optionsWidget;
+diff --git a/plugins/tools/basictools/kis_tool_move.h b/plugins/tools/basictools/kis_tool_move.h
+index 1df72ca..59adc46 100644
+--- a/plugins/tools/basictools/kis_tool_move.h
++++ b/plugins/tools/basictools/kis_tool_move.h
+@@ -19,6 +19,8 @@
+ #include <QGroupBox>
+ #include <QRadioButton>
+ #include <QPointer>
++#include <QMenu>
++#include <QScopedPointer>
+ #include "KisToolChangesTracker.h"
+ #include "kis_signal_compressor.h"
+ #include "kis_signal_auto_connection.h"
+@@ -96,6 +98,7 @@ public:
+     void paint(QPainter& gc, const KoViewConverter &converter) override;
+ 
+     QWidget *createOptionWidget() override;
++    QMenu *popupActionsMenu() override; ///< Krita Nova (patch 81)
+     void updateUIUnit(int newUnit);
+ 
+     MoveToolMode moveToolMode() const;
+@@ -166,6 +169,7 @@ private:
+     bool m_currentlyUsingSelection {false};
+     bool m_duplicating {false}; ///< Krita Nova: the current stroke moves a duplicate (Alt is not precision mode)
+     bool novaSelectLayerUnder(const QPoint &pos); ///< Krita Nova (patch 78)
++    QScopedPointer<QMenu> m_novaLayersMenu; ///< Krita Nova (patch 81): right-click layer list
+     KisNodeList m_pendingReselection; ///< Krita Nova (patch 40): copies to select on release
+     MoveToolMode m_currentMode {MoveSelectedLayer};
+ 
+diff --git a/plugins/tools/defaulttool/defaulttool/DefaultTool.cpp b/plugins/tools/defaulttool/defaulttool/DefaultTool.cpp
+index 25d9ad9..9e7339a 100644
+--- a/plugins/tools/defaulttool/defaulttool/DefaultTool.cpp
++++ b/plugins/tools/defaulttool/defaulttool/DefaultTool.cpp
+@@ -55,6 +55,7 @@
+ #include "KisViewManager.h"
+ #include "kis_canvas2.h"
+ #include "kis_selection_tool_helper.h"
++#include "kis_tool_utils.h"
+ #include "kis_pixel_selection.h"
+ #include "kis_default_bounds.h"
+ #include "kis_image.h"
+@@ -1244,6 +1245,7 @@ void DefaultTool::mousePressEvent(KoPointerEvent *event)
+ 
+ void DefaultTool::mouseMoveEvent(KoPointerEvent *event)
+ {
++    m_novaLastDocPos = event->point;
+     if (m_novaPixelSelecting) {
+         KisCanvas2 *kiscanvas = static_cast<KisCanvas2 *>(canvas());
+         const QRectF before = novaPixelRectInDocument();
+@@ -2337,6 +2339,21 @@ KoToolSelection *DefaultTool::selection()
+ 
+ QMenu* DefaultTool::popupActionsMenu()
+ {
++    // Krita Nova (patch 81): the layers under the cursor come first; on a
++    // layer without shapes (where the arrow makes pixel selections) the
++    // selection actions follow instead of the vector shape actions
++    KisCanvas2 *kisCanvas = dynamic_cast<KisCanvas2 *>(canvas());
++    QPoint novaPixelPos;
++    if (kisCanvas && kisCanvas->image()) {
++        novaPixelPos = kisCanvas->image()->documentToPixel(m_novaLastDocPos).toPoint();
++    }
++    if (kisCanvas && !isValidForCurrentLayer()) {
++        if (m_novaPixelSelecting) return nullptr;
++        m_novaPixelMenu.reset(KisSelectionToolHelper::getSelectionContextMenu(kisCanvas));
++        KisToolUtils::novaAddLayersUnderCursor(m_novaPixelMenu.data(), kisCanvas, novaPixelPos);
++        return m_novaPixelMenu.data();
++    }
++
+     if (m_contextMenu) {
+         m_contextMenu->clear();
+ 
+@@ -2405,6 +2422,8 @@ QMenu* DefaultTool::popupActionsMenu()
+         text->addAction(action("flow_shape_order_earlier"));
+         text->addAction(action("flow_shape_order_later"));
+         text->addAction(action("flow_shape_order_front"));
++
++        KisToolUtils::novaAddLayersUnderCursor(m_contextMenu.data(), kisCanvas, novaPixelPos);
+     }
+ 
+     return m_contextMenu.data();
+diff --git a/plugins/tools/defaulttool/defaulttool/DefaultTool.h b/plugins/tools/defaulttool/defaulttool/DefaultTool.h
+index f6d5e2e..7a983d8 100644
+--- a/plugins/tools/defaulttool/defaulttool/DefaultTool.h
++++ b/plugins/tools/defaulttool/defaulttool/DefaultTool.h
+@@ -198,6 +198,8 @@ private:
+     QPointF m_novaPixelEnd;     ///< image pixels
+     void novaFinishPixelSelection(Qt::KeyboardModifiers modifiers);
+     QRectF novaPixelRectInDocument() const;
++    QPointF m_novaLastDocPos;   ///< Krita Nova (patch 81): for the right-click layer list
++    QScopedPointer<QMenu> m_novaPixelMenu; ///< right-click menu on a layer without shapes
+     QPointF m_selectionBox[8];
+     QPolygonF m_selectionOutline;
+     QPointF m_lastPoint;
