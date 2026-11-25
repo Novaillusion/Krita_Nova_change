@@ -17,13 +17,15 @@ on:
         description: Krita commit to build (empty = the one in KRITA_REF)
         type: string
         default: ''
-  push:
-    branches: [main]
-    paths:
-      - 'patches/**'
-      - 'build/**'
-      - 'KRITA_REF'
-      - '.github/workflows/android-apk.yml'
+  # Paused: Windows is built first. Restoring the push trigger below (that
+  # commit touches this file) starts the Android build.
+  # push:
+  #   branches: [main]
+  #   paths:
+  #     - 'patches/**'
+  #     - 'build/**'
+  #     - 'KRITA_REF'
+  #     - '.github/workflows/android-apk.yml'
 
 concurrency:
   group: apk-${{ github.ref }}-${{ inputs.abi || 'arm64-v8a' }}
