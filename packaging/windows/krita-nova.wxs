@@ -2,14 +2,17 @@
   Krita Nova MSI installer (WiX Toolset v5).
 
   Built by .github/workflows/windows.yml from the unpacked portable package:
-    wix build krita-nova.wxs -arch x64 -d AppDir=<package dir> -d Version=<a.b.c> -o KritaNova.msi
+    wix build krita-nova.wxs -arch x64 -ext WixToolset.UI.wixext -d AppDir=<package dir> -d Version=<a.b.c> -o KritaNova.msi
 
-  - Installs for all users to "C:\Program Files\Krita Nova" and registers
+  - A setup wizard lets you pick the install folder (default
+    "C:\Program Files\Krita Nova"); updates reuse the folder of the
+    installed copy. Installs for all users and registers
     "Krita Nova" in Settings > Apps (Add/Remove Programs), with its own
     Start menu and desktop shortcuts. It does not touch a regular Krita.
   - The UpgradeCode never changes: installing a newer build replaces the old one.
 -->
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="Krita Nova"
            Manufacturer="Krita Nova"
            Version="$(var.Version)"
@@ -26,6 +29,16 @@
     <Property Id="ARPPRODUCTICON" Value="KritaNovaIcon" />
     <Property Id="ARPCOMMENTS" Value="Krita Nova, a customised build of the Krita painting program" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/Novaillusion/Krita_Nova_change" />
+
+    <!-- setup wizard: welcome, license, install folder, install -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(sys.SOURCEFILEDIR)license.rtf" />
+
+    <!-- an update installs where the current copy is -->
+    <Property Id="INSTALLFOLDER" Secure="yes">
+      <RegistrySearch Id="PreviousInstallDir" Root="HKLM" Key="Software\Krita Nova"
+                      Name="InstallDir" Type="raw" Bitness="always64" />
+    </Property>
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Krita Nova" />
@@ -47,6 +60,8 @@
                   Icon="KritaNovaIcon" />
         <RegistryValue Root="HKLM" Key="Software\Krita Nova" Name="StartMenuShortcut"
                        Type="integer" Value="1" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="Software\Krita Nova" Name="InstallDir"
+                       Type="string" Value="[INSTALLFOLDER]" />
       </Component>
       <Component Id="DesktopShortcut" Directory="DesktopFolder" Guid="b7e2c9a4-5d1f-4f3a-8c6e-0d9a1b2c3e44">
         <Shortcut Id="KritaNovaDesktop" Name="Krita Nova"

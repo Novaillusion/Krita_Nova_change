@@ -210,6 +210,7 @@ jobs:
         run: |
           dotnet tool install --global wix --version 5.0.2
           $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
+          wix extension add -g WixToolset.UI.wixext/5.0.2
           $zip = Get-ChildItem -Filter 'krita-x64-*.zip' | Where-Object { $_.Name -notmatch 'dbg' } | Select-Object -First 1
           Expand-Archive $zip.FullName C:\knova-msi
           $app = (Get-ChildItem C:\knova-msi -Recurse -Filter krita.exe | Where-Object { $_.Directory.Name -eq 'bin' } | Select-Object -First 1).Directory.Parent.FullName
@@ -219,7 +220,7 @@ jobs:
           $minor = [regex]::Match($cm, 'set\(KRITA_STABLE_VERSION_MINOR (\d+)\)').Groups[1].Value
           $ver = "$major.$minor.${{ github.run_number }}"
           "MSI version $ver from $app"
-          wix build "$env:GITHUB_WORKSPACE\packaging\windows\krita-nova.wxs" -arch x64 -d "AppDir=$app" -d "Version=$ver" -o "C:\k\KritaNova-$ver-x64.msi"
+          wix build "$env:GITHUB_WORKSPACE\packaging\windows\krita-nova.wxs" -arch x64 -ext WixToolset.UI.wixext -d "AppDir=$app" -d "Version=$ver" -o "C:\k\KritaNova-$ver-x64.msi"
           Get-ChildItem C:\k\*.msi | Format-Table Name, Length
 
       - name: Upload Krita Nova (Windows installer)
