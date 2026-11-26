@@ -2,7 +2,9 @@ name: Krita Nova Windows build
 
 # Builds Krita (Qt 5, x64) with every patch in patches/ applied, using KDE's own
 # Windows CI scripts and prebuilt dependencies (teams/ci-artifacts/krita-windows),
-# and uploads a portable zip: unzip it anywhere and run bin\krita.exe.
+# and uploads a portable zip (unzip it anywhere and run bin\krita.exe) and an
+# MSI installer that installs and registers the app as "Krita Nova"
+# (packaging/windows/krita-nova.wxs).
 
 on:
   workflow_dispatch:
@@ -22,6 +24,7 @@ on:
       - 'patches/**'
       - 'KRITA_REF'
       - '.github/workflows/windows.yml'
+      - 'packaging/windows/**'
 
 concurrency:
   group: windows-${{ github.ref }}
@@ -199,6 +202,31 @@ jobs:
         with:
           name: krita-nova-windows-x64-${{ env.KRITA_SHA }}
           path: C:\k\krita-x64-*.zip
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Build MSI installer (Krita Nova)
+        working-directory: ${{ env.SRC }}
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
+          $zip = Get-ChildItem -Filter 'krita-x64-*.zip' | Where-Object { $_.Name -notmatch 'dbg' } | Select-Object -First 1
+          Expand-Archive $zip.FullName C:\knova-msi
+          $app = (Get-ChildItem C:\knova-msi -Recurse -Filter krita.exe | Where-Object { $_.Directory.Name -eq 'bin' } | Select-Object -First 1).Directory.Parent.FullName
+          # MSI versions are numeric: Krita's major.minor + this repo's run number
+          $cm = Get-Content CMakeLists.txt -Raw
+          $major = [regex]::Match($cm, 'set\(KRITA_STABLE_VERSION_MAJOR (\d+)\)').Groups[1].Value
+          $minor = [regex]::Match($cm, 'set\(KRITA_STABLE_VERSION_MINOR (\d+)\)').Groups[1].Value
+          $ver = "$major.$minor.${{ github.run_number }}"
+          "MSI version $ver from $app"
+          wix build "$env:GITHUB_WORKSPACE\packaging\windows\krita-nova.wxs" -arch x64 -d "AppDir=$app" -d "Version=$ver" -o "C:\k\KritaNova-$ver-x64.msi"
+          Get-ChildItem C:\k\*.msi | Format-Table Name, Length
+
+      - name: Upload Krita Nova (Windows installer)
+        uses: actions/upload-artifact@v4
+        with:
+          name: krita-nova-windows-x64-msi-${{ env.KRITA_SHA }}
+          path: C:\k\KritaNova-*.msi
           if-no-files-found: error
           compression-level: 0
 

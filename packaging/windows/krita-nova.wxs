@@ -1,0 +1,74 @@
+<!--
+  Krita Nova MSI installer (WiX Toolset v5).
+
+  Built by .github/workflows/windows.yml from the unpacked portable package:
+    wix build krita-nova.wxs -arch x64 -d AppDir=<package dir> -d Version=<a.b.c> -o KritaNova.msi
+
+  - Installs for all users to "C:\Program Files\Krita Nova" and registers
+    "Krita Nova" in Settings > Apps (Add/Remove Programs), with its own
+    Start menu and desktop shortcuts. It does not touch a regular Krita.
+  - The UpgradeCode never changes: installing a newer build replaces the old one.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Krita Nova"
+           Manufacturer="Krita Nova"
+           Version="$(var.Version)"
+           UpgradeCode="f1785f24-9144-4421-9f64-a30511e6040e"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of Krita Nova is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" MaximumUncompressedMediaSize="1024" />
+
+    <!-- Settings > Apps entry -->
+    <Icon Id="KritaNovaIcon" SourceFile="$(var.AppDir)\bin\krita.exe" />
+    <Property Id="ARPPRODUCTICON" Value="KritaNovaIcon" />
+    <Property Id="ARPCOMMENTS" Value="Krita Nova, a customised build of the Krita painting program" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/Novaillusion/Krita_Nova_change" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Krita Nova" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+    <StandardDirectory Id="DesktopFolder" />
+
+    <!-- every file of the portable package -->
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Files Include="$(var.AppDir)\**" />
+    </ComponentGroup>
+
+    <ComponentGroup Id="Shortcuts">
+      <Component Id="StartMenuShortcut" Directory="ProgramMenuFolder" Guid="6a3d1f0e-3b52-4c8e-9a51-2f7b8d0c4e11">
+        <Shortcut Id="KritaNovaStartMenu" Name="Krita Nova"
+                  Description="Krita Nova painting program"
+                  Target="[INSTALLFOLDER]bin\krita.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="KritaNovaIcon" />
+        <RegistryValue Root="HKLM" Key="Software\Krita Nova" Name="StartMenuShortcut"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="DesktopShortcut" Directory="DesktopFolder" Guid="b7e2c9a4-5d1f-4f3a-8c6e-0d9a1b2c3e44">
+        <Shortcut Id="KritaNovaDesktop" Name="Krita Nova"
+                  Description="Krita Nova painting program"
+                  Target="[INSTALLFOLDER]bin\krita.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="KritaNovaIcon" />
+        <RegistryValue Root="HKLM" Key="Software\Krita Nova" Name="DesktopShortcut"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <!-- "App Paths": lets Win+R / Start find it as KritaNova.exe -->
+      <Component Id="AppPath" Directory="INSTALLFOLDER" Guid="c41f8e2d-7a6b-4d09-b3e5-8f2a6c1d9b77">
+        <RegistryKey Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\KritaNova.exe">
+          <RegistryValue Type="string" Value="[INSTALLFOLDER]bin\krita.exe" KeyPath="yes" />
+          <RegistryValue Name="Path" Type="string" Value="[INSTALLFOLDER]bin" />
+        </RegistryKey>
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="Krita Nova">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentGroupRef Id="Shortcuts" />
+    </Feature>
+  </Package>
+</Wix>
