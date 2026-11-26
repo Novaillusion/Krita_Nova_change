@@ -1,0 +1,105 @@
+Krita Nova 83 - preset previews of color-tip brushes show the tip's colors
+
+The live previews (patch 02) drew every brush in the theme's text color.
+Brushes whose tip is a color image (an image or animated brush with real
+color, not a gray tip) now show:
+- the small tip icon in the tip's own colors;
+- the stroke in the tip's colors: a tip used as "Color image" paints its
+  own colors, a tip used as a mask or lightness map is painted with the
+  tip's average color instead of the theme color.
+Gray tips, gradient-map tips and the smudge / deform / filter engines are
+drawn as before.
+
+diff --git a/libs/ui/widgets/kis_preset_stroke_renderer.cpp b/libs/ui/widgets/kis_preset_stroke_renderer.cpp
+index 5911ea6..7c4ec08 100644
+--- a/libs/ui/widgets/kis_preset_stroke_renderer.cpp
++++ b/libs/ui/widgets/kis_preset_stroke_renderer.cpp
+@@ -152,6 +152,49 @@ QImage KisPresetStrokeRenderer::tipImage(KisPaintOpPresetSP preset)
+     return QImage();
+ }
+ 
++// Krita Nova (patch 83): brushes whose tip is a color image.
++namespace {
++KisBrushSP novaBrushOf(KisPaintOpPresetSP preset)
++{
++    if (!preset || !preset->settings()) return KisBrushSP();
++    const QString definition = preset->settings()->getString("brush_definition");
++    if (definition.isEmpty()) return KisBrushSP();
++    QDomDocument doc;
++    doc.setContent(definition);
++    const QDomElement element = doc.firstChildElement("Brush");
++    if (element.isNull()) return KisBrushSP();
++    return KisBrush::fromXML(element, KisGlobalResourcesInterface::instance());
++}
++
++/// true if the brush tip is a color image (not a gray or alpha-only tip);
++/// \p average gets its alpha-weighted mean color
++bool novaColorTip(KisBrushSP brush, QColor *average)
++{
++    if (!brush) return false;
++    if (brush->brushType() != IMAGE && brush->brushType() != PIPE_IMAGE) return false;
++    QImage tip = brush->image();
++    if (tip.isNull()) return false;
++    tip = tip.scaled(64, 64, Qt::KeepAspectRatio, Qt::FastTransformation).convertToFormat(QImage::Format_ARGB32);
++
++    double r = 0, g = 0, b = 0, weight = 0, saturated = 0;
++    for (int y = 0; y < tip.height(); y++) {
++        const QRgb *line = reinterpret_cast<const QRgb *>(tip.constScanLine(y));
++        for (int x = 0; x < tip.width(); x++) {
++            const int a = qAlpha(line[x]);
++            if (a < 16) continue;
++            const QColor c = QColor::fromRgb(line[x]);
++            r += c.red() * a; g += c.green() * a; b += c.blue() * a;
++            weight += a;
++            if (c.hsvSaturation() > 40 && c.value() > 30) saturated += a;
++        }
++    }
++    // gray tips (most image brushes) keep the theme color
++    if (weight <= 0 || saturated / weight < 0.05) return false;
++    if (average) *average = QColor(int(r / weight), int(g / weight), int(b / weight));
++    return true;
++}
++}
++
+ QImage KisPresetStrokeRenderer::buildTipImage(KisPaintOpPresetSP preset)
+ {
+     QImage result;
+@@ -185,6 +228,19 @@ QImage KisPresetStrokeRenderer::buildTipImage(KisPaintOpPresetSP preset)
+         // KIS_SAFE_ASSERT in KisBrush::brushTipImage(). image() is always set: KisAutoBrush stores
+         // createBrushPreview(128) there, other brushes get it from setBrushTipImage().
+         QImage tip = brush ? brush->image() : QImage();
++
++        // Krita Nova (patch 83): a color tip is shown in its own colors
++        if (!tip.isNull() && novaColorTip(brush, nullptr)) {
++            const int S = 128;
++            const QImage scaled = tip.scaled(S, S, Qt::KeepAspectRatio, Qt::SmoothTransformation)
++                                      .convertToFormat(QImage::Format_ARGB32_Premultiplied);
++            result = QImage(S, S, QImage::Format_ARGB32_Premultiplied);
++            result.fill(Qt::transparent);
++            QPainter p(&result);
++            p.drawImage((S - scaled.width()) / 2, (S - scaled.height()) / 2, scaled);
++            return result;
++        }
++
+         if (!tip.isNull()) {
+             const int S = 128;
+             tip = tip.scaled(S, S, Qt::KeepAspectRatio, Qt::SmoothTransformation)
+@@ -282,6 +338,18 @@ void KisPresetStrokeRenderer::startRender(const Job &job)
+     const QString engineId = job.preset->paintOp().id();
+     paintBackground(engineId);
+ 
++    // Krita Nova (patch 83): a brush with a color tip strokes in the tip's
++    // color, not the theme color. A tip used as "Color image" already
++    // paints its own colors; one used as a mask or lightness map is painted
++    // with the tip's average color.
++    if (engineId != "colorsmudge" && engineId != "deformbrush" && engineId != "filter") {
++        QColor tipColor;
++        KisBrushSP brush = novaBrushOf(job.preset);
++        if (novaColorTip(brush, &tipColor) && brush->brushApplication() != GRADIENTMAP) {
++            m_paintColor = KoColor(tipColor, m_colorSpace);
++        }
++    }
++
+     // Keep the brush inside the row: at most about half the row height.
+     qreal brushSize = qBound(3.0, job.preset->settings()->paintOpSize(), qMax(3.0, h * 0.5));
+     if (engineId == "sketchbrush" || engineId == "spraybrush") {
