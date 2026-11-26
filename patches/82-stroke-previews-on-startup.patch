@@ -1,0 +1,64 @@
+Krita Nova 82 - brush stroke previews show as soon as the app opens
+
+The preset list's live stroke previews (patch 02) stayed empty after
+startup: the list is painted before a canvas exists, the renderer has no
+canvas resources then and returned nothing without queuing a render, and
+nothing asked again once the canvas arrived. Now
+KisPresetChooser::setResourceManager() drops the cached strokes and
+repaints the list, which queues the renders. The renderer keeps the
+resource provider in a QPointer and stops rendering if its canvas closes.
+
+diff --git a/libs/ui/widgets/kis_preset_chooser.cpp b/libs/ui/widgets/kis_preset_chooser.cpp
+index 867aaf6..d4a5ccf 100644
+--- a/libs/ui/widgets/kis_preset_chooser.cpp
++++ b/libs/ui/widgets/kis_preset_chooser.cpp
+@@ -353,6 +353,14 @@ void KisPresetChooser::slotCurrentPresetChanged()
+ void KisPresetChooser::setResourceManager(KoCanvasResourceProvider *resourceManager)
+ {
+     m_renderer->setResourceManager(resourceManager);
++
++    // Krita Nova: rows painted before the canvas existed (while the app
++    // opens) got no stroke and nothing asked for one again: repaint now,
++    // paint() queues the renders
++    if (resourceManager) {
++        m_renderer->invalidateAll();
++        m_chooser->itemView()->viewport()->update();
++    }
+ }
+ 
+ void KisPresetChooser::slotModelDataChanged(const QModelIndex &topLeft, const QModelIndex &bottomRight, const QVector<int> &roles)
+diff --git a/libs/ui/widgets/kis_preset_stroke_renderer.cpp b/libs/ui/widgets/kis_preset_stroke_renderer.cpp
+index a23e783..5911ea6 100644
+--- a/libs/ui/widgets/kis_preset_stroke_renderer.cpp
++++ b/libs/ui/widgets/kis_preset_stroke_renderer.cpp
+@@ -229,6 +229,7 @@ QImage KisPresetStrokeRenderer::buildTipImage(KisPaintOpPresetSP preset)
+ void KisPresetStrokeRenderer::renderNext()
+ {
+     if (m_inProgress || m_queue.isEmpty()) return;
++    if (!m_resourceManager) return; // the canvas went away; the next one re-queues
+ 
+     const Job job = m_queue.dequeue();
+     m_queued.remove(job.id);
+diff --git a/libs/ui/widgets/kis_preset_stroke_renderer.h b/libs/ui/widgets/kis_preset_stroke_renderer.h
+index 5bbd05b..dd6f23d 100644
+--- a/libs/ui/widgets/kis_preset_stroke_renderer.h
++++ b/libs/ui/widgets/kis_preset_stroke_renderer.h
+@@ -6,6 +6,8 @@
+ #define KIS_PRESET_STROKE_RENDERER_H
+ 
+ #include <QObject>
++#include <QPointer>
++#include <KoCanvasResourceProvider.h>
+ #include <QImage>
+ #include <QSize>
+ #include <QHash>
+@@ -70,7 +72,8 @@ private:
+     QImage buildTipImage(KisPaintOpPresetSP preset);
+     void paintBackground(const QString &engineId);
+ 
+-    KoCanvasResourceProvider *m_resourceManager {nullptr};
++    // Krita Nova: QPointer, the provider goes away with its canvas
++    QPointer<KoCanvasResourceProvider> m_resourceManager;
+ 
+     QHash<int, QImage> m_tipCache;   // null image = no brush tip
+     QSet<int> m_tipPending;          // tips queued for building outside of paint()
