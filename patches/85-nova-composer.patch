@@ -1,0 +1,1879 @@
+Krita Nova 85 - Composer: pie menus, cursor trackers, temporary switches, rotation selector
+
+Native versions of Shortcut Composer's features (patch 84 bundles the Python
+plugin, which cannot run on Android), in libs/ui/nova/KisNovaComposer:
+
+- pie menus: Tools, Blending Modes, Brush Presets of a tag (with a "Tag..."
+  slice and a Brush Preset Tag pie), Opacity, and the Composer menu that
+  opens all of them plus the rotation selector, eraser and alpha lock;
+  hold, point at a slice, release; or tap, then tap a slice (Esc, the
+  middle or outside closes it). The current choice is tinted.
+- cursor trackers: hold and drag - brush size (log scale, 150 px doubles
+  it), opacity and flow (400 px for 0-100 %), active layer (every 40 px up
+  / down), undo history (every 30 px left undoes, right redoes); the value
+  shows in a floating message; applied at most every 30 ms.
+- temporary switches: eraser, alpha lock, Move, Transform and Color Sampler
+  tools - on while held, back on release; a tap toggles instead.
+- rotation selector: a dial; the pointer's angle around it is the canvas
+  rotation, snapping to every 15 degrees within 4; tapped, it stays open:
+  drag on it, tap its middle to reset the rotation.
+
+Triggers:
+- keyboard: Configure Krita > Keyboard Shortcuts > "Krita Nova Composer"
+  (krita/novacomposer.action, no defaults): hold the key and move, release;
+- canvas input: Configure Krita > Canvas Input Settings > "Krita Nova
+  Composer" (KisNovaComposerAction): any mouse / pen button (the pen's side
+  button), key, or touch gesture; the bundled profiles open the Composer
+  menu with a five-finger tap (custom profiles need it added);
+- the Brush Panel: a Composer button under the pop-up palette button.
+
+The pies and the dial are child widgets drawn over the main window.
+
+diff --git a/krita/CMakeLists.txt b/krita/CMakeLists.txt
+index 30f8d99..7f8d59c 100644
+--- a/krita/CMakeLists.txt
++++ b/krita/CMakeLists.txt
+@@ -275,7 +275,7 @@ else()
+ endif()
+ install(FILES org.kde.krita.desktop DESTINATION ${KDE_INSTALL_APPDIR})
+ 
+-set(actions_files krita.action kritamenu.action)
++set(actions_files krita.action kritamenu.action novacomposer.action) # Krita Nova: Composer shortcuts
+ if (ANDROID)
+     # In-app-purchase-related actions are only relevant on Android. They
+     # wouldn't show up in the menu anyway because the application doesn't
+diff --git a/krita/data/input/clipstudiopaintcompatible.profile b/krita/data/input/clipstudiopaintcompatible.profile
+index 0e5a21d..36f2e6a 100644
+--- a/krita/data/input/clipstudiopaintcompatible.profile
++++ b/krita/data/input/clipstudiopaintcompatible.profile
+@@ -83,3 +83,6 @@ version=7
+ 
+ [Brush Size and Opacity]
+ 0={0;4;[];0;0;8}
++
++[Krita Nova Composer]
++0={0;4;[];0;0;5}
+diff --git a/krita/data/input/kritadefault.profile b/krita/data/input/kritadefault.profile
+index 7ee44a4..db96090 100644
+--- a/krita/data/input/kritadefault.profile
++++ b/krita/data/input/kritadefault.profile
+@@ -83,3 +83,6 @@ version=7
+ 
+ [Brush Size and Opacity]
+ 0={0;4;[];0;0;8}
++
++[Krita Nova Composer]
++0={0;4;[];0;0;5}
+diff --git a/krita/data/input/painttoolsaicompatible.profile b/krita/data/input/painttoolsaicompatible.profile
+index b961db7..8eccc63 100644
+--- a/krita/data/input/painttoolsaicompatible.profile
++++ b/krita/data/input/painttoolsaicompatible.profile
+@@ -81,3 +81,6 @@ version=7
+ 
+ [Brush Size and Opacity]
+ 0={0;4;[];0;0;8}
++
++[Krita Nova Composer]
++0={0;4;[];0;0;5}
+diff --git a/krita/data/input/photoshopcompatible.profile b/krita/data/input/photoshopcompatible.profile
+index b69a12a..93b0c32 100644
+--- a/krita/data/input/photoshopcompatible.profile
++++ b/krita/data/input/photoshopcompatible.profile
+@@ -78,3 +78,6 @@ version=7
+ 
+ [Brush Size and Opacity]
+ 0={0;4;[];0;0;8}
++
++[Krita Nova Composer]
++0={0;4;[];0;0;5}
+diff --git a/krita/data/input/tabletpro.profile b/krita/data/input/tabletpro.profile
+index d74af2e..fafeefa 100644
+--- a/krita/data/input/tabletpro.profile
++++ b/krita/data/input/tabletpro.profile
+@@ -81,3 +81,6 @@ version=7
+ 
+ [Brush Size and Opacity]
+ 0={0;4;[];0;0;8}
++
++[Krita Nova Composer]
++0={0;4;[];0;0;5}
+diff --git a/krita/novacomposer.action b/krita/novacomposer.action
+new file mode 100644
+index 0000000..0bccf92
+--- /dev/null
++++ b/krita/novacomposer.action
+@@ -0,0 +1,213 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!-- Krita Nova (patch 85): keyboard shortcuts of the Composer (pie menus, trackers,
++     temporary switches, rotation selector). Hold the key, move the pointer, release.
++     None has a default shortcut. -->
++<ActionCollection version="2" name="Krita Nova Composer">
++  <Actions category="Krita Nova Composer">
++    <text>Krita Nova Composer</text>
++    <Action name="nova_composer_launcher">
++      <icon></icon>
++      <text>Composer Menu (all pie menus)</text>
++      <whatsThis/>
++      <toolTip>Composer Menu (all pie menus)</toolTip>
++      <iconText>Composer Menu (all pie menus)</iconText>
++      <activationFlags>0</activationFlags>
++      <activationConditions>0</activationConditions>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip/>
++    </Action>
++    <Action name="nova_composer_pie_tools">
++      <icon></icon>
++      <text>Pie Menu: Tools</text>
++      <whatsThis/>
++      <toolTip>Pie Menu: Tools</toolTip>
++      <iconText>Pie Menu: Tools</iconText>
++      <activationFlags>0</activationFlags>
++      <activationConditions>0</activationConditions>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip/>
++    </Action>
++    <Action name="nova_composer_pie_blend_modes">
++      <icon></icon>
++      <text>Pie Menu: Blending Modes</text>
++      <whatsThis/>
++      <toolTip>Pie Menu: Blending Modes</toolTip>
++      <iconText>Pie Menu: Blending Modes</iconText>
++      <activationFlags>0</activationFlags>
++      <activationConditions>0</activationConditions>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip/>
++    </Action>
++    <Action name="nova_composer_pie_presets">
++      <icon></icon>
++      <text>Pie Menu: Brush Presets (tag)</text>
++      <whatsThis/>
++      <toolTip>Pie Menu: Brush Presets (tag)</toolTip>
++      <iconText>Pie Menu: Brush Presets (tag)</iconText>
++      <activationFlags>0</activationFlags>
++      <activationConditions>0</activationConditions>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip/>
++    </Action>
++    <Action name="nova_composer_pie_opacity">
++      <icon></icon>
++      <text>Pie Menu: Opacity</text>
++      <whatsThis/>
++      <toolTip>Pie Menu: Opacity</toolTip>
++      <iconText>Pie Menu: Opacity</iconText>
++      <activationFlags>0</activationFlags>
++      <activationConditions>0</activationConditions>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip/>
++    </Action>
++    <Action name="nova_composer_pie_tags">
++      <icon></icon>
++      <text>Pie Menu: Brush Preset Tag</text>
++      <whatsThis/>
++      <toolTip>Pie Menu: Brush Preset Tag</toolTip>
++      <iconText>Pie Menu: Brush Preset Tag</iconText>
++      <activationFlags>0</activationFlags>
++      <activationConditions>0</activationConditions>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip/>
++    </Action>
++    <Action name="nova_composer_track_size">
++      <icon></icon>
++      <text>Tracker: Brush Size (hold and drag left / right)</text>
++      <whatsThis/>
++      <toolTip>Tracker: Brush Size (hold and drag left / right)</toolTip>
++      <iconText>Tracker: Brush Size (hold and drag left / right)</iconText>
++      <activationFlags>0</activationFlags>
++      <activationConditions>0</activationConditions>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip/>
++    </Action>
++    <Action name="nova_composer_track_opacity">
++      <icon></icon>
++      <text>Tracker: Opacity (hold and drag left / right)</text>
++      <whatsThis/>
++      <toolTip>Tracker: Opacity (hold and drag left / right)</toolTip>
++      <iconText>Tracker: Opacity (hold and drag left / right)</iconText>
++      <activationFlags>0</activationFlags>
++      <activationConditions>0</activationConditions>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip/>
++    </Action>
++    <Action name="nova_composer_track_flow">
++      <icon></icon>
++      <text>Tracker: Flow (hold and drag left / right)</text>
++      <whatsThis/>
++      <toolTip>Tracker: Flow (hold and drag left / right)</toolTip>
++      <iconText>Tracker: Flow (hold and drag left / right)</iconText>
++      <activationFlags>0</activationFlags>
++      <activationConditions>0</activationConditions>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip/>
++    </Action>
++    <Action name="nova_composer_track_layer">
++      <icon></icon>
++      <text>Tracker: Active Layer (hold and drag up / down)</text>
++      <whatsThis/>
++      <toolTip>Tracker: Active Layer (hold and drag up / down)</toolTip>
++      <iconText>Tracker: Active Layer (hold and drag up / down)</iconText>
++      <activationFlags>0</activationFlags>
++      <activationConditions>0</activationConditions>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip/>
++    </Action>
++    <Action name="nova_composer_track_undo">
++      <icon></icon>
++      <text>Tracker: Undo History (hold and drag left / right)</text>
++      <whatsThis/>
++      <toolTip>Tracker: Undo History (hold and drag left / right)</toolTip>
++      <iconText>Tracker: Undo History (hold and drag left / right)</iconText>
++      <activationFlags>0</activationFlags>
++      <activationConditions>0</activationConditions>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip/>
++    </Action>
++    <Action name="nova_composer_temp_eraser">
++      <icon></icon>
++      <text>Temporary: Eraser (hold, or tap to toggle)</text>
++      <whatsThis/>
++      <toolTip>Temporary: Eraser (hold, or tap to toggle)</toolTip>
++      <iconText>Temporary: Eraser (hold, or tap to toggle)</iconText>
++      <activationFlags>0</activationFlags>
++      <activationConditions>0</activationConditions>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip/>
++    </Action>
++    <Action name="nova_composer_temp_alpha_lock">
++      <icon></icon>
++      <text>Temporary: Alpha Lock (hold, or tap to toggle)</text>
++      <whatsThis/>
++      <toolTip>Temporary: Alpha Lock (hold, or tap to toggle)</toolTip>
++      <iconText>Temporary: Alpha Lock (hold, or tap to toggle)</iconText>
++      <activationFlags>0</activationFlags>
++      <activationConditions>0</activationConditions>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip/>
++    </Action>
++    <Action name="nova_composer_temp_move">
++      <icon></icon>
++      <text>Temporary: Move Tool (hold, or tap to toggle)</text>
++      <whatsThis/>
++      <toolTip>Temporary: Move Tool (hold, or tap to toggle)</toolTip>
++      <iconText>Temporary: Move Tool (hold, or tap to toggle)</iconText>
++      <activationFlags>0</activationFlags>
++      <activationConditions>0</activationConditions>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip/>
++    </Action>
++    <Action name="nova_composer_temp_transform">
++      <icon></icon>
++      <text>Temporary: Transform Tool (hold, or tap to toggle)</text>
++      <whatsThis/>
++      <toolTip>Temporary: Transform Tool (hold, or tap to toggle)</toolTip>
++      <iconText>Temporary: Transform Tool (hold, or tap to toggle)</iconText>
++      <activationFlags>0</activationFlags>
++      <activationConditions>0</activationConditions>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip/>
++    </Action>
++    <Action name="nova_composer_temp_color_sampler">
++      <icon></icon>
++      <text>Temporary: Color Sampler (hold, or tap to toggle)</text>
++      <whatsThis/>
++      <toolTip>Temporary: Color Sampler (hold, or tap to toggle)</toolTip>
++      <iconText>Temporary: Color Sampler (hold, or tap to toggle)</iconText>
++      <activationFlags>0</activationFlags>
++      <activationConditions>0</activationConditions>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip/>
++    </Action>
++    <Action name="nova_composer_rotation">
++      <icon></icon>
++      <text>Rotation Selector: Canvas</text>
++      <whatsThis/>
++      <toolTip>Rotation Selector: Canvas</toolTip>
++      <iconText>Rotation Selector: Canvas</iconText>
++      <activationFlags>0</activationFlags>
++      <activationConditions>0</activationConditions>
++      <shortcut></shortcut>
++      <isCheckable>false</isCheckable>
++      <statusTip/>
++    </Action>
++  </Actions>
++</ActionCollection>
+diff --git a/libs/ui/CMakeLists.txt b/libs/ui/CMakeLists.txt
+index fc98bed..445bea4 100644
+--- a/libs/ui/CMakeLists.txt
++++ b/libs/ui/CMakeLists.txt
+@@ -382,6 +382,8 @@ set(kritaui_LIB_SRCS
+     input/KisCanvasOnlyAction.cpp
+     input/KisTouchGestureAction.cpp
+     input/KisBrushSizeOpacityGestureAction.cpp
++    input/KisNovaComposerAction.cpp
++    nova/KisNovaComposer.cpp
+     input/KisTouchHoldEventsPostponer.cpp
+     input/KisInputProfileMigrator.cpp
+ 
+diff --git a/libs/ui/KisMainWindow.cpp b/libs/ui/KisMainWindow.cpp
+index a619138..4f0a913 100644
+--- a/libs/ui/KisMainWindow.cpp
++++ b/libs/ui/KisMainWindow.cpp
+@@ -143,6 +143,7 @@
+ #include "KisApplication.h"
+ #include "kis_canvas2.h"
+ #include "kis_popup_palette.h"
++#include "nova/KisNovaComposer.h"
+ #include "kis_canvas_controller.h"
+ #include "kis_canvas_resource_provider.h"
+ #include "kis_clipboard.h"
+@@ -1981,6 +1982,60 @@ private:
+     bool m_wasOpen {false};
+ };
+ 
++/**
++ * Krita Nova (patch 85): the Brush Panel's Composer button (under the pop-up
++ * palette button): opens the Composer menu - the pie menus (tools, brushes,
++ * blending modes, opacity, brush tag), the rotation selector, eraser and
++ * alpha lock - in the middle of the canvas, to be tapped.
++ */
++class NovaComposerButton : public QAbstractButton
++{
++public:
++    NovaComposerButton(KisViewManager *viewManager, QWidget *parent)
++        : QAbstractButton(parent), m_viewManager(viewManager)
++    {
++        setObjectName(QStringLiteral("KritaNovaBrushPanelComposer"));
++        setToolTip(i18n("Composer: pie menus, rotation, eraser and alpha lock"));
++        setFixedSize(36, 36);
++        connect(this, &QAbstractButton::clicked, this, [this]() {
++            if (!m_viewManager || !m_viewManager->canvasBase()) return;
++            KisNovaComposer::instance()->tap(KisNovaComposer::PieLauncher, m_viewManager,
++                                             KisNovaComposer::canvasCenter(m_viewManager));
++        });
++    }
++
++private:
++    void paintEvent(QPaintEvent *) override
++    {
++        QPainter p(this);
++        p.setRenderHint(QPainter::Antialiasing, true);
++        if (isDown()) {
++            p.setPen(Qt::NoPen);
++            p.setBrush(palette().color(QPalette::Highlight));
++            p.drawRoundedRect(QRectF(rect()).adjusted(1, 1, -1, -1), 6, 6);
++        }
++        const QColor ink = isDown() ? palette().color(QPalette::HighlightedText)
++                                    : palette().color(QPalette::WindowText);
++        // the icon: a ring cut into four slices around a small hole
++        const QPointF c = QRectF(rect()).center();
++        const qreal outer = 11.5, inner = 4.0, gap = 1.2;
++        QPainterPath ring;
++        ring.addEllipse(c, outer, outer);
++        QPainterPath hole;
++        hole.addEllipse(c, inner, inner);
++        ring = ring.subtracted(hole);
++        QPainterPath cuts;
++        cuts.addRect(QRectF(c.x() - gap, c.y() - outer - 1, 2 * gap, 2 * outer + 2));
++        cuts.addRect(QRectF(c.x() - outer - 1, c.y() - gap, 2 * outer + 2, 2 * gap));
++        ring = ring.subtracted(cuts);
++        p.setPen(Qt::NoPen);
++        p.setBrush(ink);
++        p.drawPath(ring);
++    }
++
++    QPointer<KisViewManager> m_viewManager;
++};
++
+ /**
+  * Krita Nova (patch 61): the Brush Panel docks to the left, right or bottom
+  * edge of the window. Drop it (by its grip) within a short distance of an
+@@ -2364,6 +2419,8 @@ QDockWidget *createAndroidBrushPanel(QMainWindow *mainWindow, KisViewManager *vi
+ 
+     // Krita Nova (patch 62): pop-up palette on / off, at the very bottom
+     layout->addWidget(new NovaPopupPaletteButton(viewManager, container), 0, Qt::AlignHCenter);
++    // Krita Nova (patch 85): the Composer menu
++    layout->addWidget(new NovaComposerButton(viewManager, container), 0, Qt::AlignHCenter);
+ 
+     // Show it once the main window is on screen: a floating dock is a window
+     // of its own and is not shown along with the main window, and the saved
+diff --git a/libs/ui/KisViewManager.cpp b/libs/ui/KisViewManager.cpp
+index 0d561f9..903183f 100644
+--- a/libs/ui/KisViewManager.cpp
++++ b/libs/ui/KisViewManager.cpp
+@@ -15,6 +15,7 @@
+ 
+ 
+ #include "KisViewManager.h"
++#include "nova/KisNovaComposer.h"
+ #include <QPrinter>
+ 
+ #include <QAction>
+@@ -737,6 +738,9 @@ void KisViewManager::createActions()
+ {
+     KisConfig cfg(true);
+ 
++    // Krita Nova (patch 85): Composer keyboard shortcuts
++    KisNovaComposer::instance()->createActions(this);
++
+     d->saveIncremental = actionManager()->createAction("save_incremental_version");
+     connect(d->saveIncremental, SIGNAL(triggered()), this, SLOT(slotSaveIncremental()));
+ 
+diff --git a/libs/ui/input/KisNovaComposerAction.cpp b/libs/ui/input/KisNovaComposerAction.cpp
+new file mode 100644
+index 0000000..5575b27
+--- /dev/null
++++ b/libs/ui/input/KisNovaComposerAction.cpp
+@@ -0,0 +1,135 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "KisNovaComposerAction.h"
++
++#include <QCursor>
++#include <QTouchEvent>
++#include <QWidget>
++
++#include <klocalizedstring.h>
++
++#include "kis_input_manager.h"
++#include "kis_canvas2.h"
++#include "KisViewManager.h"
++#include "nova/KisNovaComposer.h"
++
++KisNovaComposerAction::KisNovaComposerAction()
++    : KisAbstractInputAction("Krita Nova Composer")
++{
++    setName(i18n("Krita Nova Composer"));
++    setDescription(i18n("Pie menus, cursor trackers, temporary switches and the rotation selector: "
++                        "hold and move, then release; a tap opens pie menus to be tapped"));
++
++    QHash<QString, int> shortcuts;
++    Q_FOREACH (KisNovaComposer::Feature f, KisNovaComposer::features()) {
++        shortcuts.insert(KisNovaComposer::featureName(f), int(f));
++    }
++    setShortcutIndexes(shortcuts);
++}
++
++KisNovaComposerAction::~KisNovaComposerAction()
++{
++}
++
++int KisNovaComposerAction::priority() const
++{
++    return 5;
++}
++
++bool KisNovaComposerAction::supportsHiResInputEvents(int shortcut) const
++{
++    Q_UNUSED(shortcut);
++    return true;
++}
++
++KisInputActionGroup KisNovaComposerAction::inputActionGroup(int shortcut) const
++{
++    Q_UNUSED(shortcut);
++    return ModifyingActionGroup;
++}
++
++QPoint KisNovaComposerAction::globalPosOf(const QEvent *event, bool *known)
++{
++    if (known) *known = false;
++    KisCanvas2 *canvas = inputManager() ? inputManager()->canvas() : nullptr;
++    QWidget *widget = canvas ? canvas->canvasWidget() : nullptr;
++    if (!event || !widget) return QCursor::pos();
++
++    switch (event->type()) {
++    case QEvent::TouchBegin:
++    case QEvent::TouchUpdate:
++    case QEvent::TouchEnd: {
++        const QTouchEvent *touch = static_cast<const QTouchEvent *>(event);
++        QPointF sum;
++        int count = 0;
++        Q_FOREACH (const QTouchEvent::TouchPoint &point, touch->touchPoints()) {
++            sum += point.pos();
++            count++;
++        }
++        if (count == 0) return m_lastGlobal;
++        if (known) *known = true;
++        return widget->mapToGlobal((sum / count).toPoint());
++    }
++    case QEvent::MouseMove:
++    case QEvent::MouseButtonPress:
++    case QEvent::MouseButtonRelease:
++    case QEvent::MouseButtonDblClick:
++    case QEvent::TabletMove:
++    case QEvent::TabletPress:
++    case QEvent::TabletRelease:
++        if (known) *known = true;
++        return widget->mapToGlobal(eventPosF(event).toPoint());
++    default:
++        return QCursor::pos(); // key shortcuts
++    }
++}
++
++void KisNovaComposerAction::begin(int shortcut, QEvent *event)
++{
++    KisAbstractInputAction::begin(shortcut, event);
++    m_active = false;
++
++    KisCanvas2 *canvas = inputManager() ? inputManager()->canvas() : nullptr;
++    KisViewManager *view = canvas ? canvas->viewManager() : nullptr;
++    if (!view) return;
++
++    bool known = false;
++    QPoint pos = globalPosOf(event, &known);
++    QWidget *widget = canvas->canvasWidget();
++    if (!known && widget && !widget->rect().contains(widget->mapFromGlobal(pos))) {
++        pos = KisNovaComposer::canvasCenter(view);
++    }
++    m_lastGlobal = pos;
++    KisNovaComposer::instance()->begin(KisNovaComposer::Feature(shortcut), view, pos);
++    m_active = KisNovaComposer::instance()->isActive();
++}
++
++void KisNovaComposerAction::inputEvent(QEvent *event)
++{
++    if (!m_active || !event) {
++        KisAbstractInputAction::inputEvent(event);
++        return;
++    }
++    if (event->type() != QEvent::TouchUpdate && event->type() != QEvent::MouseMove
++            && event->type() != QEvent::TabletMove) {
++        return;
++    }
++    m_lastGlobal = globalPosOf(event);
++    KisNovaComposer::instance()->move(m_lastGlobal);
++}
++
++void KisNovaComposerAction::end(QEvent *event)
++{
++    if (m_active) {
++        bool known = false;
++        const QPoint pos = globalPosOf(event, &known);
++        // the release of a touch has no points left: use the last position
++        KisNovaComposer::instance()->end(known ? pos : m_lastGlobal);
++    }
++    m_active = false;
++    KisAbstractInputAction::end(event);
++}
+diff --git a/libs/ui/input/KisNovaComposerAction.h b/libs/ui/input/KisNovaComposerAction.h
+new file mode 100644
+index 0000000..9b40dbf
+--- /dev/null
++++ b/libs/ui/input/KisNovaComposerAction.h
+@@ -0,0 +1,43 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef KIS_NOVA_COMPOSER_ACTION_H
++#define KIS_NOVA_COMPOSER_ACTION_H
++
++#include "kis_abstract_input_action.h"
++
++#include <QPoint>
++
++/**
++ * Krita Nova: the Composer's pie menus, cursor trackers, temporary switches
++ * and rotation selector as a canvas input action ("Krita Nova Composer" in
++ * Configure Krita > Canvas Input Settings), so they can be bound to a pen
++ * or mouse button (with or without keys) or a touch gesture. Hold and move,
++ * then release; a tap (or a tap gesture) opens pies and the dial to be
++ * tapped. The shortcut indexes are KisNovaComposer::Feature values.
++ */
++class KisNovaComposerAction : public KisAbstractInputAction
++{
++public:
++    KisNovaComposerAction();
++    ~KisNovaComposerAction() override;
++
++    void begin(int shortcut, QEvent *event) override;
++    void end(QEvent *event) override;
++    void inputEvent(QEvent *event) override;
++
++    bool supportsHiResInputEvents(int shortcut) const override;
++    KisInputActionGroup inputActionGroup(int shortcut) const override;
++    int priority() const override;
++
++private:
++    /// the event's position (the centre of the touch points), global
++    QPoint globalPosOf(const QEvent *event, bool *known = nullptr);
++    bool m_active {false};
++    QPoint m_lastGlobal;
++};
++
++#endif // KIS_NOVA_COMPOSER_ACTION_H
+diff --git a/libs/ui/input/kis_input_profile_manager.cpp b/libs/ui/input/kis_input_profile_manager.cpp
+index 2cdb9f0..9173750 100644
+--- a/libs/ui/input/kis_input_profile_manager.cpp
++++ b/libs/ui/input/kis_input_profile_manager.cpp
+@@ -35,6 +35,7 @@
+ #include "KisCanvasOnlyAction.h"
+ #include "KisTouchGestureAction.h"
+ #include "KisBrushSizeOpacityGestureAction.h"
++#include "KisNovaComposerAction.h"
+ #include "KisInputProfileMigrator.h"
+ 
+ 
+@@ -487,6 +488,7 @@ void KisInputProfileManager::Private::createActions()
+     actions.append(new KisZoomAndRotateAction());
+     actions.append(new KisTouchGestureAction());
+     actions.append(new KisBrushSizeOpacityGestureAction()); // Krita Nova
++    actions.append(new KisNovaComposerAction()); // Krita Nova (patch 85)
+ }
+ 
+ QString KisInputProfileManager::Private::profileFileName(const QString &profileName)
+diff --git a/libs/ui/nova/KisNovaComposer.cpp b/libs/ui/nova/KisNovaComposer.cpp
+new file mode 100644
+index 0000000..4565f09
+--- /dev/null
++++ b/libs/ui/nova/KisNovaComposer.cpp
+@@ -0,0 +1,1083 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "KisNovaComposer.h"
++
++#include <QApplication>
++#include <QCursor>
++#include <QKeyEvent>
++#include <QMouseEvent>
++#include <QIcon>
++#include <QFontMetrics>
++#include <QPixmap>
++#include <QPainter>
++#include <QPainterPath>
++#include <QTimer>
++#include <QWidget>
++#include <QtMath>
++#include <functional>
++
++#include <klocalizedstring.h>
++#include <kconfiggroup.h>
++#include <ksharedconfig.h>
++
++#include <KoCanvasResourceProvider.h>
++#include <KoCanvasResourcesIds.h>
++#include <KoCompositeOpRegistry.h>
++#include <KoToolManager.h>
++#include <KoToolRegistry.h>
++#include <KoToolFactoryBase.h>
++#include <KisResourceModel.h>
++#include <KisResourceTypes.h>
++#include <KisTagModel.h>
++#include <KisTagResourceModel.h>
++#include <KisTag.h>
++#include <kis_icon_utils.h>
++#include <KoResource.h>
++#include <kis_node.h>
++#include <brushengine/kis_paintop_preset.h>
++
++#include "KisViewManager.h"
++#include "KisMainWindow.h"
++#include "kis_canvas2.h"
++#include "kis_canvas_controller.h"
++#include "kis_action.h"
++#include "kis_action_manager.h"
++#include "kis_node_manager.h"
++#include "kis_paintop_box.h"
++#include "kis_floating_message.h"
++
++namespace {
++/// released within this time without moving: a tap
++const int TapTime = 250;
++/// ... and moved less than this (screen pixels)
++const qreal TapTravel = 12.0;
++/// trackers apply at most every UpdateInterval ms (see patch 55)
++const int UpdateInterval = 30;
++
++const QString ConfigGroup = QStringLiteral("KritaNovaComposer");
++
++QWidget *overlayParent(KisViewManager *view)
++{
++    return view ? static_cast<QWidget *>(view->mainWindow()) : nullptr;
++}
++
++/// angle of \p v, in degrees clockwise from straight up, in [0, 360)
++qreal clockAngle(const QPointF &v)
++{
++    qreal a = qRadiansToDegrees(qAtan2(v.x(), -v.y()));
++    if (a < 0) a += 360.0;
++    return a;
++}
++
++qreal normalized180(qreal a)
++{
++    while (a > 180.0) a -= 360.0;
++    while (a <= -180.0) a += 360.0;
++    return a;
++}
++}
++
++// ---------------------------------------------------------------------------
++// pie menu
++
++struct NovaPieItem {
++    QString label;
++    QIcon icon;
++    QString text;       ///< shown in the slice when there is no icon
++    bool current {false};
++    std::function<void()> activate;
++};
++
++/**
++ * A ring of choices around a center, drawn over the main window. While a
++ * key / button / finger is held it follows the pointer (transparent for
++ * input); after a tap it is interactive: click a slice, or outside / the
++ * middle / Esc to close.
++ */
++class NovaPieWidget : public QWidget
++{
++public:
++    NovaPieWidget(QWidget *parent, const QString &title, const QVector<NovaPieItem> &items)
++        : QWidget(parent), m_title(title), m_items(items)
++    {
++        setAttribute(Qt::WA_TransparentForMouseEvents, true);
++        setAttribute(Qt::WA_NoSystemBackground, true);
++        setFocusPolicy(Qt::StrongFocus);
++        const int n = qMax(1, m_items.size());
++        m_outer = n <= 8 ? 118.0 : (n <= 12 ? 140.0 : 160.0);
++        m_inner = 44.0;
++    }
++
++    void openAt(const QPoint &globalCenter)
++    {
++        QWidget *p = parentWidget();
++        if (!p) return;
++        setGeometry(p->rect());
++        QPointF c = mapFromGlobal(globalCenter);
++        const qreal margin = m_outer + 6;
++        c.setX(qBound(margin, c.x(), qMax(margin, width() - margin)));
++        c.setY(qBound(margin, c.y(), qMax(margin, height() - margin)));
++        m_center = c;
++        show();
++        raise();
++    }
++
++    QPoint globalCenter() const { return mapToGlobal(m_center.toPoint()); }
++
++    void pointerAt(const QPoint &globalPos)
++    {
++        const int h = indexAt(mapFromGlobal(globalPos), false);
++        if (h != m_hovered) { m_hovered = h; update(); }
++    }
++
++    void setInteractive()
++    {
++        m_interactive = true;
++        m_hovered = -1;
++        setAttribute(Qt::WA_TransparentForMouseEvents, false);
++        setMouseTracking(true);
++        setFocus(Qt::OtherFocusReason);
++        update();
++    }
++
++    /// activates the item under the pointer; false (and closes) if none
++    bool activateHovered()
++    {
++        if (m_hovered < 0 || m_hovered >= m_items.size()) { closePie(); return false; }
++        activateIndex(m_hovered);
++        return true;
++    }
++
++    void closePie()
++    {
++        hide();
++        deleteLater();
++    }
++
++protected:
++    int indexAt(const QPointF &pos, bool limitOuter) const
++    {
++        const QPointF v = pos - m_center;
++        const qreal dist = qSqrt(v.x() * v.x() + v.y() * v.y());
++        if (dist < m_inner) return -1;
++        if (limitOuter && dist > m_outer * 1.3) return -2;
++        const int n = m_items.size();
++        if (n == 0) return -1;
++        const qreal step = 360.0 / n;
++        return int((clockAngle(v) + step / 2.0) / step) % n;
++    }
++
++    void activateIndex(int i)
++    {
++        std::function<void()> fn = m_items[i].activate;
++        closePie();
++        if (fn) QTimer::singleShot(0, qApp, fn);
++    }
++
++    void mouseMoveEvent(QMouseEvent *e) override
++    {
++        if (!m_interactive) return;
++        const int h = qMax(-1, indexAt(e->pos(), true));
++        if (h != m_hovered) { m_hovered = h; update(); }
++    }
++
++    void mousePressEvent(QMouseEvent *e) override { e->accept(); }
++
++    void mouseReleaseEvent(QMouseEvent *e) override
++    {
++        if (!m_interactive) return;
++        const int i = indexAt(e->pos(), true);
++        if (i >= 0) activateIndex(i);
++        else closePie(); // the middle or outside
++    }
++
++    void keyPressEvent(QKeyEvent *e) override
++    {
++        if (e->key() == Qt::Key_Escape) { closePie(); return; }
++        QWidget::keyPressEvent(e);
++    }
++
++    void paintEvent(QPaintEvent *) override
++    {
++        QPainter p(this);
++        p.setRenderHint(QPainter::Antialiasing, true);
++        const QPalette pal = palette();
++        const QPointF c = m_center;
++        const qreal R = m_outer, r = m_inner;
++        const QRectF outerRect(c.x() - R, c.y() - R, 2 * R, 2 * R);
++        const QRectF innerRect(c.x() - r, c.y() - r, 2 * r, 2 * r);
++        const int n = m_items.size();
++
++        QColor bg = pal.color(QPalette::Window);
++        bg.setAlpha(240);
++        QColor line = pal.color(QPalette::WindowText);
++        line.setAlpha(70);
++
++        QPainterPath ring;
++        ring.addEllipse(outerRect);
++        QPainterPath hole;
++        hole.addEllipse(innerRect);
++        p.fillPath(ring.subtracted(hole), bg);
++
++        const qreal step = n > 0 ? 360.0 / n : 360.0;
++        for (int i = 0; i < n; i++) {
++            const qreal a = i * step; // clockwise from the top
++            const qreal qtStart = 90.0 - a + step / 2.0;
++            QPainterPath slice;
++            slice.arcMoveTo(outerRect, qtStart);
++            slice.arcTo(outerRect, qtStart, -step);
++            slice.arcTo(innerRect, qtStart - step, step);
++            slice.closeSubpath();
++
++            if (i == m_hovered) {
++                p.fillPath(slice, pal.color(QPalette::Highlight));
++            } else if (m_items[i].current) {
++                QColor cur = pal.color(QPalette::Highlight);
++                cur.setAlpha(80);
++                p.fillPath(slice, cur);
++            }
++            if (n > 1) {
++                p.setPen(QPen(line, 1.0));
++                p.setBrush(Qt::NoBrush);
++                p.drawPath(slice);
++            }
++
++            const qreal rad = (R + r) / 2.0;
++            const QPointF at(c.x() + rad * qSin(qDegreesToRadians(a)), c.y() - rad * qCos(qDegreesToRadians(a)));
++            const QColor ink = i == m_hovered ? pal.color(QPalette::HighlightedText) : pal.color(QPalette::WindowText);
++            if (!m_items[i].icon.isNull()) {
++                const int s = 30;
++                m_items[i].icon.paint(&p, QRect(int(at.x() - s / 2), int(at.y() - s / 2), s, s));
++            } else {
++                QFont f = font();
++                f.setPointSizeF(f.pointSizeF() * 0.85);
++                f.setBold(m_items[i].current);
++                p.setFont(f);
++                p.setPen(ink);
++                const qreal w = qMax(40.0, qMin(90.0, 2 * M_PI * rad / qMax(1, n) - 6));
++                const QRectF box(at.x() - w / 2, at.y() - 16, w, 32);
++                const QString t = QFontMetrics(f).elidedText(m_items[i].text, Qt::ElideRight, int(w));
++                p.drawText(box, Qt::AlignCenter, t);
++            }
++        }
++
++        p.setPen(QPen(line, 1.0));
++        p.setBrush(Qt::NoBrush);
++        p.drawEllipse(outerRect);
++
++        // the middle: the hovered item's name, or the menu's title
++        QFont f = font();
++        f.setPointSizeF(f.pointSizeF() * 0.85);
++        p.setFont(f);
++        p.setPen(pal.color(QPalette::WindowText));
++        const QString middle = (m_hovered >= 0 && m_hovered < n) ? m_items[m_hovered].label : m_title;
++        p.drawText(innerRect.adjusted(4, 4, -4, -4), Qt::AlignCenter | Qt::TextWordWrap, middle);
++    }
++
++private:
++    QString m_title;
++    QVector<NovaPieItem> m_items;
++    QPointF m_center;
++    qreal m_outer {118.0};
++    qreal m_inner {44.0};
++    int m_hovered {-1};
++    bool m_interactive {false};
++};
++
++// ---------------------------------------------------------------------------
++// rotation dial
++
++/**
++ * The canvas rotation as a dial: the angle of the pointer around the middle
++ * is the rotation (snapping to every 15 degrees within 4); in the middle the
++ * rotation stays as it was. After a tap it is interactive: drag on it, tap
++ * the middle to reset the rotation, Esc or a tap outside to close.
++ */
++class NovaDialWidget : public QWidget
++{
++public:
++    NovaDialWidget(QWidget *parent, qreal startRotation,
++                   std::function<void(qreal)> apply, std::function<void()> reset)
++        : QWidget(parent), m_start(startRotation), m_current(startRotation),
++          m_apply(apply), m_reset(reset)
++    {
++        setAttribute(Qt::WA_TransparentForMouseEvents, true);
++        setAttribute(Qt::WA_NoSystemBackground, true);
++        setFocusPolicy(Qt::StrongFocus);
++    }
++
++    void openAt(const QPoint &globalCenter)
++    {
++        QWidget *p = parentWidget();
++        if (!p) return;
++        setGeometry(p->rect());
++        QPointF c = mapFromGlobal(globalCenter);
++        const qreal margin = R + 6;
++        c.setX(qBound(margin, c.x(), qMax(margin, width() - margin)));
++        c.setY(qBound(margin, c.y(), qMax(margin, height() - margin)));
++        m_center = c;
++        show();
++        raise();
++    }
++
++    void pointerAt(const QPoint &globalPos) { pointerAtLocal(mapFromGlobal(globalPos)); }
++
++    void setInteractive()
++    {
++        m_interactive = true;
++        setAttribute(Qt::WA_TransparentForMouseEvents, false);
++        setFocus(Qt::OtherFocusReason);
++    }
++
++    void closeDial()
++    {
++        hide();
++        deleteLater();
++    }
++
++protected:
++    void pointerAtLocal(const QPointF &pos)
++    {
++        const QPointF v = pos - m_center;
++        const qreal dist = qSqrt(v.x() * v.x() + v.y() * v.y());
++        qreal target = m_start;
++        if (dist >= r) {
++            target = clockAngle(v);
++            const qreal snapped = qRound(target / 15.0) * 15.0;
++            if (qAbs(target - snapped) <= 4.0) target = snapped;
++        }
++        if (qAbs(normalized180(target - m_current)) < 0.05) return;
++        m_current = target;
++        if (m_apply) m_apply(target);
++        update();
++    }
++
++    qreal distanceFromCenter(const QPointF &pos) const
++    {
++        const QPointF v = pos - m_center;
++        return qSqrt(v.x() * v.x() + v.y() * v.y());
++    }
++
++    void mousePressEvent(QMouseEvent *e) override
++    {
++        if (!m_interactive) return;
++        m_pressDist = distanceFromCenter(e->pos());
++        m_dragging = m_pressDist >= r && m_pressDist <= R * 1.3;
++        if (m_dragging) pointerAtLocal(e->pos());
++    }
++
++    void mouseMoveEvent(QMouseEvent *e) override
++    {
++        if (m_interactive && m_dragging) pointerAtLocal(e->pos());
++    }
++
++    void mouseReleaseEvent(QMouseEvent *e) override
++    {
++        if (!m_interactive) return;
++        if (m_dragging) { m_dragging = false; return; } // keep it open for more
++        const qreal d = distanceFromCenter(e->pos());
++        if (m_pressDist < r && d < r) {
++            if (m_reset) m_reset();
++            m_current = 0.0;
++            m_start = 0.0;
++            update();
++            QTimer::singleShot(150, this, [this]() { closeDial(); });
++            return;
++        }
++        closeDial(); // a tap outside
++    }
++
++    void keyPressEvent(QKeyEvent *e) override
++    {
++        if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) {
++            closeDial();
++            return;
++        }
++        QWidget::keyPressEvent(e);
++    }
++
++    void paintEvent(QPaintEvent *) override
++    {
++        QPainter p(this);
++        p.setRenderHint(QPainter::Antialiasing, true);
++        const QPalette pal = palette();
++        const QPointF c = m_center;
++
++        QColor bg = pal.color(QPalette::Window);
++        bg.setAlpha(240);
++        QPainterPath ring;
++        ring.addEllipse(c, R, R);
++        QPainterPath hole;
++        hole.addEllipse(c, r, r);
++        p.fillPath(ring.subtracted(hole), bg);
++
++        QColor ink = pal.color(QPalette::WindowText);
++        for (int deg = 0; deg < 360; deg += 15) {
++            const bool major = deg % 90 == 0;
++            const qreal len = major ? 14.0 : 7.0;
++            const qreal s = qSin(qDegreesToRadians(qreal(deg))), co = qCos(qDegreesToRadians(qreal(deg)));
++            QColor tick = ink;
++            tick.setAlpha(major ? 200 : 110);
++            p.setPen(QPen(tick, major ? 2.0 : 1.0));
++            p.drawLine(QPointF(c.x() + (R - 3) * s, c.y() - (R - 3) * co),
++                       QPointF(c.x() + (R - 3 - len) * s, c.y() - (R - 3 - len) * co));
++        }
++
++        // the needle
++        const qreal a = qDegreesToRadians(m_current);
++        p.setPen(QPen(pal.color(QPalette::Highlight), 4.0, Qt::SolidLine, Qt::RoundCap));
++        p.drawLine(QPointF(c.x() + r * qSin(a), c.y() - r * qCos(a)),
++                   QPointF(c.x() + (R - 6) * qSin(a), c.y() - (R - 6) * qCos(a)));
++
++        p.setPen(ink);
++        QFont f = font();
++        f.setBold(true);
++        p.setFont(f);
++        qreal shown = normalized180(m_current);
++        p.drawText(QRectF(c.x() - r, c.y() - r, 2 * r, 2 * r), Qt::AlignCenter,
++                   i18nc("canvas rotation in degrees", "%1°", qRound(shown)));
++    }
++
++private:
++    const qreal R {120.0};
++    const qreal r {40.0};
++    QPointF m_center;
++    qreal m_start {0.0};
++    qreal m_current {0.0};
++    qreal m_pressDist {0.0};
++    bool m_dragging {false};
++    bool m_interactive {false};
++    std::function<void(qreal)> m_apply;
++    std::function<void()> m_reset;
++};
++
++// ---------------------------------------------------------------------------
++// the composer
++
++KisNovaComposer *KisNovaComposer::instance()
++{
++    static KisNovaComposer *s_instance = new KisNovaComposer();
++    return s_instance;
++}
++
++KisNovaComposer::~KisNovaComposer()
++{
++}
++
++KisNovaComposer::KisNovaComposer()
++    : QObject(qApp)
++{
++    m_applyTimer = new QTimer(this);
++    m_applyTimer->setSingleShot(true);
++    connect(m_applyTimer, &QTimer::timeout, this, [this]() { applyTracker(); });
++}
++
++QList<KisNovaComposer::Feature> KisNovaComposer::features()
++{
++    return {PieLauncher, PieTools, PieBlendModes, PiePresets, PieOpacity, PieTags,
++            TrackSize, TrackOpacity, TrackFlow, TrackLayer, TrackUndo,
++            TempEraser, TempAlphaLock, TempMoveTool, TempTransformTool, TempColorSampler,
++            RotationDial};
++}
++
++QString KisNovaComposer::featureName(Feature feature)
++{
++    switch (feature) {
++    case PieLauncher: return i18n("Composer Menu (all pie menus)");
++    case PieTools: return i18n("Pie Menu: Tools");
++    case PieBlendModes: return i18n("Pie Menu: Blending Modes");
++    case PiePresets: return i18n("Pie Menu: Brush Presets (tag)");
++    case PieOpacity: return i18n("Pie Menu: Opacity");
++    case PieTags: return i18n("Pie Menu: Brush Preset Tag");
++    case TrackSize: return i18n("Tracker: Brush Size (drag left / right)");
++    case TrackOpacity: return i18n("Tracker: Opacity (drag left / right)");
++    case TrackFlow: return i18n("Tracker: Flow (drag left / right)");
++    case TrackLayer: return i18n("Tracker: Active Layer (drag up / down)");
++    case TrackUndo: return i18n("Tracker: Undo History (drag left / right)");
++    case TempEraser: return i18n("Temporary: Eraser (hold, or tap to toggle)");
++    case TempAlphaLock: return i18n("Temporary: Alpha Lock (hold, or tap to toggle)");
++    case TempMoveTool: return i18n("Temporary: Move Tool (hold, or tap to toggle)");
++    case TempTransformTool: return i18n("Temporary: Transform Tool (hold, or tap to toggle)");
++    case TempColorSampler: return i18n("Temporary: Color Sampler (hold, or tap to toggle)");
++    case RotationDial: return i18n("Rotation Selector: Canvas");
++    }
++    return QString();
++}
++
++QString KisNovaComposer::actionName(Feature feature)
++{
++    switch (feature) {
++    case PieLauncher: return QStringLiteral("nova_composer_launcher");
++    case PieTools: return QStringLiteral("nova_composer_pie_tools");
++    case PieBlendModes: return QStringLiteral("nova_composer_pie_blend_modes");
++    case PiePresets: return QStringLiteral("nova_composer_pie_presets");
++    case PieOpacity: return QStringLiteral("nova_composer_pie_opacity");
++    case PieTags: return QStringLiteral("nova_composer_pie_tags");
++    case TrackSize: return QStringLiteral("nova_composer_track_size");
++    case TrackOpacity: return QStringLiteral("nova_composer_track_opacity");
++    case TrackFlow: return QStringLiteral("nova_composer_track_flow");
++    case TrackLayer: return QStringLiteral("nova_composer_track_layer");
++    case TrackUndo: return QStringLiteral("nova_composer_track_undo");
++    case TempEraser: return QStringLiteral("nova_composer_temp_eraser");
++    case TempAlphaLock: return QStringLiteral("nova_composer_temp_alpha_lock");
++    case TempMoveTool: return QStringLiteral("nova_composer_temp_move");
++    case TempTransformTool: return QStringLiteral("nova_composer_temp_transform");
++    case TempColorSampler: return QStringLiteral("nova_composer_temp_color_sampler");
++    case RotationDial: return QStringLiteral("nova_composer_rotation");
++    }
++    return QString();
++}
++
++bool KisNovaComposer::isPie(Feature feature)
++{
++    return feature >= PieLauncher && feature <= PieTags;
++}
++
++QPoint KisNovaComposer::canvasCenter(KisViewManager *view)
++{
++    KisCanvas2 *canvas = view ? view->canvasBase() : nullptr;
++    QWidget *w = canvas ? canvas->canvasWidget() : nullptr;
++    if (w) return w->mapToGlobal(w->rect().center());
++    QWidget *p = overlayParent(view);
++    return p ? p->mapToGlobal(p->rect().center()) : QCursor::pos();
++}
++
++void KisNovaComposer::createActions(KisViewManager *view)
++{
++    if (!view || !view->actionManager()) return;
++    QPointer<KisViewManager> v = view;
++    Q_FOREACH (Feature f, features()) {
++        KisAction *action = view->actionManager()->createAction(actionName(f));
++        if (!action) continue;
++        connect(action, &QAction::triggered, this, [this, f, v]() {
++            if (m_active || !v) return; // key auto-repeat
++            startKeyboardSession(f, v);
++        });
++    }
++}
++
++void KisNovaComposer::startKeyboardSession(Feature feature, KisViewManager *view)
++{
++    // the key to wait for: the last key of the action's shortcut
++    m_key = 0;
++    KisAction *action = view->actionManager() ? view->actionManager()->actionByName(actionName(feature)) : nullptr;
++    if (action && !action->shortcut().isEmpty()) {
++        const QKeySequence seq = action->shortcut();
++        m_key = int(seq[seq.count() - 1]) & ~int(Qt::KeyboardModifierMask);
++    }
++
++    QPoint pos = QCursor::pos();
++    KisCanvas2 *canvas = view->canvasBase();
++    QWidget *w = canvas ? canvas->canvasWidget() : nullptr;
++    if (!w || !w->rect().contains(w->mapFromGlobal(pos))) pos = canvasCenter(view);
++
++    begin(feature, view, pos);
++    if (!m_active) return;
++    if (m_key == 0) { // started from a menu: like a tap
++        end(pos);
++        return;
++    }
++    m_keyboard = true;
++    qApp->installEventFilter(this);
++}
++
++void KisNovaComposer::stopKeyboardSession()
++{
++    if (!m_keyboard) return;
++    m_keyboard = false;
++    m_key = 0;
++    qApp->removeEventFilter(this);
++}
++
++bool KisNovaComposer::eventFilter(QObject *watched, QEvent *event)
++{
++    if (m_keyboard && m_active) {
++        switch (event->type()) {
++        case QEvent::MouseMove:
++        case QEvent::TabletMove:
++        case QEvent::HoverMove:
++            move(QCursor::pos());
++            break;
++        case QEvent::KeyRelease: {
++            QKeyEvent *ke = static_cast<QKeyEvent *>(event);
++            if (!ke->isAutoRepeat() && ke->key() == m_key) {
++                // not eaten: the canvas input manager tracks the keys too
++                end(QCursor::pos());
++            }
++            break;
++        }
++        case QEvent::ApplicationDeactivate:
++            cancel();
++            break;
++        default:
++            break;
++        }
++    }
++    return QObject::eventFilter(watched, event);
++}
++
++void KisNovaComposer::begin(Feature feature, KisViewManager *view, const QPoint &globalPos)
++{
++    if (m_active) cancel();
++    if (m_pie) m_pie->closePie();
++    if (m_dial) m_dial->closeDial();
++    if (!view || !view->canvasBase() || !overlayParent(view)) return;
++
++    m_view = view;
++    m_feature = feature;
++    m_active = true;
++    m_start = m_last = globalPos;
++    m_travel = 0.0;
++    m_since.start();
++
++    if (isPie(feature)) {
++        beginPie(globalPos);
++    } else if (feature >= TrackSize && feature <= TrackUndo) {
++        beginTracker(globalPos);
++    } else if (feature >= TempEraser && feature <= TempColorSampler) {
++        beginTemporary();
++    } else if (feature == RotationDial) {
++        beginDial(globalPos);
++    }
++}
++
++void KisNovaComposer::move(const QPoint &globalPos)
++{
++    if (!m_active) return;
++    m_travel += (globalPos - m_last).manhattanLength();
++    m_last = globalPos;
++
++    if (isPie(m_feature)) {
++        if (m_pie) m_pie->pointerAt(globalPos);
++    } else if (m_feature >= TrackSize && m_feature <= TrackUndo) {
++        moveTracker(globalPos);
++    } else if (m_feature == RotationDial) {
++        if (m_dial) m_dial->pointerAt(globalPos);
++    }
++}
++
++void KisNovaComposer::end(const QPoint &globalPos)
++{
++    if (!m_active) return;
++    move(globalPos);
++    const bool tap = m_since.elapsed() < TapTime && m_travel < TapTravel;
++    m_active = false;
++    stopKeyboardSession();
++
++    if (isPie(m_feature)) {
++        if (!m_pie) return;
++        if (tap) m_pie->setInteractive();
++        else m_pie->activateHovered();
++    } else if (m_feature >= TrackSize && m_feature <= TrackUndo) {
++        applyTracker();
++        m_applyTimer->stop();
++        m_lastMessage.clear();
++    } else if (m_feature >= TempEraser && m_feature <= TempColorSampler) {
++        endTemporary(!tap);
++    } else if (m_feature == RotationDial) {
++        if (!m_dial) return;
++        if (tap) m_dial->setInteractive();
++        else m_dial->closeDial();
++    }
++}
++
++void KisNovaComposer::cancel()
++{
++    if (!m_active) return;
++    m_active = false;
++    stopKeyboardSession();
++    if (m_pie) m_pie->closePie();
++    if (m_dial) m_dial->closeDial();
++    m_applyTimer->stop();
++    m_pendingValue = -1.0;
++    if (m_feature >= TempEraser && m_feature <= TempColorSampler) endTemporary(true);
++}
++
++void KisNovaComposer::tap(Feature feature, KisViewManager *view, const QPoint &globalPos)
++{
++    begin(feature, view, globalPos);
++    end(globalPos);
++}
++
++// ---------------------------------------------------------------------------
++// pies
++
++void KisNovaComposer::beginPie(const QPoint &globalPos)
++{
++    KisViewManager *view = m_view;
++    KisCanvas2 *canvas = view->canvasBase();
++    KoCanvasResourceProvider *resources = canvas ? canvas->resourceManager() : nullptr;
++    if (!resources) { m_active = false; return; }
++
++    QPointer<KisViewManager> v = view;
++    QVector<NovaPieItem> items;
++    QString title;
++
++    // sub-menus open where this one was
++    auto openSub = [this, v](Feature f) {
++        return [this, v, f]() {
++            if (!v) return;
++            const QPoint at = m_lastPieCenter.isNull() ? canvasCenter(v) : m_lastPieCenter;
++            tap(f, v, at);
++        };
++    };
++
++    switch (m_feature) {
++    case PieLauncher: {
++        title = i18n("Composer");
++        auto add = [&](const QString &label, const QString &icon, std::function<void()> fn) {
++            NovaPieItem it;
++            it.label = label;
++            it.text = label;
++            it.icon = icon.isEmpty() ? QIcon() : KisIconUtils::loadIcon(icon);
++            it.activate = fn;
++            items.append(it);
++        };
++        add(i18n("Tools"), QString(), openSub(PieTools));
++        add(i18n("Brushes"), QString(), openSub(PiePresets));
++        add(i18n("Blending"), QString(), openSub(PieBlendModes));
++        add(i18n("Opacity"), QString(), openSub(PieOpacity));
++        add(i18n("Rotate"), QString(), openSub(RotationDial));
++        add(i18n("Eraser"), QStringLiteral("draw-eraser"), [v]() {
++            if (v && v->actionManager())
++                if (KisAction *a = v->actionManager()->actionByName("erase_action")) a->trigger();
++        });
++        add(i18n("Alpha Lock"), QStringLiteral("transparency-locked"), [v]() {
++            if (v && v->actionManager())
++                if (KisAction *a = v->actionManager()->actionByName("preserve_alpha")) a->trigger();
++        });
++        add(i18n("Brush Tag"), QString(), openSub(PieTags));
++        break;
++    }
++    case PieTools: {
++        title = i18n("Tools");
++        static const QStringList ids = {
++            "KritaShape/KisToolBrush", "KritaShape/KisToolLine", "KritaTransform/KisToolMove",
++            "KisToolTransform", "KisToolSelectRectangular", "KisToolSelectOutline",
++            "KisToolSelectContiguous", "KritaFill/KisToolFill", "KritaFill/KisToolGradient",
++            "KritaSelected/KisToolColorSampler", "SvgTextTool", "KisToolCrop"};
++        const QString active = view->toolManager() ? view->toolManager()->activeToolId() : QString();
++        Q_FOREACH (const QString &id, ids) {
++            KoToolFactoryBase *factory = KoToolRegistry::instance()->value(id);
++            if (!factory) continue;
++            NovaPieItem it;
++            it.label = factory->toolTip();
++            it.text = it.label;
++            it.icon = KisIconUtils::loadIcon(factory->iconName());
++            it.current = id == active;
++            it.activate = [v, id]() {
++                if (v && v->toolManager()) v->toolManager()->switchToolRequested(id);
++            };
++            items.append(it);
++        }
++        break;
++    }
++    case PieBlendModes: {
++        title = i18n("Blending Mode");
++        static const QStringList ids = {
++            COMPOSITE_OVER, COMPOSITE_MULT, COMPOSITE_SCREEN, COMPOSITE_OVERLAY,
++            COMPOSITE_SOFT_LIGHT_PHOTOSHOP, COMPOSITE_HARD_LIGHT, COMPOSITE_DODGE,
++            COMPOSITE_BURN, COMPOSITE_DARKEN, COMPOSITE_LIGHTEN, COMPOSITE_ADD, COMPOSITE_COLOR};
++        const QString current = resources->resource(KoCanvasResource::CurrentCompositeOp).toString();
++        Q_FOREACH (const QString &id, ids) {
++            NovaPieItem it;
++            it.label = KoCompositeOpRegistry::instance().getKoID(id).name();
++            it.text = it.label;
++            it.current = id == current;
++            it.activate = [v, id]() {
++                KisCanvas2 *c = v ? v->canvasBase() : nullptr;
++                if (c && c->resourceManager()) c->resourceManager()->setResource(KoCanvasResource::CurrentCompositeOp, id);
++            };
++            items.append(it);
++        }
++        break;
++    }
++    case PieOpacity: {
++        title = i18n("Opacity");
++        const qreal current = resources->resource(KoCanvasResource::Opacity).toDouble();
++        static const QList<int> values = {100, 90, 75, 60, 50, 40, 25, 10};
++        Q_FOREACH (int percent, values) {
++            NovaPieItem it;
++            it.label = i18n("Opacity %1%", percent);
++            it.text = QStringLiteral("%1%").arg(percent);
++            it.current = qAbs(current - percent / 100.0) < 0.005;
++            it.activate = [v, percent]() {
++                KisCanvas2 *c = v ? v->canvasBase() : nullptr;
++                if (c && c->resourceManager()) c->resourceManager()->setResource(KoCanvasResource::Opacity, percent / 100.0);
++            };
++            items.append(it);
++        }
++        break;
++    }
++    case PieTags: {
++        title = i18n("Brush Tag");
++        const QString saved = KConfigGroup(KSharedConfig::openConfig(), ConfigGroup).readEntry("presetTag", QString());
++        KisTagModel tags(ResourceType::PaintOpPresets);
++        for (int row = 0; row < tags.rowCount() && items.size() < 16; row++) {
++            KisTagSP tag = tags.tagForIndex(tags.index(row, 0));
++            if (!tag || tag->id() < 0) continue; // "All", "All Untagged"
++            NovaPieItem it;
++            it.label = tag->name();
++            it.text = tag->name();
++            it.current = tag->url() == saved;
++            const QString url = tag->url();
++            it.activate = [this, v, url]() {
++                KConfigGroup(KSharedConfig::openConfig(), ConfigGroup).writeEntry("presetTag", url);
++                if (v) tap(PiePresets, v, m_lastPieCenter.isNull() ? canvasCenter(v) : m_lastPieCenter);
++            };
++            items.append(it);
++        }
++        break;
++    }
++    case PiePresets: {
++        const QString saved = KConfigGroup(KSharedConfig::openConfig(), ConfigGroup).readEntry("presetTag", QString());
++        KisTagModel tags(ResourceType::PaintOpPresets);
++        KisTagSP chosen;
++        for (int row = 0; row < tags.rowCount(); row++) {
++            KisTagSP tag = tags.tagForIndex(tags.index(row, 0));
++            if (!tag || tag->id() < 0) continue;
++            if (!chosen) chosen = tag; // the first tag, if none was picked
++            if (!saved.isEmpty() && tag->url() == saved) { chosen = tag; break; }
++        }
++
++        QVector<KoResourceSP> presets;
++        if (chosen) {
++            title = chosen->name();
++            KisTagResourceModel model(ResourceType::PaintOpPresets);
++            model.setTagsFilter(QVector<KisTagSP>{chosen});
++            for (int row = 0; row < model.rowCount() && presets.size() < 15; row++) {
++                KoResourceSP r = model.resourceForIndex(model.index(row, 0));
++                if (r) presets.append(r);
++            }
++        } else {
++            title = i18n("Brushes");
++            KisResourceModel model(ResourceType::PaintOpPresets);
++            for (int row = 0; row < model.rowCount() && presets.size() < 15; row++) {
++                KoResourceSP r = model.resourceForIndex(model.index(row, 0));
++                if (r) presets.append(r);
++            }
++        }
++
++        KisPaintOpPresetSP current = resources->resource(KoCanvasResource::CurrentPaintOpPreset).value<KisPaintOpPresetSP>();
++        Q_FOREACH (KoResourceSP r, presets) {
++            NovaPieItem it;
++            it.label = r->name();
++            it.text = r->name();
++            if (!r->image().isNull()) it.icon = QIcon(QPixmap::fromImage(r->image()));
++            it.current = current && current->resourceId() == r->resourceId();
++            it.activate = [v, r]() {
++                if (v && v->paintOpBox()) v->paintOpBox()->resourceSelected(r);
++            };
++            items.append(it);
++        }
++        NovaPieItem pick;
++        pick.label = i18n("Choose another tag");
++        pick.text = i18n("Tag…");
++        pick.activate = openSub(PieTags);
++        items.append(pick);
++        break;
++    }
++    default:
++        break;
++    }
++
++    if (items.isEmpty()) { m_active = false; return; }
++    m_pie = new NovaPieWidget(overlayParent(view), title, items);
++    m_pie->openAt(globalPos);
++    m_lastPieCenter = m_pie->globalCenter();
++}
++
++// ---------------------------------------------------------------------------
++// cursor trackers
++
++void KisNovaComposer::beginTracker(const QPoint &globalPos)
++{
++    Q_UNUSED(globalPos);
++    m_steps = 0;
++    m_pendingValue = -1.0;
++    m_lastMessage.clear();
++    m_sinceApply.invalidate();
++    KisCanvas2 *canvas = m_view->canvasBase();
++    KoCanvasResourceProvider *resources = canvas ? canvas->resourceManager() : nullptr;
++    if (!resources) { m_active = false; return; }
++    switch (m_feature) {
++    case TrackSize: m_startValue = resources->resource(KoCanvasResource::Size).toDouble(); break;
++    case TrackOpacity: m_startValue = resources->resource(KoCanvasResource::Opacity).toDouble(); break;
++    case TrackFlow: m_startValue = resources->resource(KoCanvasResource::Flow).toDouble(); break;
++    default: m_startValue = 0.0; break;
++    }
++}
++
++void KisNovaComposer::moveTracker(const QPoint &globalPos)
++{
++    if (!m_view) return;
++    const QPoint d = globalPos - m_start;
++
++    switch (m_feature) {
++    case TrackSize:
++        // log scale: 150 px to the right doubles the size
++        m_pendingValue = qBound(1.0, m_startValue * qPow(2.0, d.x() / 150.0), 10000.0);
++        break;
++    case TrackOpacity:
++    case TrackFlow:
++        m_pendingValue = qBound(0.01, m_startValue + d.x() / 400.0, 1.0);
++        break;
++    case TrackLayer: {
++        KisNodeManager *nodes = m_view->nodeManager();
++        if (!nodes) return;
++        const int target = int(-d.y() / 40); // up: the layer above
++        bool changed = false;
++        while (m_steps < target) { nodes->activateNextNode(); m_steps++; changed = true; }
++        while (m_steps > target) { nodes->activatePreviousNode(); m_steps--; changed = true; }
++        if (changed && m_view->activeNode()) showMessage(i18n("Layer: %1", m_view->activeNode()->name()));
++        return;
++    }
++    case TrackUndo: {
++        KisActionManager *actions = m_view->actionManager();
++        if (!actions) return;
++        const int target = int(d.x() / 30); // left: undo, right: redo
++        KisAction *undo = actions->actionByName("edit_undo");
++        KisAction *redo = actions->actionByName("edit_redo");
++        while (m_steps > target && undo) { undo->trigger(); m_steps--; showMessage(i18n("Undo")); }
++        while (m_steps < target && redo) { redo->trigger(); m_steps++; showMessage(i18n("Redo")); }
++        return;
++    }
++    default:
++        return;
++    }
++
++    if (!m_sinceApply.isValid() || m_sinceApply.elapsed() >= UpdateInterval) {
++        applyTracker();
++    } else if (!m_applyTimer->isActive()) {
++        m_applyTimer->start(UpdateInterval - int(m_sinceApply.elapsed()));
++    }
++}
++
++void KisNovaComposer::applyTracker()
++{
++    m_applyTimer->stop();
++    if (m_pendingValue < 0.0 || !m_view) return;
++    KisCanvas2 *canvas = m_view->canvasBase();
++    KoCanvasResourceProvider *resources = canvas ? canvas->resourceManager() : nullptr;
++    if (!resources) return;
++
++    KoCanvasResource::CanvasResourceId id = KoCanvasResource::Size;
++    if (m_feature == TrackOpacity) id = KoCanvasResource::Opacity;
++    else if (m_feature == TrackFlow) id = KoCanvasResource::Flow;
++    else if (m_feature != TrackSize) return;
++
++    const qreal current = resources->resource(id).toDouble();
++    const qreal step = id == KoCanvasResource::Size ? (m_pendingValue < 10.0 ? 0.05 : 0.5) : 0.005;
++    if (qAbs(current - m_pendingValue) >= step) {
++        resources->setResource(id, m_pendingValue);
++        if (id == KoCanvasResource::Size) {
++            showMessage(i18n("Brush size: %1 px", QString::number(m_pendingValue, 'f', m_pendingValue < 10 ? 1 : 0)));
++        } else if (id == KoCanvasResource::Opacity) {
++            showMessage(i18n("Opacity: %1%", qRound(m_pendingValue * 100)));
++        } else {
++            showMessage(i18n("Flow: %1%", qRound(m_pendingValue * 100)));
++        }
++    }
++    m_pendingValue = -1.0;
++    m_sinceApply.restart();
++}
++
++void KisNovaComposer::showMessage(const QString &text)
++{
++    if (!m_view || text == m_lastMessage) return;
++    m_lastMessage = text;
++    m_view->showFloatingMessage(text, QIcon(), 1000, KisFloatingMessage::High);
++}
++
++// ---------------------------------------------------------------------------
++// temporary switches
++
++namespace {
++QString temporaryToolId(KisNovaComposer::Feature f)
++{
++    switch (f) {
++    case KisNovaComposer::TempMoveTool: return QStringLiteral("KritaTransform/KisToolMove");
++    case KisNovaComposer::TempTransformTool: return QStringLiteral("KisToolTransform");
++    case KisNovaComposer::TempColorSampler: return QStringLiteral("KritaSelected/KisToolColorSampler");
++    default: return QString();
++    }
++}
++}
++
++void KisNovaComposer::beginTemporary()
++{
++    KisViewManager *view = m_view;
++    if (m_feature == TempEraser || m_feature == TempAlphaLock) {
++        KisAction *a = view->actionManager()
++                ? view->actionManager()->actionByName(m_feature == TempEraser ? "erase_action" : "preserve_alpha")
++                : nullptr;
++        if (a) a->trigger();
++        return;
++    }
++
++    KoToolManager *tools = view->toolManager();
++    if (!tools) return;
++    const QString target = temporaryToolId(m_feature);
++    const QString active = tools->activeToolId();
++    if (active == target) {
++        // already there (tapped before): go back
++        m_previousTool.clear();
++        if (!m_toggleBack.isEmpty()) tools->switchToolRequested(m_toggleBack);
++        return;
++    }
++    m_previousTool = active;
++    tools->switchToolRequested(target);
++}
++
++void KisNovaComposer::endTemporary(bool held)
++{
++    KisViewManager *view = m_view;
++    if (!view) return;
++    if (m_feature == TempEraser || m_feature == TempAlphaLock) {
++        if (!held) return; // a tap toggles
++        KisAction *a = view->actionManager()
++                ? view->actionManager()->actionByName(m_feature == TempEraser ? "erase_action" : "preserve_alpha")
++                : nullptr;
++        if (a) a->trigger();
++        return;
++    }
++    if (m_previousTool.isEmpty()) return;
++    if (held) {
++        if (view->toolManager()) view->toolManager()->switchToolRequested(m_previousTool);
++    } else {
++        m_toggleBack = m_previousTool; // the next tap goes back there
++    }
++    m_previousTool.clear();
++}
++
++// ---------------------------------------------------------------------------
++// rotation selector
++
++void KisNovaComposer::beginDial(const QPoint &globalPos)
++{
++    KisCanvas2 *canvas = m_view->canvasBase();
++    KisCanvasController *controller = canvas ? dynamic_cast<KisCanvasController *>(canvas->canvasController()) : nullptr;
++    if (!controller) { m_active = false; return; }
++    QPointer<KisViewManager> v = m_view;
++
++    auto controllerOf = [v]() -> KisCanvasController * {
++        KisCanvas2 *c = v ? v->canvasBase() : nullptr;
++        return c ? dynamic_cast<KisCanvasController *>(c->canvasController()) : nullptr;
++    };
++    auto apply = [controllerOf](qreal target) {
++        KisCanvasController *c = controllerOf();
++        if (!c) return;
++        const qreal delta = normalized180(target - c->rotation());
++        if (qAbs(delta) > 0.01) c->rotateCanvas(delta);
++    };
++    auto reset = [controllerOf]() {
++        if (KisCanvasController *c = controllerOf()) c->resetCanvasRotation();
++    };
++
++    m_dial = new NovaDialWidget(overlayParent(m_view), controller->rotation(), apply, reset);
++    m_dial->openAt(globalPos);
++}
+diff --git a/libs/ui/nova/KisNovaComposer.h b/libs/ui/nova/KisNovaComposer.h
+new file mode 100644
+index 0000000..e2a128d
+--- /dev/null
++++ b/libs/ui/nova/KisNovaComposer.h
+@@ -0,0 +1,139 @@
++/*
++ *  SPDX-FileCopyrightText: 2026 Krita Nova
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef KIS_NOVA_COMPOSER_H
++#define KIS_NOVA_COMPOSER_H
++
++#include <QObject>
++#include <QPointer>
++#include <QPoint>
++#include <QElapsedTimer>
++#include <QString>
++
++#include <kritaui_export.h>
++
++class KisViewManager;
++class QTimer;
++class NovaPieWidget;
++class NovaDialWidget;
++
++/**
++ * Krita Nova "Composer": native versions of Shortcut Composer's pie menus,
++ * cursor trackers, temporary keys and rotation selector, working on every
++ * platform (Android included).
++ *
++ * Everything goes through one session at a time:
++ *   begin(feature, view, globalPos) -> move(globalPos)... -> end(globalPos)
++ *
++ * Triggers:
++ *  - keyboard shortcuts (Settings > Configure Krita > Keyboard Shortcuts,
++ *    "Krita Nova Composer"): hold the key, move the pointer, release;
++ *  - canvas input actions (Canvas Input Settings, "Krita Nova Composer"):
++ *    a pen / mouse button, or a touch gesture;
++ *  - the Brush Panel's Composer button.
++ *
++ * A quick tap (released within TapTime ms without moving) opens a pie or
++ * dial that stays open to be clicked / tapped, toggles a temporary switch,
++ * and resets the canvas rotation for the rotation selector.
++ */
++class KRITAUI_EXPORT KisNovaComposer : public QObject
++{
++    Q_OBJECT
++public:
++    enum Feature {
++        PieLauncher = 0,
++        PieTools,
++        PieBlendModes,
++        PiePresets,
++        PieOpacity,
++        PieTags,
++        TrackSize = 10,
++        TrackOpacity,
++        TrackFlow,
++        TrackLayer,
++        TrackUndo,
++        TempEraser = 20,
++        TempAlphaLock,
++        TempMoveTool,
++        TempTransformTool,
++        TempColorSampler,
++        RotationDial = 30,
++    };
++
++    static KisNovaComposer *instance();
++    ~KisNovaComposer() override;
++
++    /// every feature, in menu order
++    static QList<Feature> features();
++    static QString featureName(Feature feature);
++    /// "nova_composer_pie_tools" ...
++    static QString actionName(Feature feature);
++    static bool isPie(Feature feature);
++
++    /// keyboard shortcuts: one KisAction per feature in \p view's action manager
++    void createActions(KisViewManager *view);
++
++    void begin(Feature feature, KisViewManager *view, const QPoint &globalPos);
++    void move(const QPoint &globalPos);
++    void end(const QPoint &globalPos);
++    void cancel();
++    bool isActive() const { return m_active; }
++
++    /// opens \p feature as if tapped at \p globalPos (pies and the dial stay open)
++    void tap(Feature feature, KisViewManager *view, const QPoint &globalPos);
++
++    /// the middle of \p view's canvas, in global coordinates
++    static QPoint canvasCenter(KisViewManager *view);
++
++    bool eventFilter(QObject *watched, QEvent *event) override;
++
++private:
++    KisNovaComposer();
++
++    void beginPie(const QPoint &globalPos);
++    void beginTracker(const QPoint &globalPos);
++    void moveTracker(const QPoint &globalPos);
++    void applyTracker();
++    void beginTemporary();
++    void endTemporary(bool held);
++    void beginDial(const QPoint &globalPos);
++
++    void showMessage(const QString &text);
++    void startKeyboardSession(Feature feature, KisViewManager *view);
++    void stopKeyboardSession();
++
++    QPointer<KisViewManager> m_view;
++    Feature m_feature {PieLauncher};
++    bool m_active {false};
++    QPoint m_start;
++    QPoint m_last;
++    qreal m_travel {0.0};
++    QElapsedTimer m_since;
++
++    // trackers
++    qreal m_startValue {0.0};
++    qreal m_pendingValue {-1.0};
++    int m_steps {0};
++    QTimer *m_applyTimer {nullptr};
++    QElapsedTimer m_sinceApply;
++    QString m_lastMessage;
++
++    // temporary switches
++    QString m_previousTool;
++    QString m_toggleBack;
++
++    // where the last pie opened (its sub-menus open there)
++    QPoint m_lastPieCenter;
++
++    // keyboard sessions: the key to wait for
++    int m_key {0};
++    bool m_keyboard {false};
++
++    QPointer<NovaPieWidget> m_pie;
++    QPointer<NovaDialWidget> m_dial;
++};
++
++#endif // KIS_NOVA_COMPOSER_H
